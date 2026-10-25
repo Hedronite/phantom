@@ -1,0 +1,20 @@
+[package]
+name = "phantom-fractal"
+description = "Phantom command line: `phantom-fractal` and `fract`."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "phantom-fractal"
+path = "src/main.rs"
+
+[[bin]]
+name = "fract"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }

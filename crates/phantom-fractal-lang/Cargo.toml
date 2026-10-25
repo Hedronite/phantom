@@ -1,0 +1,9 @@
+[package]
+name = "phantom-fractal-lang"
+description = "Language trait for Phantom extractors."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
