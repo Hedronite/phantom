@@ -89,51 +89,6 @@ CREATE VIRTUAL TABLE symbols_fts USING fts5(
     tokenize="unicode61 separators '_:'"
 );
 
-CREATE TRIGGER symbols_ai AFTER INSERT ON symbols BEGIN
-  INSERT INTO symbols_fts(rowid, name, qual_name, signature, doc_summary, path)
-  VALUES (
-    new.id,
-    new.name,
-    new.qual_name,
-    COALESCE(new.signature, ''),
-    COALESCE(new.doc_summary, ''),
-    (SELECT path FROM files WHERE id = new.file_id)
-  );
-END;
-CREATE TRIGGER symbols_ad AFTER DELETE ON symbols BEGIN
-  INSERT INTO symbols_fts(symbols_fts, rowid, name, qual_name, signature, doc_summary, path)
-  VALUES (
-    'delete',
-    old.id,
-    old.name,
-    old.qual_name,
-    COALESCE(old.signature, ''),
-    COALESCE(old.doc_summary, ''),
-    (SELECT path FROM files WHERE id = old.file_id)
-  );
-END;
-CREATE TRIGGER symbols_au AFTER UPDATE ON symbols BEGIN
-  INSERT INTO symbols_fts(symbols_fts, rowid, name, qual_name, signature, doc_summary, path)
-  VALUES (
-    'delete',
-    old.id,
-    old.name,
-    old.qual_name,
-    COALESCE(old.signature, ''),
-    COALESCE(old.doc_summary, ''),
-    (SELECT path FROM files WHERE id = old.file_id)
-  );
-  INSERT INTO symbols_fts(rowid, name, qual_name, signature, doc_summary, path)
-  VALUES (
-    new.id,
-    new.name,
-    new.qual_name,
-    COALESCE(new.signature, ''),
-    COALESCE(new.doc_summary, ''),
-    (SELECT path FROM files WHERE id = new.file_id)
-  );
-END;
-
 CREATE TABLE refs(
     id INTEGER PRIMARY KEY,
     file_id INTEGER NOT NULL REFERENCES files ON DELETE CASCADE,
@@ -234,8 +189,56 @@ pub(crate) fn meta_table_exists(conn: &Connection) -> Result<bool, StoreError> {
     Ok(count > 0)
 }
 
+pub(crate) const TRIGGERS_SQL: &str = r#"
+CREATE TRIGGER IF NOT EXISTS symbols_ai AFTER INSERT ON symbols BEGIN
+  INSERT INTO symbols_fts(rowid, name, qual_name, signature, doc_summary, path)
+  VALUES (
+    new.id,
+    new.name,
+    new.qual_name,
+    COALESCE(new.signature, ''),
+    COALESCE(new.doc_summary, ''),
+    (SELECT path FROM files WHERE id = new.file_id)
+  );
+END;
+CREATE TRIGGER IF NOT EXISTS symbols_ad AFTER DELETE ON symbols BEGIN
+  INSERT INTO symbols_fts(symbols_fts, rowid, name, qual_name, signature, doc_summary, path)
+  VALUES (
+    'delete',
+    old.id,
+    old.name,
+    old.qual_name,
+    COALESCE(old.signature, ''),
+    COALESCE(old.doc_summary, ''),
+    (SELECT path FROM files WHERE id = old.file_id)
+  );
+END;
+CREATE TRIGGER IF NOT EXISTS symbols_au AFTER UPDATE ON symbols BEGIN
+  INSERT INTO symbols_fts(symbols_fts, rowid, name, qual_name, signature, doc_summary, path)
+  VALUES (
+    'delete',
+    old.id,
+    old.name,
+    old.qual_name,
+    COALESCE(old.signature, ''),
+    COALESCE(old.doc_summary, ''),
+    (SELECT path FROM files WHERE id = old.file_id)
+  );
+  INSERT INTO symbols_fts(rowid, name, qual_name, signature, doc_summary, path)
+  VALUES (
+    new.id,
+    new.name,
+    new.qual_name,
+    COALESCE(new.signature, ''),
+    COALESCE(new.doc_summary, ''),
+    (SELECT path FROM files WHERE id = new.file_id)
+  );
+END;
+"#;
+
 pub(crate) fn create(conn: &Connection) -> Result<(), StoreError> {
     conn.execute_batch(SCHEMA_SQL)?;
+    conn.execute_batch(TRIGGERS_SQL)?;
     conn.execute(
         "INSERT INTO meta(key, value) VALUES ('producer', ?1)",
         [PRODUCER],
@@ -248,7 +251,7 @@ pub(crate) fn create(conn: &Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
-pub(crate) fn check_stamp(conn: &Connection) -> Result<(), StoreError> {
+pub(crate) fn check_stamp(conn: &Connection) -> Result<i64, StoreError> {
     match meta_get(conn, "producer")? {
         None => return Err(StoreError::MissingProducer),
         Some(value) if value == PRODUCER => {}
@@ -261,7 +264,7 @@ pub(crate) fn check_stamp(conn: &Connection) -> Result<(), StoreError> {
     if found > SCHEMA_VERSION {
         return Err(StoreError::SchemaNewer { found });
     }
-    if found != SCHEMA_VERSION {
+    if found != 1 && found != SCHEMA_VERSION {
         return Err(StoreError::UnreadableStamp);
     }
     let user_version = user_version(conn)?;
@@ -271,6 +274,23 @@ pub(crate) fn check_stamp(conn: &Connection) -> Result<(), StoreError> {
             user_version,
         });
     }
+    Ok(found)
+}
+
+/// Moves a version-1 database to [`SCHEMA_VERSION`] in one transaction.
+pub(crate) fn migrate_v1_to_v2(conn: &mut Connection) -> Result<(), StoreError> {
+    let tx = conn.transaction()?;
+    tx.execute_batch(TRIGGERS_SQL)?;
+    tx.execute(
+        "INSERT INTO symbols_fts(symbols_fts) VALUES ('rebuild')",
+        [],
+    )?;
+    tx.execute(
+        "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+        [SCHEMA_VERSION.to_string()],
+    )?;
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    tx.commit()?;
     Ok(())
 }
 

@@ -347,3 +347,29 @@ fn open_ledger_match_is_bound_and_a_quote_cannot_change_sql() {
     assert_eq!(crate::phrase_quote("a\"b"), "\"a\"\"b\"");
     assert_eq!(store.match_count(tricky).expect("quoted"), 0);
 }
+
+#[test]
+fn version_1_database_indexes_open_ledger_on_open() {
+    let db = TempDb::new("v1");
+    assert_outside_workspace(db.path());
+    drop(Store::open(db.path()).expect("create"));
+    {
+        let conn = Connection::open(db.path()).expect("sqlite");
+        conn.execute_batch(
+            "DROP TRIGGER symbols_ai;
+             DROP TRIGGER symbols_ad;
+             DROP TRIGGER symbols_au;
+             UPDATE meta SET value = '1' WHERE key = 'schema_version';
+             PRAGMA user_version = 1;",
+        )
+        .expect("downgrade");
+    }
+    let mut store = Store::open(db.path()).expect("migrate");
+    assert_eq!(store.schema_version().expect("schema"), SCHEMA_VERSION);
+    assert_eq!(store.user_version().expect("user_version"), SCHEMA_VERSION);
+    let language = RustLanguage::new().expect("grammar");
+    store
+        .put_source("src/lib.rs", "pub fn open_ledger() {}\\n", 0, &language)
+        .expect("put");
+    assert!(store.match_count("open_ledger").expect("match") >= 1);
+}

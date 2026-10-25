@@ -21,7 +21,7 @@ pub const PRODUCER: &str = "phantom-fractal";
 
 /// Schema this binary creates and will open. A higher `meta.schema_version`
 /// is refused.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Open failure, or a write that could not be stored.
 #[derive(Debug)]
@@ -135,11 +135,14 @@ impl Store {
     }
 
     fn open_existing(path: &Path) -> Result<Self, StoreError> {
-        let conn = Connection::open_with_flags(path, open_flags(false))?;
+        let mut conn = Connection::open_with_flags(path, open_flags(false))?;
         if !schema::meta_table_exists(&conn)? {
             return Err(StoreError::ForeignDatabase);
         }
-        schema::check_stamp(&conn)?;
+        let version = schema::check_stamp(&conn)?;
+        if version < SCHEMA_VERSION {
+            schema::migrate_v1_to_v2(&mut conn)?;
+        }
         harden(&conn)?;
         enable_wal(&conn)?;
         Ok(Self { conn })
