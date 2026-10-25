@@ -12,3 +12,11 @@ version = "0.0.0"
 dependencies = [
  "phantom-fractal-lang",
 ]
+
+[[package]]
+name = "phantom-fractal-proto"
+version = "0.0.0"
+
+[[package]]
+name = "phantom-fractal-store"
+version = "0.0.0"
