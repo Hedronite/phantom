@@ -373,3 +373,50 @@ fn version_1_database_indexes_open_ledger_on_open() {
         .expect("put");
     assert!(store.match_count("open_ledger").expect("match") >= 1);
 }
+
+#[test]
+fn existing_open_ledger_matches_after_version_1_open() {
+    assert_eq!(SCHEMA_VERSION, 2);
+    let db = TempDb::new("pre");
+    assert_outside_workspace(db.path());
+    drop(Store::open(db.path()).expect("create"));
+    {
+        let conn = Connection::open(db.path()).expect("sqlite");
+        conn.execute_batch(
+            "DROP TRIGGER symbols_ai;
+             DROP TRIGGER symbols_ad;
+             DROP TRIGGER symbols_au;
+             UPDATE meta SET value = '1' WHERE key = 'schema_version';
+             PRAGMA user_version = 1;
+             INSERT INTO files(path, lang, blake3, size, mtime_ns, generated, parse_status)
+             VALUES ('src/lib.rs', 'rust', X'00', 1, 0, 0, 'ok');
+             INSERT INTO symbols(
+               file_id, kind, name, qual_name, stable_key, visibility, start_line
+             ) VALUES (
+               1, 'function', 'open_ledger', 'open_ledger',
+               'src/lib.rs#open_ledger#function#0', 'public', 1
+             );",
+        )
+        .expect("seed");
+    }
+    let store = Store::open(db.path()).expect("migrate");
+    assert_eq!(store.schema_version().expect("schema"), 2);
+    assert!(store.match_count("open_ledger").expect("match") >= 1);
+}
+
+#[test]
+fn schema_three_fails_to_open() {
+    let db = TempDb::new("v3");
+    assert_outside_workspace(db.path());
+    let conn = Connection::open(db.path()).expect("sqlite");
+    conn.execute_batch(
+        "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+         INSERT INTO meta(key, value) VALUES ('producer', 'phantom-fractal');
+         INSERT INTO meta(key, value) VALUES ('schema_version', '3');
+         PRAGMA user_version = 3;",
+    )
+    .expect("stamp");
+    drop(conn);
+    let opened = Store::open(db.path());
+    assert!(matches!(opened, Err(StoreError::SchemaNewer { found: 3 })));
+}
