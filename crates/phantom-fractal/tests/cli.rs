@@ -1,5 +1,5 @@
-//! Both binaries print one version line and refuse every command but
-//! `index` and `find`.
+//! Both binaries print one version line, list `index` and `find` in help,
+//! and refuse every other command.
 
 use std::process::{Command, Output};
 
@@ -18,8 +18,8 @@ fn run(bin: &str, args: &[&str]) -> Output {
 }
 
 #[test]
-fn version_help_and_bare_print_the_version_line() {
-    let cases: [&[&str]; 5] = [&["--version"], &["-V"], &["--help"], &["-h"], &[]];
+fn version_prints_the_version_line() {
+    let cases: [&[&str]; 2] = [&["--version"], &["-V"]];
     for bin in BINS {
         for args in cases {
             let out = run(bin, args);
@@ -30,6 +30,26 @@ fn version_help_and_bare_print_the_version_line() {
                 "{bin} {args:?}"
             );
             assert!(out.stderr.is_empty(), "{bin} {args:?} wrote stderr");
+        }
+    }
+}
+
+/// `--help` and `-h` exit 0. A bare run is usage, so it exits 1, not clap's 2.
+#[test]
+fn help_lists_index_and_find() {
+    let cases: [(&[&str], i32); 3] = [(&["--help"], 0), (&["-h"], 0), (&[], 1)];
+    for bin in BINS {
+        for (args, code) in cases {
+            let out = run(bin, args);
+            assert_eq!(out.status.code(), Some(code), "{bin} {args:?}");
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(text.contains("index"), "{bin} {args:?}\n{text}");
+            assert!(text.contains("find"), "{bin} {args:?}\n{text}");
+            assert!(text.contains("Usage"), "{bin} {args:?}\n{text}");
         }
     }
 }

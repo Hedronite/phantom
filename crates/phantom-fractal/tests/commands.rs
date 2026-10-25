@@ -57,6 +57,27 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
+/// The one `graph.db` under `root`.
+fn find_database(root: &Path) -> PathBuf {
+    let found: Vec<PathBuf> = snapshot(root)
+        .into_keys()
+        .filter(|rel| rel.file_name().is_some_and(|name| name == "graph.db"))
+        .map(|rel| root.join(rel))
+        .collect();
+    assert_eq!(found.len(), 1, "expected one graph.db: {found:?}");
+    found.into_iter().next().expect("one database")
+}
+
+/// Every string in `value`, at any depth.
+fn strings(value: &Value) -> Vec<&str> {
+    match value {
+        Value::String(text) => vec![text.as_str()],
+        Value::Array(items) => items.iter().flat_map(strings).collect(),
+        Value::Object(map) => map.values().flat_map(strings).collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Every path under `root` with its bytes; directories map to nothing.
 fn snapshot(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
     let mut out = BTreeMap::new();
@@ -101,8 +122,12 @@ impl Fixture {
     }
 
     fn index(&self, bin: &str) -> (Option<i32>, Value) {
+        envelope(&self.index_output(bin))
+    }
+
+    fn index_output(&self, bin: &str) -> Output {
         let repo = self.repo.path().to_str().expect("utf-8 temp path");
-        envelope(&self.run(bin, &["index", repo]))
+        self.run(bin, &["index", repo])
     }
 }
 
@@ -124,10 +149,9 @@ fn index_writes_a_stamped_database_outside_the_tree() {
         assert_eq!(env["schema"], 1, "{bin}: {env}");
         assert_eq!(env["error"], Value::Null, "{bin}: {env}");
         assert!(env["data"]["written"].as_u64() >= Some(1), "{bin}: {env}");
+        assert_eq!(env["data"]["unchanged"], 0, "{bin}: {env}");
 
-        let database = PathBuf::from(env["data"]["database"].as_str().expect("database"));
-        assert!(database.starts_with(fixture.data.path()), "{bin}: {env}");
-        assert!(!database.starts_with(fixture.repo.path()), "{bin}: {env}");
+        let database = find_database(fixture.data.path());
         let store = Store::open(&database).expect("open the index");
         assert_eq!(
             store.producer().expect("producer").as_deref(),
@@ -141,6 +165,46 @@ fn index_writes_a_stamped_database_outside_the_tree() {
             snapshot(fixture.repo.path()),
             before,
             "{bin} changed the tree"
+        );
+    }
+}
+
+#[test]
+fn index_json_holds_no_absolute_path() {
+    for bin in BINS {
+        let fixture = Fixture::new();
+        let out = fixture.index_output(bin);
+        let text = String::from_utf8_lossy(&out.stdout);
+        let (code, env) = envelope(&out);
+        assert_eq!(code, Some(0), "{bin}: {env}");
+        let data = fixture.data.path().to_str().expect("utf-8");
+        let repo = fixture.repo.path().to_str().expect("utf-8");
+        assert!(
+            !text.contains(data),
+            "{bin} printed the data directory: {text}"
+        );
+        assert!(!text.contains(repo), "{bin} printed the index path: {text}");
+        assert!(
+            !text.contains("graph.db"),
+            "{bin} printed the database: {text}"
+        );
+        for value in strings(&env) {
+            assert!(
+                !Path::new(value).is_absolute(),
+                "{bin} printed an absolute path {value:?}: {text}"
+            );
+        }
+        let mut keys: Vec<&str> = env["data"]
+            .as_object()
+            .expect("data is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["not_utf8", "skipped", "unchanged", "written"],
+            "{bin}: {text}"
         );
     }
 }
@@ -195,6 +259,23 @@ impl Fixture {
     fn find(&self, bin: &str, query: &str) -> (Option<i32>, Value) {
         envelope(&self.run(bin, &["find", query]))
     }
+
+    /// Adds `count` files under `src/`, each defining `pub fn dup`.
+    fn plant_dups(&self, count: usize) {
+        for n in 0..count {
+            let path = self.repo.path().join(format!("src/dup_{n:03}.rs"));
+            fs::write(path, "// one dup\n\npub fn dup() {}\n").expect("write dup");
+        }
+    }
+}
+
+/// `data.hits` and `data.truncated` of a `find` envelope.
+fn hits(env: &Value) -> (&Vec<Value>, bool) {
+    let hits = env["data"]["hits"].as_array().expect("data.hits is a list");
+    let truncated = env["data"]["truncated"]
+        .as_bool()
+        .expect("data.truncated is a bool");
+    (hits, truncated)
 }
 
 #[test]
@@ -207,7 +288,8 @@ fn find_returns_an_indexed_name() {
         assert_eq!(code, Some(0), "{bin}: {env}");
         assert_eq!(env["ok"], true, "{bin}: {env}");
         assert_eq!(env["schema"], 1, "{bin}: {env}");
-        let hits = env["data"].as_array().expect("data is a list");
+        let (hits, truncated) = hits(&env);
+        assert!(!truncated, "{bin}: {env}");
         assert_eq!(hits.len(), 1, "{bin}: {env}");
         assert_eq!(hits[0]["name"], "open_ledger", "{bin}: {env}");
         assert_eq!(hits[0]["kind"], "function", "{bin}: {env}");
@@ -235,7 +317,7 @@ fn find_with_repo_works_from_another_directory() {
         .expect("run fract");
     let (code, env) = envelope(&out);
     assert_eq!(code, Some(0), "{env}");
-    assert_eq!(env["data"][0]["name"], "open_ledger", "{env}");
+    assert_eq!(env["data"]["hits"][0]["name"], "open_ledger", "{env}");
 }
 
 #[test]
@@ -257,13 +339,56 @@ fn find_of_an_absent_name_is_an_empty_list() {
             let (code, env) = fixture.find(bin, query);
             assert_eq!(code, Some(0), "{bin} {query:?}: {env}");
             assert_eq!(env["ok"], true, "{bin} {query:?}: {env}");
-            assert_eq!(
-                env["data"],
-                Value::Array(Vec::new()),
-                "{bin} {query:?}: {env}"
-            );
+            let (hits, truncated) = hits(&env);
+            assert!(hits.is_empty(), "{bin} {query:?}: {env}");
+            assert!(!truncated, "{bin} {query:?}: {env}");
         }
     }
+}
+
+#[test]
+fn find_over_the_cap_returns_100_in_path_order_and_truncated() {
+    let fixture = Fixture::new();
+    fixture.plant_dups(101);
+    fixture.index(BINS[1]);
+    for bin in BINS {
+        let (code, env) = fixture.find(bin, "dup");
+        assert_eq!(code, Some(0), "{bin}: {env}");
+        assert_eq!(env["ok"], true, "{bin}: {env}");
+        let (hits, truncated) = hits(&env);
+        assert!(truncated, "{bin}: {env}");
+        assert_eq!(hits.len(), 100, "{bin}: {env}");
+        let keys: Vec<(&str, u64)> = hits
+            .iter()
+            .map(|hit| {
+                assert_eq!(hit["name"], "dup", "{bin}: {hit}");
+                (
+                    hit["path"].as_str().expect("path"),
+                    hit["line"].as_u64().expect("line"),
+                )
+            })
+            .collect();
+        let expected: Vec<(String, u64)> = (0..100)
+            .map(|n| (format!("src/dup_{n:03}.rs"), 3))
+            .collect();
+        let expected: Vec<(&str, u64)> = expected
+            .iter()
+            .map(|(path, line)| (path.as_str(), *line))
+            .collect();
+        assert_eq!(keys, expected, "{bin}: hits are not the first 100 by path");
+    }
+}
+
+#[test]
+fn find_at_the_cap_is_not_truncated() {
+    let fixture = Fixture::new();
+    fixture.plant_dups(100);
+    fixture.index(BINS[0]);
+    let (code, env) = fixture.find(BINS[1], "dup");
+    assert_eq!(code, Some(0), "{env}");
+    let (hits, truncated) = hits(&env);
+    assert!(!truncated, "{env}");
+    assert_eq!(hits.len(), 100, "{env}");
 }
 
 #[test]

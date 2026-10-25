@@ -1,8 +1,9 @@
 //! Phantom command line. Builds as both `phantom-fractal` and `fract`.
 //!
 //! `index PATH` stores the Rust files under PATH in a database in the data
-//! directory. `find NAME` looks symbols up in that database. Both print the
-//! JSON envelope from `phantom-fractal-proto`. There are no other commands.
+//! directory. `find NAME` looks symbols up in that database and returns at
+//! most 100. Both print the JSON envelope from `phantom-fractal-proto`.
+//! There are no other commands.
 
 #![forbid(unsafe_code)]
 
@@ -10,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use phantom_fractal_extract::{IndexError, IndexReport};
 use phantom_fractal_lang::{Item, Visibility};
 use phantom_fractal_lang_rust::RustLanguage;
@@ -21,19 +22,22 @@ use serde::Serialize;
 /// Canon exit 1: usage or internal error.
 const EXIT_ERROR: u8 = 1;
 
-/// Both binary names print the same text, so the name is fixed here
-/// rather than taken from argv[0].
+/// Most hits one `find` returns.
+const FIND_CAP: usize = 100;
+
+// Both binary names print the same text, so the name is fixed here
+// rather than taken from argv[0].
 #[derive(Parser)]
 #[command(
     name = "phantom-fractal",
     bin_name = "phantom-fractal",
     version,
-    help_template = "{name} {version}",
+    arg_required_else_help = true,
     disable_help_subcommand = true
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Command>,
+    command: Command,
 }
 
 #[derive(Subcommand)]
@@ -50,10 +54,9 @@ enum Command {
     },
 }
 
-/// `data` of a successful `index`.
+/// `data` of a successful `index`. It holds counts only, never a path.
 #[derive(Serialize)]
 struct IndexSummary {
-    database: String,
     written: usize,
     unchanged: usize,
     not_utf8: usize,
@@ -61,15 +64,22 @@ struct IndexSummary {
 }
 
 impl IndexSummary {
-    fn new(database: &Path, report: &IndexReport) -> Self {
+    fn new(report: &IndexReport) -> Self {
         Self {
-            database: database.to_string_lossy().into_owned(),
             written: report.written.len(),
             unchanged: report.unchanged.len(),
             not_utf8: report.not_utf8.len(),
             skipped: report.skipped.len(),
         }
     }
+}
+
+/// `data` of a successful `find`. `truncated` is true when more than
+/// [`FIND_CAP`] symbols matched and only the first are in `hits`.
+#[derive(Serialize)]
+struct FindResult {
+    hits: Vec<SymbolHit>,
+    truncated: bool,
 }
 
 /// One `find` result. `path` is relative to the indexed tree.
@@ -140,9 +150,8 @@ fn main() -> ExitCode {
         Err(err) => return clap_exit(&err),
     };
     match cli.command {
-        None => print_version(),
-        Some(Command::Index { path }) => emit(index(&path)),
-        Some(Command::Find { query, repo }) => emit(find(&query, &repo)),
+        Command::Index { path } => emit(index(&path)),
+        Command::Find { query, repo } => emit(find(&query, &repo)),
     }
 }
 
@@ -167,15 +176,15 @@ fn index(path: &Path) -> Result<IndexSummary, Failure> {
         .map_err(|err| Failure::new(ErrorKind::Usage, format!("extract: {err}")))?;
     let mut store = Store::open(&database)?;
     let report = phantom_fractal_extract::index(&root, &mut store, &language)?;
-    Ok(IndexSummary::new(&database, &report))
+    Ok(IndexSummary::new(&report))
 }
 
-/// Indexed symbols under `repo` named exactly `query`, in walk order, then
-/// source order within a file.
+/// Indexed symbols under `repo` named exactly `query`, ordered by path and
+/// then line, at most [`FIND_CAP`] of them.
 ///
 /// The store's bound FTS match answers an absent name without a walk.
 /// Otherwise each `.rs` file the walk keeps is read back from the store.
-fn find(query: &str, repo: &Path) -> Result<Vec<SymbolHit>, Failure> {
+fn find(query: &str, repo: &Path) -> Result<FindResult, Failure> {
     let root = repo
         .canonicalize()
         .map_err(|_| Failure::new(ErrorKind::NotFound, "repo path not found"))?;
@@ -188,7 +197,10 @@ fn find(query: &str, repo: &Path) -> Result<Vec<SymbolHit>, Failure> {
     }
     let store = Store::open(&database)?;
     if query.is_empty() || store.match_count(query)? == 0 {
-        return Ok(Vec::new());
+        return Ok(FindResult {
+            hits: Vec::new(),
+            truncated: false,
+        });
     }
     let walk = phantom_fractal_extract::walk(&root)
         .map_err(|err| Failure::new(ErrorKind::Usage, format!("walk failed: {err}")))?;
@@ -200,7 +212,10 @@ fn find(query: &str, repo: &Path) -> Result<Vec<SymbolHit>, Failure> {
             }
         }
     }
-    Ok(hits)
+    hits.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
+    let truncated = hits.len() > FIND_CAP;
+    hits.truncate(FIND_CAP);
+    Ok(FindResult { hits, truncated })
 }
 
 /// `path` made absolute, with its longest existing prefix canonicalized, so
@@ -231,14 +246,8 @@ fn emit<T: Serialize>(result: Result<T, Failure>) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(EXIT_ERROR))
 }
 
-fn print_version() -> ExitCode {
-    match Cli::command().print_help() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(_) => ExitCode::from(EXIT_ERROR),
-    }
-}
-
-/// Help and version exit 0. Usage errors exit 1, not clap's 2.
+/// Help and version exit 0. A bare run prints help and exits 1 (usage),
+/// not clap's 2. Other usage errors exit 1 as well.
 fn clap_exit(err: &clap::Error) -> ExitCode {
     let code = if err.use_stderr() {
         ExitCode::from(EXIT_ERROR)
