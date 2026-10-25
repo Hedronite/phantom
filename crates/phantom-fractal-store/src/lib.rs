@@ -13,7 +13,8 @@ mod schema;
 use std::path::Path;
 
 use phantom_fractal_lang::{Extract, ExtractError, Item, ItemKind, Language, Visibility};
-use rusqlite::Connection;
+use rusqlite::config::DbConfig;
+use rusqlite::{Connection, OpenFlags};
 
 /// Producer stamp written into `meta`.
 pub const PRODUCER: &str = "phantom-fractal";
@@ -27,6 +28,8 @@ pub const SCHEMA_VERSION: i64 = 1;
 pub enum StoreError {
     /// SQLite returned an error.
     Sqlite(rusqlite::Error),
+    /// Creating the database file failed.
+    Io(std::io::Error),
     /// `meta` has no `producer` row.
     MissingProducer,
     /// `producer` is present and is not [`PRODUCER`].
@@ -45,6 +48,10 @@ pub enum StoreError {
     },
     /// The stamp is present but not a schema this binary understands.
     UnreadableStamp,
+    /// An existing SQLite file has no `meta` table, so it is not ours.
+    ForeignDatabase,
+    /// `row_count` was asked for a table this crate does not expose.
+    UnknownTable,
     /// The extractor failed before any row was written.
     Extract(ExtractError),
     /// A stored kind is not one this slice writes.
@@ -57,6 +64,7 @@ impl std::fmt::Display for StoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Sqlite(err) => write!(f, "sqlite: {err}"),
+            Self::Io(err) => write!(f, "io: {err}"),
             Self::MissingProducer => f.write_str("database has no producer row"),
             Self::ForeignProducer => f.write_str("producer is not phantom-fractal"),
             Self::SchemaNewer { found } => {
@@ -70,6 +78,8 @@ impl std::fmt::Display for StoreError {
                 "user_version {user_version} does not match schema_version {schema_version}"
             ),
             Self::UnreadableStamp => f.write_str("schema stamp is not readable"),
+            Self::ForeignDatabase => f.write_str("database is not a phantom-fractal index"),
+            Self::UnknownTable => f.write_str("table name is not allowed"),
             Self::Extract(err) => write!(f, "extract: {err}"),
             Self::UnknownKind(kind) => write!(f, "unknown item kind {kind}"),
             Self::UnknownVisibility(text) => write!(f, "unknown visibility {text}"),
@@ -81,6 +91,7 @@ impl std::error::Error for StoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Sqlite(err) => Some(err),
+            Self::Io(err) => Some(err),
             Self::Extract(err) => Some(err),
             _ => None,
         }
@@ -99,26 +110,38 @@ pub struct Store {
 }
 
 impl Store {
-    /// Opens `path`, creating the schema when the database has no `meta` table.
+    /// Opens `path`.
     ///
-    /// A database that already has `meta` and no `producer` row is left
-    /// unchanged and returns [`StoreError::MissingProducer`].
+    /// A missing path is created with mode `0600` and the canon schema.
+    /// An existing SQLite file with no `meta` table, or a `producer` other
+    /// than [`PRODUCER`], is left unchanged and returns an error.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        let conn = Connection::open(path)?;
-        Self::from_connection(conn)
+        if path.exists() {
+            Self::open_existing(path)
+        } else {
+            Self::open_new(path)
+        }
     }
 
-    fn from_connection(mut conn: Connection) -> Result<Self, StoreError> {
-        conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    fn open_new(path: &Path) -> Result<Self, StoreError> {
+        create_private_file(path)?;
+        let mut conn = Connection::open_with_flags(path, open_flags(true))?;
+        harden(&conn)?;
+        enable_wal(&conn)?;
+        let tx = conn.transaction()?;
+        schema::create(&tx)?;
+        tx.commit()?;
+        Ok(Self { conn })
+    }
+
+    fn open_existing(path: &Path) -> Result<Self, StoreError> {
+        let conn = Connection::open_with_flags(path, open_flags(false))?;
         if !schema::meta_table_exists(&conn)? {
-            conn.execute_batch("PRAGMA journal_mode = WAL;")?;
-            let tx = conn.transaction()?;
-            schema::create(&tx)?;
-            tx.commit()?;
-            return Ok(Self { conn });
+            return Err(StoreError::ForeignDatabase);
         }
         schema::check_stamp(&conn)?;
-        conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+        harden(&conn)?;
+        enable_wal(&conn)?;
         Ok(Self { conn })
     }
 
@@ -133,6 +156,18 @@ impl Store {
     ) -> Result<(), StoreError> {
         let extract = language.extract(source).map_err(StoreError::Extract)?;
         self.insert_extract(path, source, mtime_ns, language.name(), &extract)
+    }
+
+    pub fn trusted_schema_is_off(&self) -> Result<bool, StoreError> {
+        trusted_schema_off(&self.conn)
+    }
+
+    pub fn synchronous_is_normal(&self) -> Result<bool, StoreError> {
+        synchronous_is_normal(&self.conn)
+    }
+
+    pub fn defensive_is_on(&self) -> Result<bool, StoreError> {
+        defensive_on(&self.conn)
     }
 
     /// Items previously stored for `path`, in insert order.
@@ -192,6 +227,126 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+}
+
+/// Flags for [`Store::open`]. `SQLITE_OPEN_URI` is never set.
+pub(crate) fn open_flags(create: bool) -> OpenFlags {
+    let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    if create {
+        flags |= OpenFlags::SQLITE_OPEN_CREATE;
+    }
+    flags
+}
+
+fn create_private_file(path: &Path) -> Result<(), StoreError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(StoreError::Io)?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path).map_err(StoreError::Io)?;
+    Ok(())
+}
+
+fn harden(conn: &Connection) -> Result<(), StoreError> {
+    conn.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         PRAGMA trusted_schema = OFF;",
+    )?;
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+    Ok(())
+}
+
+fn enable_wal(conn: &Connection) -> Result<(), StoreError> {
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;",
+    )?;
+    Ok(())
+}
+
+/// `PRAGMA trusted_schema` is off.
+pub(crate) fn trusted_schema_off(conn: &Connection) -> Result<bool, StoreError> {
+    let value: i64 = conn.pragma_query_value(None, "trusted_schema", |row| row.get(0))?;
+    Ok(value == 0)
+}
+
+/// `PRAGMA synchronous` is `NORMAL` (1).
+pub(crate) fn synchronous_is_normal(conn: &Connection) -> Result<bool, StoreError> {
+    let value: i64 = conn.pragma_query_value(None, "synchronous", |row| row.get(0))?;
+    Ok(value == 1)
+}
+
+/// `SQLITE_DBCONFIG_DEFENSIVE` is on.
+pub(crate) fn defensive_on(conn: &Connection) -> Result<bool, StoreError> {
+    Ok(conn.db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE)?)
+}
+
+/// Default index database for `repo`. The path is under the Phantom data
+/// directory, not inside `repo`.
+pub fn index_database_path(repo: &Path) -> std::path::PathBuf {
+    let canonical = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    let name = canonical
+        .file_name()
+        .and_then(|part| part.to_str())
+        .unwrap_or("repo");
+    let hash = blake3::hash(canonical.as_os_str().as_encoded_bytes());
+    let hash8 = hex8(&hash.as_bytes()[..4]);
+    data_home()
+        .join("repos")
+        .join(format!("{}-{hash8}", slug(name)))
+        .join("graph.db")
+}
+
+fn data_home() -> std::path::PathBuf {
+    if let Some(over) = std::env::var_os("PHANTOM_FRACTAL_DATA") {
+        return std::path::PathBuf::from(over);
+    }
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/phantom-fractal")
+    } else {
+        let base = std::env::var_os("XDG_DATA_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/share"));
+        base.join("phantom-fractal")
+    }
+}
+
+fn slug(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "repo".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+fn hex8(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(8);
+    for byte in bytes.iter().take(4) {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn insert_file(

@@ -249,7 +249,7 @@ pub(crate) fn row_count(conn: &Connection, table: &str) -> Result<i64, StoreErro
         .chain(["meta", "files", "symbols", "symbols_fts"].iter())
         .any(|name| *name == table);
     if !allowed {
-        return Err(StoreError::UnreadableStamp);
+        return Err(StoreError::UnknownTable);
     }
     let sql = format!("SELECT COUNT(*) FROM {table}");
     Ok(conn.query_row(&sql, [], |row| row.get(0))?)
