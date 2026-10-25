@@ -4,25 +4,25 @@ Phantom is a Rust code-graph engine.
 
 Pre-release. Version 0.0.0. Nothing here is published from this tree.
 
-## Draft slice
+## What works today
 
-The first slice lands in steps G0 to G3. G0, the scaffold, is built:
+The `phantom-fractal` package builds two binaries from one `main.rs`: `phantom-fractal` and `fract`. Scripts should call `phantom-fractal`, since another program named `fract` may come first on `PATH`.
 
-- a Cargo workspace on Rust 1.95.0, edition 2024
-- the `phantom-fractal` package, which builds two binaries from one `main.rs`: `phantom-fractal` and `fract`
-- stub crates for the steps below, with no code yet
+They have two commands:
 
-Not built yet. Later steps in this slice add:
+- `index PATH` walks the Rust files under PATH, extracts their items and `use` paths, and stores them in a SQLite database in the Phantom data directory. PATH itself is only read. A second run skips files whose hash has not changed.
+- `find NAME` returns the indexed symbols named exactly NAME, each with its kind, visibility, path, and line. A name that was not indexed returns an empty list. Run it from the directory you indexed, or pass `--repo PATH`.
 
-- G1: a serde result envelope
-- G2: a Rust source extractor for items, `mod`, and `use`
-- G3: a SQLite round-trip of one extracted file
-
-Both binaries print `phantom-fractal 0.0.0` for `--version` and `--help`. They have no subcommands. You cannot index or query a code graph with this slice.
+Both commands print one JSON envelope: `{"ok": …, "data": …, "error": …, "schema": 1}`. An error exits with its canon code, for example 2 when the tree has no index yet and 3 when PATH does not exist.
 
 ```
-cargo run -p phantom-fractal --bin fract -- --version
+fract index .
+fract find open_ledger
 ```
+
+The database lives at `repos/<name>-<hash>/graph.db` under the data directory. That directory is `~/Library/Application Support/phantom-fractal` on macOS, and `$XDG_DATA_HOME/phantom-fractal` (default `~/.local/share/phantom-fractal`) elsewhere. Set `PHANTOM_FRACTAL_DATA` to use another directory. `index` refuses a data directory inside PATH.
+
+`--version` and `--help` print `phantom-fractal 0.0.0`. `find` matches names only. Nothing resolves a name to the code that uses it, and there is no other command.
 
 ## Licence
 
