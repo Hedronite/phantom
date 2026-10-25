@@ -374,6 +374,13 @@ name = "phantom-fractal"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "phantom-fractal-extract",
+ "phantom-fractal-lang",
+ "phantom-fractal-lang-rust",
+ "phantom-fractal-proto",
+ "phantom-fractal-store",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

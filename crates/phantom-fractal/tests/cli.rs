@@ -1,4 +1,5 @@
-//! Both binaries print one version line and refuse every subcommand.
+//! Both binaries print one version line and refuse every command but
+//! `index` and `find`.
 
 use std::process::{Command, Output};
 
@@ -34,14 +35,24 @@ fn version_help_and_bare_print_the_version_line() {
 }
 
 #[test]
-fn draft_commands_and_unknown_flags_exit_one() {
-    let cases = ["index", "mcp", "serve", "impact", "map", "help", "--json"];
+fn other_commands_and_unknown_flags_exit_one() {
+    let cases: [&[&str]; 9] = [
+        &["mcp"],
+        &["serve"],
+        &["impact"],
+        &["map"],
+        &["help"],
+        &["--json"],
+        &["callers", "open_ledger"],
+        &["index"],
+        &["find"],
+    ];
     for bin in BINS {
-        for arg in cases {
-            let out = run(bin, &[arg]);
-            assert_eq!(out.status.code(), Some(1), "{bin} {arg}");
-            assert!(out.stdout.is_empty(), "{bin} {arg} wrote stdout");
-            assert!(!out.stderr.is_empty(), "{bin} {arg} wrote no error");
+        for args in cases {
+            let out = run(bin, args);
+            assert_eq!(out.status.code(), Some(1), "{bin} {args:?}");
+            assert!(out.stdout.is_empty(), "{bin} {args:?} wrote stdout");
+            assert!(!out.stderr.is_empty(), "{bin} {args:?} wrote no error");
         }
     }
 }
