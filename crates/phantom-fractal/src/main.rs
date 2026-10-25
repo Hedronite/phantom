@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use phantom_fractal_extract::{IndexError, IndexReport};
 use phantom_fractal_lang::{Item, Visibility};
 use phantom_fractal_lang_rust::RustLanguage;
@@ -25,19 +25,19 @@ const EXIT_ERROR: u8 = 1;
 /// Most hits one `find` returns.
 const FIND_CAP: usize = 100;
 
-/// Both binary names print the same text, so the name is fixed here
-/// rather than taken from argv[0].
+// Both binary names print the same text, so the name is fixed here
+// rather than taken from argv[0].
 #[derive(Parser)]
 #[command(
     name = "phantom-fractal",
     bin_name = "phantom-fractal",
     version,
-    help_template = "{name} {version}",
+    arg_required_else_help = true,
     disable_help_subcommand = true
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Command>,
+    command: Command,
 }
 
 #[derive(Subcommand)]
@@ -150,9 +150,8 @@ fn main() -> ExitCode {
         Err(err) => return clap_exit(&err),
     };
     match cli.command {
-        None => print_version(),
-        Some(Command::Index { path }) => emit(index(&path)),
-        Some(Command::Find { query, repo }) => emit(find(&query, &repo)),
+        Command::Index { path } => emit(index(&path)),
+        Command::Find { query, repo } => emit(find(&query, &repo)),
     }
 }
 
@@ -247,14 +246,8 @@ fn emit<T: Serialize>(result: Result<T, Failure>) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(EXIT_ERROR))
 }
 
-fn print_version() -> ExitCode {
-    match Cli::command().print_help() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(_) => ExitCode::from(EXIT_ERROR),
-    }
-}
-
-/// Help and version exit 0. Usage errors exit 1, not clap's 2.
+/// Help and version exit 0. A bare run prints help and exits 1 (usage),
+/// not clap's 2. Other usage errors exit 1 as well.
 fn clap_exit(err: &clap::Error) -> ExitCode {
     let code = if err.use_stderr() {
         ExitCode::from(EXIT_ERROR)

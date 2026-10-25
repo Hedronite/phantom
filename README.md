@@ -22,7 +22,7 @@ fract find open_ledger
 
 The database lives at `repos/<name>-<hash>/graph.db` under the data directory. That directory is `~/Library/Application Support/phantom-fractal` on macOS, and `$XDG_DATA_HOME/phantom-fractal` (default `~/.local/share/phantom-fractal`) elsewhere. Set `PHANTOM_FRACTAL_DATA` to use another directory. `index` refuses a data directory inside PATH.
 
-`--version` and `--help` print `phantom-fractal 0.0.0`. `find` matches names only. Nothing resolves a name to the code that uses it, and there is no other command.
+`--version` prints `phantom-fractal 0.0.0`. `--help` lists `index` and `find` with a usage line, and so does a run with no command. `find` matches names only. Nothing resolves a name to the code that uses it, and there is no other command.
 
 ## Licence
 
