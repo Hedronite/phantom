@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use ignore::{DirEntry, WalkBuilder};
 
-/// Largest file the walk keeps. Larger files are skipped, not truncated.
+/// Largest file the walk keeps and [`read_source`](crate::read_source)
+/// reads. Larger files are skipped, not truncated.
 pub const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
 /// One file the walk kept.
@@ -38,6 +39,10 @@ pub enum SkipReason {
     SymlinkLeavesRoot,
     /// A symlink to a path inside the root. The target is walked itself.
     SymlinkInRoot,
+    /// A symlink met when the file was opened, after the walk saw a file.
+    Symlink,
+    /// Not a regular file: a fifo, socket, or device.
+    NotRegular,
     /// The path is not valid UTF-8.
     NonUtf8Path,
     /// Metadata could not be read.
@@ -120,7 +125,7 @@ fn visit(root: &Path, entry: &DirEntry, out: &mut Walk) {
             abs_path: path.to_path_buf(),
             size: meta.len(),
         }),
-        Ok(_) => {}
+        Ok(_) => skip(out, rel, SkipReason::NotRegular),
         Err(_) => skip(out, rel, SkipReason::Unreadable),
     }
 }

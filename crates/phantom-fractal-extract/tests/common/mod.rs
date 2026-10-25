@@ -71,8 +71,8 @@ impl FixtureRepo {
             b"pub fn inside_git() {}\n",
         );
         write(path, "excluded.rs", b"pub fn excluded_by_info() {}\n");
-        write(path, "big.rs", &comment_bytes(MAX_FILE_BYTES + 1));
-        write(path, "edge.rs", &comment_bytes(MAX_FILE_BYTES));
+        write(path, "big.rs", &rust_bytes(BIG_HEAD, MAX_FILE_BYTES + 1));
+        write(path, "edge.rs", &rust_bytes(EDGE_HEAD, MAX_FILE_BYTES));
         write(
             outside.path(),
             "elsewhere.rs",
@@ -134,17 +134,24 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-fn write(root: &Path, rel: &str, bytes: &[u8]) {
+/// First line of `big.rs`, one byte over the cap.
+pub const BIG_HEAD: &[u8] = b"pub fn big_prefix() {}\n";
+/// First line of `edge.rs`, exactly at the cap.
+pub const EDGE_HEAD: &[u8] = b"pub fn edge_symbol() {}\n";
+
+/// Writes `bytes` to `rel` under `root`, creating parent directories.
+pub fn write(root: &Path, rel: &str, bytes: &[u8]) {
     let path = root.join(rel);
     fs::create_dir_all(path.parent().expect("has parent")).expect("parent dir");
     fs::write(path, bytes).expect("write file");
 }
 
-/// `len` bytes of Rust line comments.
-fn comment_bytes(len: u64) -> Vec<u8> {
+/// `head`, then Rust line comments, `len` bytes in all.
+pub fn rust_bytes(head: &[u8], len: u64) -> Vec<u8> {
     let len = usize::try_from(len).expect("fits usize");
     let line = b"// size cap filler\n";
-    let mut out: Vec<u8> = line.iter().copied().cycle().take(len).collect();
+    let filler = line.iter().copied().cycle();
+    let mut out: Vec<u8> = head.iter().copied().chain(filler).take(len).collect();
     if let Some(last) = out.last_mut() {
         *last = b'\n';
     }
