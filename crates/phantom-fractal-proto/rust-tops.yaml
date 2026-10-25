@@ -21,7 +21,7 @@ goals:
   density: fewest necessary production lines that preserve clarity and performance
   performance: no unexplained regression on gated hot paths; prefer algorithmic then codegen then micro
   notes: >
-    JSON envelope. Kind names canon exits 0 through 6.
+    JSON envelope schema 1. A parse rejects contradictory ok/error and exit/kind pairs.
 
 layers:
   - { id: static-lint,       enabled: true,  tier: 0, runner: "cargo clippy/fmt/deny", scope: workspace }
