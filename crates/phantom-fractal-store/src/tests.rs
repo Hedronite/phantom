@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use phantom_fractal_lang::Language;
 use phantom_fractal_lang_rust::RustLanguage;
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 use crate::schema::EMPTY_TABLES;
 use crate::{PRODUCER, SCHEMA_VERSION, Store, StoreError};
@@ -166,4 +166,113 @@ fn newer_schema_version_fails_to_open() {
     drop(conn);
     let opened = Store::open(db.path());
     assert!(matches!(opened, Err(StoreError::SchemaNewer { found: 99 })));
+}
+
+fn file_bytes(path: &Path) -> Vec<u8> {
+    fs::read(path).expect("read db")
+}
+
+fn assert_unchanged(path: &Path, before: &[u8]) {
+    assert_eq!(file_bytes(path), before);
+    let text = path.to_string_lossy();
+    assert!(!Path::new(&format!("{text}-wal")).exists());
+    assert!(!Path::new(&format!("{text}-shm")).exists());
+}
+
+fn master_rows(path: &Path) -> Vec<(String, String)> {
+    let conn = Connection::open(path).expect("sqlite");
+    let mut statement = conn
+        .prepare("SELECT type, name FROM sqlite_master ORDER BY 1, 2")
+        .expect("master");
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("query")
+        .map(|row| row.expect("row"))
+        .collect()
+}
+
+#[test]
+fn dataless_sqlite_file_is_not_modified() {
+    let db = TempDb::new("dataless");
+    assert_outside_workspace(db.path());
+    Connection::open(db.path()).expect("empty sqlite");
+    let before = file_bytes(db.path());
+    let master = master_rows(db.path());
+    let opened = Store::open(db.path());
+    assert!(matches!(opened, Err(StoreError::ForeignDatabase)));
+    assert_unchanged(db.path(), &before);
+    assert_eq!(master_rows(db.path()), master);
+}
+
+#[test]
+fn foreign_producer_is_not_modified() {
+    let db = TempDb::new("foreign");
+    assert_outside_workspace(db.path());
+    let conn = Connection::open(db.path()).expect("sqlite");
+    conn.execute_batch(
+        "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+         INSERT INTO meta(key, value) VALUES ('producer', 'other');
+         INSERT INTO meta(key, value) VALUES ('schema_version', '1');",
+    )
+    .expect("stamp");
+    drop(conn);
+    let before = file_bytes(db.path());
+    let master = master_rows(db.path());
+    let opened = Store::open(db.path());
+    assert!(matches!(opened, Err(StoreError::ForeignProducer)));
+    assert_unchanged(db.path(), &before);
+    assert_eq!(master_rows(db.path()), master);
+}
+
+#[test]
+fn new_file_mode_and_defensive_pragmas() {
+    let db = TempDb::new("mode");
+    assert_outside_workspace(db.path());
+    let store = Store::open(db.path()).expect("open");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(db.path()).expect("meta").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+    assert!(store.trusted_schema_is_off().expect("trusted"));
+    assert!(store.synchronous_is_normal().expect("sync"));
+    assert!(store.defensive_is_on().expect("defensive"));
+}
+
+#[test]
+fn open_flags_omit_uri() {
+    let created = crate::open_flags(true);
+    let existing = crate::open_flags(false);
+    assert!(!created.contains(OpenFlags::SQLITE_OPEN_URI));
+    assert!(!existing.contains(OpenFlags::SQLITE_OPEN_URI));
+    assert!(created.contains(OpenFlags::SQLITE_OPEN_CREATE));
+    assert!(!existing.contains(OpenFlags::SQLITE_OPEN_CREATE));
+}
+
+#[test]
+fn index_database_path_is_outside_the_repo() {
+    let repo = std::env::temp_dir().join(format!(
+        "phantom-index-repo-{}-{}",
+        process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|dur| dur.as_nanos())
+            .unwrap_or(0)
+    ));
+    fs::create_dir_all(&repo).expect("repo");
+    let db = crate::index_database_path(&repo);
+    let repo = repo.canonicalize().expect("repo path");
+    assert!(db.ends_with("graph.db"));
+    assert!(!db.starts_with(&repo), "{db:?} is inside {repo:?}");
+    let _ = fs::remove_dir_all(&repo);
+}
+
+#[test]
+fn disallowed_table_name_is_not_unreadable_stamp() {
+    let db = TempDb::new("table");
+    let store = Store::open(db.path()).expect("open");
+    let err = store.row_count("not_a_table").expect_err("rejected");
+    assert!(matches!(err, StoreError::UnknownTable));
+    assert!(!matches!(err, StoreError::UnreadableStamp));
 }
