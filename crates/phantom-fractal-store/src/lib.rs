@@ -139,11 +139,11 @@ impl Store {
         if !schema::meta_table_exists(&conn)? {
             return Err(StoreError::ForeignDatabase);
         }
+        harden(&conn)?;
         let version = schema::check_stamp(&conn)?;
         if version < SCHEMA_VERSION {
             schema::migrate_v1_to_v2(&mut conn)?;
         }
-        harden(&conn)?;
         enable_wal(&conn)?;
         Ok(Self { conn })
     }
