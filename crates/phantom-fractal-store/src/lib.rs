@@ -191,6 +191,21 @@ impl Store {
             .collect()
     }
 
+    /// Blake3 digest [`Self::put_source`] stored for `path`.
+    ///
+    /// `None` when that repo-relative path has no file row.
+    pub fn stored_blake3(&self, path: &str) -> Result<Option<Vec<u8>>, StoreError> {
+        match self
+            .conn
+            .query_row("SELECT blake3 FROM files WHERE path = ?1", [path], |row| {
+                row.get(0)
+            }) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
     /// `meta.producer`.
     pub fn producer(&self) -> Result<Option<String>, StoreError> {
         schema::meta_get(&self.conn, "producer")

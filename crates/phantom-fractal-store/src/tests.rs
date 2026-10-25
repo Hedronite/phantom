@@ -276,3 +276,23 @@ fn disallowed_table_name_is_not_unreadable_stamp() {
     assert!(matches!(err, StoreError::UnknownTable));
     assert!(!matches!(err, StoreError::UnreadableStamp));
 }
+
+#[test]
+fn stored_blake3_matches_put_source_and_missing_is_none() {
+    let db = TempDb::new("blake");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let source = "fn open_ledger() {}\n";
+    let path = "src/lib.rs";
+    let language = RustLanguage::new().expect("grammar");
+    store.put_source(path, source, 0, &language).expect("put");
+    let expected = blake3::hash(source.as_bytes());
+    let stored = store.stored_blake3(path).expect("hash");
+    assert_eq!(stored.as_deref(), Some(expected.as_bytes().as_slice()));
+    assert!(
+        store
+            .stored_blake3("missing.rs")
+            .expect("missing")
+            .is_none()
+    );
+}
