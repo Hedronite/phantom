@@ -18,3 +18,10 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
+phantom-fractal-extract = { path = "../phantom-fractal-extract", version = "0.0.0" }
+phantom-fractal-lang.workspace = true
+phantom-fractal-lang-rust = { path = "../phantom-fractal-lang-rust", version = "0.0.0" }
+phantom-fractal-proto = { path = "../phantom-fractal-proto", version = "0.0.0" }
+phantom-fractal-store = { path = "../phantom-fractal-store", version = "0.0.0" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
