@@ -206,6 +206,31 @@ impl Store {
         }
     }
 
+    /// Texts of `use` refs stored for `path`, in insert order.
+    pub fn ref_texts(&self, path: &str) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT refs.text
+             FROM refs
+             JOIN files ON files.id = refs.file_id
+             WHERE files.path = ?1 AND refs.kind = 'use'
+             ORDER BY refs.id",
+        )?;
+        let rows = statement.query_map([path], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// How many FTS rows match `query`.
+    ///
+    /// The statement is [`MATCH_SQL`]. `query` is bound as one phrase, so a
+    /// quote inside it cannot change the SQL.
+    pub fn match_count(&self, query: &str) -> Result<i64, StoreError> {
+        let phrase = phrase_quote(query);
+        self.conn
+            .query_row(MATCH_SQL, [phrase], |row| row.get(0))
+            .map_err(StoreError::from)
+    }
+
     /// `meta.producer`.
     pub fn producer(&self) -> Result<Option<String>, StoreError> {
         schema::meta_get(&self.conn, "producer")
@@ -239,6 +264,7 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         let file_id = insert_file(&tx, path, source, mtime_ns, lang)?;
         insert_symbols(&tx, file_id, path, &extract.items)?;
+        insert_refs(&tx, file_id, &extract.imports)?;
         tx.commit()?;
         Ok(())
     }
@@ -362,6 +388,49 @@ fn hex8(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+/// Fixed `MATCH` statement. User text is never interpolated.
+pub const MATCH_SQL: &str = "SELECT COUNT(*) FROM symbols_fts WHERE symbols_fts MATCH ?1";
+
+/// Wraps `query` as one FTS phrase and doubles any embedded quote.
+pub(crate) fn phrase_quote(query: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in query.chars() {
+        if ch == '"' {
+            out.push('"');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+    out
+}
+
+fn last_segment(path: &str) -> &str {
+    path.rsplit("::")
+        .next()
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or(path)
+}
+
+fn insert_refs(
+    conn: &Connection,
+    file_id: i64,
+    imports: &[phantom_fractal_lang::Import],
+) -> Result<(), StoreError> {
+    let mut statement = conn.prepare(
+        "INSERT INTO refs(file_id, kind, text, last_segment, line)
+         VALUES (?1, 'use', ?2, ?3, ?4)",
+    )?;
+    for import in imports {
+        statement.execute((
+            file_id,
+            &import.path,
+            last_segment(&import.path),
+            i64::from(import.start_line),
+        ))?;
+    }
+    Ok(())
 }
 
 fn insert_file(

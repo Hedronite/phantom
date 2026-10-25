@@ -89,6 +89,51 @@ CREATE VIRTUAL TABLE symbols_fts USING fts5(
     tokenize="unicode61 separators '_:'"
 );
 
+CREATE TRIGGER symbols_ai AFTER INSERT ON symbols BEGIN
+  INSERT INTO symbols_fts(rowid, name, qual_name, signature, doc_summary, path)
+  VALUES (
+    new.id,
+    new.name,
+    new.qual_name,
+    COALESCE(new.signature, ''),
+    COALESCE(new.doc_summary, ''),
+    (SELECT path FROM files WHERE id = new.file_id)
+  );
+END;
+CREATE TRIGGER symbols_ad AFTER DELETE ON symbols BEGIN
+  INSERT INTO symbols_fts(symbols_fts, rowid, name, qual_name, signature, doc_summary, path)
+  VALUES (
+    'delete',
+    old.id,
+    old.name,
+    old.qual_name,
+    COALESCE(old.signature, ''),
+    COALESCE(old.doc_summary, ''),
+    (SELECT path FROM files WHERE id = old.file_id)
+  );
+END;
+CREATE TRIGGER symbols_au AFTER UPDATE ON symbols BEGIN
+  INSERT INTO symbols_fts(symbols_fts, rowid, name, qual_name, signature, doc_summary, path)
+  VALUES (
+    'delete',
+    old.id,
+    old.name,
+    old.qual_name,
+    COALESCE(old.signature, ''),
+    COALESCE(old.doc_summary, ''),
+    (SELECT path FROM files WHERE id = old.file_id)
+  );
+  INSERT INTO symbols_fts(rowid, name, qual_name, signature, doc_summary, path)
+  VALUES (
+    new.id,
+    new.name,
+    new.qual_name,
+    COALESCE(new.signature, ''),
+    COALESCE(new.doc_summary, ''),
+    (SELECT path FROM files WHERE id = new.file_id)
+  );
+END;
+
 CREATE TABLE refs(
     id INTEGER PRIMARY KEY,
     file_id INTEGER NOT NULL REFERENCES files ON DELETE CASCADE,

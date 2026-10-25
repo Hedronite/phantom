@@ -296,3 +296,54 @@ fn stored_blake3_matches_put_source_and_missing_is_none() {
             .is_none()
     );
 }
+
+#[test]
+fn aliased_use_is_stored_and_items_remain() {
+    let db = TempDb::new("refs");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let source =
+        fs::read_to_string(workspace_root().join("fixtures/extract/imports.rs")).expect("fixture");
+    let language = RustLanguage::new().expect("grammar");
+    store
+        .put_source("fixtures/extract/imports.rs", &source, 0, &language)
+        .expect("put");
+    let extract = language.extract(&source).expect("extract");
+    let aliased = extract
+        .imports
+        .iter()
+        .find(|import| import.alias.as_deref() == Some("IoResult"))
+        .expect("aliased use");
+    let texts = store
+        .ref_texts("fixtures/extract/imports.rs")
+        .expect("refs");
+    assert!(texts.iter().any(|text| text == &aliased.path));
+    assert_eq!(texts.len(), extract.imports.len());
+    assert_eq!(
+        store
+            .read_items("fixtures/extract/imports.rs")
+            .expect("items"),
+        extract.items
+    );
+}
+
+#[test]
+fn open_ledger_match_is_bound_and_a_quote_cannot_change_sql() {
+    let db = TempDb::new("match");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let source =
+        fs::read_to_string(workspace_root().join("fixtures/extract/items.rs")).expect("fixture");
+    let language = RustLanguage::new().expect("grammar");
+    store
+        .put_source("fixtures/extract/items.rs", &source, 0, &language)
+        .expect("put");
+    assert!(store.match_count("open_ledger").expect("written") >= 1);
+    assert_eq!(store.match_count("not_written_zz").expect("absent"), 0);
+    let tricky = "open_ledger\" OR name:open_ledger";
+    assert!(!crate::MATCH_SQL.contains(tricky));
+    assert!(crate::MATCH_SQL.contains("?1"));
+    assert!(!crate::MATCH_SQL.contains("format!"));
+    assert_eq!(crate::phrase_quote("a\"b"), "\"a\"\"b\"");
+    assert_eq!(store.match_count(tricky).expect("quoted"), 0);
+}
