@@ -21,7 +21,7 @@ goals:
   density: fewest necessary production lines that preserve clarity and performance
   performance: no unexplained regression on gated hot paths; prefer algorithmic then codegen then micro
   notes: >
-    Schema and round-trip land in G3.
+    Schema 1. producer phantom-fractal. rusqlite 0.40 bundled.
 
 layers:
   - { id: static-lint,       enabled: true,  tier: 0, runner: "cargo clippy/fmt/deny", scope: workspace }
