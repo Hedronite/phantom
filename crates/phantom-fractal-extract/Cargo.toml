@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 blake3 = "1"
 ignore = "0.4.33"
+libc = "0.2"
 phantom-fractal-lang-rust = { path = "../phantom-fractal-lang-rust", version = "0.0.0" }
 phantom-fractal-store = { path = "../phantom-fractal-store", version = "0.0.0" }
 

@@ -389,6 +389,7 @@ version = "0.0.0"
 dependencies = [
  "blake3",
  "ignore",
+ "libc",
  "phantom-fractal-lang",
  "phantom-fractal-lang-rust",
  "phantom-fractal-store",

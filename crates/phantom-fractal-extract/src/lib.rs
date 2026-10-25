@@ -5,16 +5,16 @@
 //! each through [`Store::put_source`]. The walked tree is only read.
 #![forbid(unsafe_code)]
 
+mod read;
 mod walk;
 
 use std::fmt;
-use std::fs;
 use std::path::Path;
-use std::time::UNIX_EPOCH;
 
 use phantom_fractal_lang_rust::RustLanguage;
 use phantom_fractal_store::{Store, StoreError};
 
+pub use read::{Source, read_source};
 pub use walk::{Candidate, MAX_FILE_BYTES, SkipReason, Skipped, Walk, is_secret, walk};
 
 /// Version of the extraction this walker writes. Bump it when the stored
@@ -39,7 +39,8 @@ pub struct IndexReport {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum IndexError {
-    /// The root could not be walked, or a kept file could not be read.
+    /// The root could not be walked, or a kept file could not be opened or
+    /// read.
     Io(std::io::Error),
     /// The store refused a read or a write.
     Store(StoreError),
@@ -88,7 +89,17 @@ pub fn index(
         ..IndexReport::default()
     };
     for file in walk.files.iter().filter(|file| is_rust(&file.path)) {
-        let Ok(source) = String::from_utf8(fs::read(&file.abs_path)?) else {
+        let (bytes, mtime_ns) = match read_source(&file.abs_path)? {
+            Source::Bytes { bytes, mtime_ns } => (bytes, mtime_ns),
+            Source::Skipped(reason) => {
+                report.skipped.push(Skipped {
+                    path: file.path.clone(),
+                    reason,
+                });
+                continue;
+            }
+        };
+        let Ok(source) = String::from_utf8(bytes) else {
             report.not_utf8.push(file.path.clone());
             continue;
         };
@@ -96,7 +107,7 @@ pub fn index(
             report.unchanged.push(file.path.clone());
             continue;
         }
-        store.put_source(&file.path, &source, mtime_ns(&file.abs_path), language)?;
+        store.put_source(&file.path, &source, mtime_ns, language)?;
         report.written.push(file.path.clone());
     }
     Ok(report)
@@ -104,16 +115,6 @@ pub fn index(
 
 fn is_rust(path: &str) -> bool {
     Path::new(path).extension().is_some_and(|ext| ext == "rs")
-}
-
-/// Modification time in nanoseconds since the epoch, or 0 if unknown.
-fn mtime_ns(path: &Path) -> i64 {
-    fs::metadata(path)
-        .and_then(|meta| meta.modified())
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .and_then(|dur| i64::try_from(dur.as_nanos()).ok())
-        .unwrap_or(0)
 }
 
 /// True when the store already holds `path` with the blake3 of `source`.
