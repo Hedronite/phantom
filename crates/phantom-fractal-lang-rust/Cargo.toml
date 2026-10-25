@@ -10,3 +10,5 @@ publish.workspace = true
 
 [dependencies]
 phantom-fractal-lang.workspace = true
+tree-sitter.workspace = true
+tree-sitter-rust.workspace = true
