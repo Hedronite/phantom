@@ -1,0 +1,1 @@
+Not Rust. The walk keeps it; the index pass does not extract it.
