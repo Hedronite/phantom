@@ -5,6 +5,9 @@
 # Toolchain: rust-toolchain.toml is the pin. Each job reads its channel and
 # hands it to dtolnay/rust-toolchain, pinned by commit. No job installs
 # `stable`. -D warnings belongs on the clippy command, not job-level RUSTFLAGS.
+#
+# Every action is pinned by commit SHA, with the ref it was read from as a
+# trailing comment.
 name: rust-tops
 
 on:
@@ -28,30 +31,30 @@ jobs:
   fmt-clippy-deny:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - id: toolchain
         run: echo "channel=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # 2026-10-16
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - uses: taiki-e/install-action@cargo-deny
+      - uses: taiki-e/install-action@704dd1f1a46347196de316ebf7f5d05ed6b8279f # cargo-deny
       - run: cargo deny check
 
   nextest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - id: toolchain
         run: echo "channel=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # 2026-10-16
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@42b98ff034a377bb5e4aa99118b5b160f96a8ef2 # nextest
       # Scaffold stubs have no tests yet; an empty run must not fail G0.
       - run: cargo nextest run --workspace --all-features --locked --profile ci --no-tests=warn
 
@@ -60,5 +63,5 @@ jobs:
   banned-names:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: scripts/banned-names.sh
