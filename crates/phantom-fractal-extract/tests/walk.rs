@@ -1,4 +1,4 @@
-//! The walk over the index fixture (SPEC-index G1a).
+//! The walk over the index fixture (SPEC-index G1a, SPEC-w2 G0).
 
 mod common;
 
@@ -19,7 +19,11 @@ fn walk_keeps_only_plain_files_inside_the_rules() {
             ".gitignore",
             "Cargo.toml",
             "README.txt",
+            "credentials.rs",
             "edge.rs",
+            "netrc.rs",
+            "npmrc.rs",
+            "src/id_codec.rs",
             "src/ledger.rs",
             "src/lib.rs",
             "src/notes.txt",
@@ -30,7 +34,7 @@ fn walk_keeps_only_plain_files_inside_the_rules() {
 
 #[test]
 fn walk_records_why_each_seen_file_was_skipped() {
-    use SkipReason::{Secret, SymlinkInRoot, SymlinkLeavesRoot, TooLarge};
+    use SkipReason::{HardLink, Secret, SymlinkInRoot, SymlinkLeavesRoot, TooLarge};
     let repo = FixtureRepo::new();
     let got = walk(repo.root()).expect("walk");
     let skipped: BTreeMap<&str, SkipReason> = got
@@ -41,15 +45,22 @@ fn walk_records_why_each_seen_file_was_skipped() {
     let expected = BTreeMap::from([
         (".env", Secret),
         (".env.local", Secret),
+        (".netrc", Secret),
+        (".npmrc", Secret),
         ("big.rs", TooLarge),
+        ("certs/client.p12", Secret),
+        ("certs/client.pfx", Secret),
         ("certs/deploy.key", Secret),
         ("certs/server.pem", Secret),
+        ("credentials", Secret),
         ("dangling.rs", SymlinkLeavesRoot),
+        ("hard_out.rs", HardLink),
         ("keys/id_ed25519", Secret),
+        ("keys/id_github", Secret),
+        ("keys/id_rsa.pub", Secret),
         ("link_in.rs", SymlinkInRoot),
         ("link_out.rs", SymlinkLeavesRoot),
         ("linked_dir", SymlinkLeavesRoot),
-        ("src/id_codec.rs", Secret),
     ]);
     assert_eq!(skipped, expected);
 }
@@ -98,8 +109,16 @@ fn secret_denylist_matches_names_not_paths() {
         ".env.production",
         "id_rsa",
         "id_rsa.pub",
+        "id_ed25519",
+        "id_ecdsa_sk",
+        "id_github",
         "tls.pem",
         "signing.key",
+        "credentials",
+        ".netrc",
+        ".npmrc",
+        "client.p12",
+        "client.pfx",
     ] {
         assert!(is_secret(name), "{name}");
     }
@@ -110,6 +129,13 @@ fn secret_denylist_matches_names_not_paths() {
         "pem.rs",
         "valid_id.rs",
         "key",
+        "id_codec.rs",
+        "id_map.rs",
+        "credentials.rs",
+        "netrc.rs",
+        "npmrc.rs",
+        "p12.rs",
+        "pfx.rs",
     ] {
         assert!(!is_secret(name), "{name}");
     }

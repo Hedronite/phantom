@@ -1,6 +1,7 @@
 //! Gitignore-aware walk of one repository root (canon §6.4 step 2).
 
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use ignore::{DirEntry, WalkBuilder};
@@ -31,7 +32,10 @@ pub struct Skipped {
 /// directories are pruned before they are seen and get no record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SkipReason {
-    /// Name matches the secret denylist: `.env*`, `*.pem`, `*.key`, `id_*`.
+    /// Name matches the secret denylist: `.env*`; the exact names
+    /// `credentials`, `.netrc`, and `.npmrc`; the suffixes `.pem`, `.key`,
+    /// `.p12`, and `.pfx`; and `id_<name>` or `id_<name>.pub` where `<name>`
+    /// has no dot, such as `id_rsa`. See [`is_secret`].
     Secret,
     /// Larger than [`MAX_FILE_BYTES`].
     TooLarge,
@@ -43,6 +47,10 @@ pub enum SkipReason {
     Symlink,
     /// Not a regular file: a fifo, socket, or device.
     NotRegular,
+    /// A regular file with more than one hard link. Another name for the
+    /// same inode can sit outside the root, so no name is read. Two names
+    /// for one inode inside the root are both skipped; that cost is accepted.
+    HardLink,
     /// The path is not valid UTF-8.
     NonUtf8Path,
     /// Metadata could not be read.
@@ -120,6 +128,7 @@ fn visit(root: &Path, entry: &DirEntry, out: &mut Walk) {
     }
     match entry.metadata() {
         Ok(meta) if meta.len() > MAX_FILE_BYTES => skip(out, rel, SkipReason::TooLarge),
+        Ok(meta) if meta.is_file() && meta.nlink() > 1 => skip(out, rel, SkipReason::HardLink),
         Ok(meta) if meta.is_file() => out.files.push(Candidate {
             path: rel,
             abs_path: path.to_path_buf(),
@@ -146,12 +155,27 @@ fn error_path(err: &ignore::Error) -> Option<&Path> {
     }
 }
 
-/// True for names on the default secret denylist.
+/// Exact file names on the secret denylist.
+const SECRET_NAMES: [&str; 3] = ["credentials", ".netrc", ".npmrc"];
+
+/// File-name suffixes on the secret denylist.
+const SECRET_SUFFIXES: [&str; 4] = [".pem", ".key", ".p12", ".pfx"];
+
+/// True for file names on the default secret denylist, listed on
+/// [`SkipReason::Secret`]. Only the name is matched, never the path.
 pub fn is_secret(name: &str) -> bool {
     name.starts_with(".env")
-        || name.starts_with("id_")
-        || name.ends_with(".pem")
-        || name.ends_with(".key")
+        || SECRET_NAMES.contains(&name)
+        || SECRET_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
+        || is_key_pair_name(name)
+}
+
+/// `id_<name>` or `id_<name>.pub` where `<name>` has no dot, the way key
+/// pairs are named. `id_codec.rs` has a dot, so it is not a key.
+fn is_key_pair_name(name: &str) -> bool {
+    name.strip_prefix("id_")
+        .map(|rest| rest.strip_suffix(".pub").unwrap_or(rest))
+        .is_some_and(|stem| !stem.contains('.'))
 }
 
 fn symlink_reason(root: &Path, link: &Path) -> SkipReason {

@@ -2,12 +2,12 @@
 //!
 //! The walk classifies each entry from its metadata, and the file can change
 //! before it is read. The read re-checks on the open descriptor, so a path
-//! swapped for a symlink, a fifo, or a longer file is still not read as
-//! source.
+//! swapped for a symlink, a fifo, a hard link, or a longer file is still not
+//! read as source.
 
 use std::fs::OpenOptions;
 use std::io::{self, Read};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
@@ -30,7 +30,7 @@ pub enum Source {
 ///
 /// The open uses `O_NOFOLLOW`, so a symlink is refused rather than followed.
 /// It also uses `O_NONBLOCK`, so opening a fifo does not wait for a writer.
-/// The descriptor must then be a regular file. At most `MAX_FILE_BYTES + 1`
+/// The descriptor must then be a regular file with one link. At most `MAX_FILE_BYTES + 1`
 /// bytes are read; if that many come back, the file is skipped whole.
 pub fn read_source(path: &Path) -> io::Result<Source> {
     let file = match OpenOptions::new()
@@ -47,6 +47,9 @@ pub fn read_source(path: &Path) -> io::Result<Source> {
     let meta = file.metadata()?;
     if !meta.is_file() {
         return Ok(Source::Skipped(SkipReason::NotRegular));
+    }
+    if meta.nlink() > 1 {
+        return Ok(Source::Skipped(SkipReason::HardLink));
     }
     let mut bytes = Vec::new();
     file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes)?;
