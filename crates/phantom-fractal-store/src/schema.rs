@@ -181,6 +181,8 @@ pub(crate) const EMPTY_TABLES: &[&str] = &[
 ];
 
 pub(crate) fn meta_table_exists(conn: &Connection) -> Result<bool, StoreError> {
+    #[cfg(test)]
+    crate::open_trace::record("meta_table_exists");
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
         [],
@@ -252,6 +254,8 @@ pub(crate) fn create(conn: &Connection) -> Result<(), StoreError> {
 }
 
 pub(crate) fn check_stamp(conn: &Connection) -> Result<i64, StoreError> {
+    #[cfg(test)]
+    crate::open_trace::record("check_stamp");
     match meta_get(conn, "producer")? {
         None => return Err(StoreError::MissingProducer),
         Some(value) if value == PRODUCER => {}
@@ -279,6 +283,8 @@ pub(crate) fn check_stamp(conn: &Connection) -> Result<i64, StoreError> {
 
 /// Moves a version-1 database to [`SCHEMA_VERSION`] in one transaction.
 pub(crate) fn migrate_v1_to_v2(conn: &mut Connection) -> Result<(), StoreError> {
+    #[cfg(test)]
+    crate::open_trace::record("migrate_v1_to_v2");
     let tx = conn.transaction()?;
     tx.execute_batch(TRIGGERS_SQL)?;
     tx.execute(

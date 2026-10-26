@@ -113,9 +113,19 @@ impl Store {
     /// Opens `path`.
     ///
     /// A missing path is created with mode `0600` and the canon schema.
+    /// Missing directories on the way to it — the data root when that is
+    /// new, `repos/`, and `repos/<name>-<hash>/` — are created `0700`.
+    /// On open, `repos/` and the repo directory are narrowed to `0700`
+    /// when they carry any group or other bit; a data root that already
+    /// existed is never changed.
     /// An existing SQLite file with no `meta` table, or a `producer` other
     /// than [`PRODUCER`], is left unchanged and returns an error.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
+        #[cfg(unix)]
+        {
+            create_private_directories(path)?;
+            tighten_directories(path)?;
+        }
         if path.exists() {
             Self::open_existing(path)
         } else {
@@ -136,10 +146,10 @@ impl Store {
 
     fn open_existing(path: &Path) -> Result<Self, StoreError> {
         let mut conn = Connection::open_with_flags(path, open_flags(false))?;
+        harden(&conn)?;
         if !schema::meta_table_exists(&conn)? {
             return Err(StoreError::ForeignDatabase);
         }
-        harden(&conn)?;
         let version = schema::check_stamp(&conn)?;
         if version < SCHEMA_VERSION {
             schema::migrate_v1_to_v2(&mut conn)?;
@@ -283,11 +293,6 @@ pub(crate) fn open_flags(create: bool) -> OpenFlags {
 }
 
 fn create_private_file(path: &Path) -> Result<(), StoreError> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent).map_err(StoreError::Io)?;
-    }
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -299,7 +304,64 @@ fn create_private_file(path: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Mode for every directory the store creates and for `repos/` and the
+/// repo directory after a tighten.
+const DIR_MODE: u32 = 0o700;
+
+/// Creates every directory the store is missing on the way to the
+/// database with a recursive [`std::fs::DirBuilder`] at mode `0o700`.
+///
+/// [`std::fs::DirBuilder`] only assigns the mode to directories it
+/// creates, so a data root that already existed — say a
+/// `PHANTOM_FRACTAL_DATA` the user pointed at — keeps its mode here.
+#[cfg(unix)]
+fn create_private_directories(path: &Path) -> Result<(), StoreError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut dirs = std::fs::DirBuilder::new();
+        dirs.recursive(true);
+        dirs.mode(DIR_MODE);
+        dirs.create(parent).map_err(StoreError::Io)?;
+    }
+    Ok(())
+}
+
+/// Narrows `repos/` and the repo directory holding a `graph.db` under
+/// them to [`DIR_MODE`] when either still has group or other bits.
+///
+/// The chain is recognized by its shape: the repo directory is the
+/// `graph.db` parent and `repos/` is named `repos` above it. Anything
+/// above `repos/` — the data root in particular — is never changed, and
+/// a database with no `repos/` in its ancestor chain is left alone.
+#[cfg(unix)]
+fn tighten_directories(path: &Path) -> Result<(), StoreError> {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(repos) = path.parent().and_then(Path::parent) else {
+        return Ok(());
+    };
+    if repos.file_name() != Some(std::ffi::OsStr::new("repos")) {
+        return Ok(());
+    }
+    let repo_dir = path.parent().expect("repos has a parent");
+    for dir in [repo_dir, repos] {
+        let mode = std::fs::metadata(dir)
+            .map_err(StoreError::Io)?
+            .permissions()
+            .mode();
+        if mode & 0o077 == 0 {
+            continue;
+        }
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(DIR_MODE))
+            .map_err(StoreError::Io)?;
+    }
+    Ok(())
+}
+
 fn harden(conn: &Connection) -> Result<(), StoreError> {
+    #[cfg(test)]
+    open_trace::record("harden");
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
          PRAGMA trusted_schema = OFF;",
@@ -525,6 +587,31 @@ fn kind_from_text(text: &str) -> Result<ItemKind, StoreError> {
         "trait" => Ok(ItemKind::Trait),
         "module" => Ok(ItemKind::Module),
         other => Err(StoreError::UnknownKind(other.to_owned())),
+    }
+}
+
+/// Ordered record of the open path, test-only (Vini #12 N2). Every step
+/// between the connection opening and the migration appends its static
+/// name; `tests::harden_is_first_on_an_existing_database` fails unless
+/// `harden` is recorded before the stamp probe and the migration.
+#[cfg(test)]
+pub(crate) mod open_trace {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static STEPS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(crate) fn record(step: &'static str) {
+        STEPS.with(|steps| steps.borrow_mut().push(step));
+    }
+
+    pub(crate) fn clear() {
+        STEPS.with(|steps| steps.borrow_mut().clear());
+    }
+
+    pub(crate) fn steps() -> Vec<&'static str> {
+        STEPS.with(|steps| steps.borrow().clone())
     }
 }
 

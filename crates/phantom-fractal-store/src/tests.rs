@@ -268,6 +268,169 @@ fn index_database_path_is_outside_the_repo() {
     let _ = fs::remove_dir_all(&repo);
 }
 
+/// One throwaway data root with a `repos/<name>-<hash>` layout under it.
+struct TempData {
+    root: PathBuf,
+}
+
+impl TempData {
+    fn new(label: &str) -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|dur| dur.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "phantom-fractal-data-{label}-{}-{nanos}",
+            process::id()
+        ));
+        Self { root }
+    }
+
+    fn repo_dir(&self) -> PathBuf {
+        self.root
+            .join("repos")
+            .join(format!("ledger-{:08x}", process::id()))
+    }
+
+    fn db(&self) -> PathBuf {
+        self.repo_dir().join("graph.db")
+    }
+}
+
+impl Drop for TempData {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+#[cfg(unix)]
+fn mode_of(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(path)
+        .unwrap_or_else(|err| panic!("{}: {err}", path.display()))
+        .permissions()
+        .mode()
+        & 0o777
+}
+
+#[cfg(unix)]
+fn mkdir_explicit(path: &Path, mode: u32) {
+    use std::os::unix::fs::DirBuilderExt;
+    let mut dirs = std::fs::DirBuilder::new();
+    dirs.mode(mode);
+    dirs.create(path)
+        .unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+}
+
+#[test]
+#[cfg(unix)]
+fn fresh_data_directories_are_created_0700() {
+    let data = TempData::new("dirs");
+    let db = data.db();
+    let store = Store::open(&db).expect("open");
+    assert_eq!(store.producer().expect("stamp").as_deref(), Some(PRODUCER));
+    for dir in [
+        data.root.as_path(),
+        data.root.join("repos").as_path(),
+        data.repo_dir().as_path(),
+    ] {
+        assert_eq!(mode_of(dir), 0o700, "{}", dir.display());
+    }
+    assert_eq!(mode_of(&db), 0o600, "graph.db");
+}
+
+#[test]
+#[cfg(unix)]
+fn open_tightens_repos_directories_and_leaves_the_data_root() {
+    let data = TempData::new("tighten");
+    mkdir_explicit(&data.root, 0o751);
+    let repos = data.root.join("repos");
+    mkdir_explicit(&repos, 0o755);
+    let repo_dir = repos.join("ledger-cafe1111");
+    mkdir_explicit(&repo_dir, 0o757);
+    let db = repo_dir.join("graph.db");
+    Store::open(&db).expect("first open creates the db");
+    // A stray user chmod on the repo directory is narrowed on the next
+    // open of an existing database.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&repo_dir, std::fs::Permissions::from_mode(0o757)).expect("widen");
+    }
+    Store::open(&db).expect("second open");
+    assert_eq!(mode_of(&data.root), 0o751, "data root");
+    assert_eq!(mode_of(&repos), 0o700, "repos");
+    assert_eq!(mode_of(&repo_dir), 0o700, "repo dir");
+}
+
+#[test]
+#[cfg(unix)]
+fn open_leaves_a_wider_non_repos_directory_alone() {
+    let db = TempDb::new("plain");
+    assert_outside_workspace(db.path());
+    // The temp dir already exists with a wider umask-carried mode; opening
+    // a plain database under it must not change that parent at all.
+    let before = mode_of(db.path().parent().expect("parent"));
+    Store::open(db.path()).expect("open");
+    assert_eq!(
+        mode_of(db.path().parent().expect("parent")),
+        before,
+        "parent mode changed"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn database_and_wal_files_are_0600_after_index() {
+    let data = TempData::new("wal");
+    let db = data.db();
+    let mut store = Store::open(&db).expect("open");
+    let language = RustLanguage::new().expect("grammar");
+    let (source, mtime_ns) = fixture();
+    store
+        .put_source("src/lib.rs", &source, mtime_ns, &language)
+        .expect("put");
+    let text = db.to_string_lossy().into_owned();
+    for suffix in ["", "-wal", "-shm"] {
+        let path = format!("{text}{suffix}");
+        assert_eq!(mode_of(Path::new(&path)), 0o600, "{path}");
+    }
+}
+
+#[test]
+fn harden_is_first_on_an_existing_database() {
+    let db = TempDb::new("harden-order");
+    assert_outside_workspace(db.path());
+    drop(Store::open(db.path()).expect("create"));
+    {
+        let conn = Connection::open(db.path()).expect("sqlite");
+        conn.execute_batch(
+            "DROP TRIGGER symbols_ai;
+             DROP TRIGGER symbols_ad;
+             DROP TRIGGER symbols_au;
+             UPDATE meta SET value = '1' WHERE key = 'schema_version';
+             PRAGMA user_version = 1;",
+        )
+        .expect("downgrade");
+    }
+    crate::open_trace::clear();
+    let store = Store::open(db.path()).expect("open existing");
+    drop(store);
+    let steps = crate::open_trace::steps();
+    assert!(!steps.is_empty(), "no open steps recorded");
+    assert_eq!(steps.first().copied(), Some("harden"), "{steps:?}");
+    let harden_at = steps
+        .iter()
+        .position(|step| *step == "harden")
+        .expect("harden recorded");
+    for later in ["meta_table_exists", "check_stamp", "migrate_v1_to_v2"] {
+        let at = steps
+            .iter()
+            .position(|step| *step == later)
+            .unwrap_or_else(|| panic!("{later} not recorded: {steps:?}"));
+        assert!(at > harden_at, "{later} at {at}, {steps:?}");
+    }
+}
+
 #[test]
 fn disallowed_table_name_is_not_unreadable_stamp() {
     let db = TempDb::new("table");
