@@ -8,8 +8,12 @@ use phantom_fractal_lang::{Item, ItemKind, Visibility};
 use phantom_fractal_lang_rust::RustLanguage;
 use phantom_fractal_store::Store;
 
-const RUST_FILES: [&str; 4] = [
+const RUST_FILES: [&str; 8] = [
+    "credentials.rs",
     "edge.rs",
+    "netrc.rs",
+    "npmrc.rs",
+    "src/id_codec.rs",
     "src/ledger.rs",
     "src/lib.rs",
     "src/target/mod.rs",
@@ -48,7 +52,22 @@ fn first_pass_writes_each_kept_rust_file() {
     assert_eq!(sorted(&report.written), RUST_FILES);
     assert!(report.unchanged.is_empty());
     assert!(report.not_utf8.is_empty());
-    assert_eq!(s.store.row_count("files").expect("count"), 4);
+    assert_eq!(s.store.row_count("files").expect("count"), 8);
+}
+
+#[test]
+fn id_codec_is_not_a_key_and_its_symbol_is_stored() {
+    let mut s = setup();
+    index(s.repo.root(), &mut s.store, &s.rust).expect("index");
+    let decode_id = Item {
+        kind: ItemKind::Function,
+        name: "decode_id".to_owned(),
+        visibility: Visibility::Public,
+        start_line: 3,
+    };
+    let items = s.store.read_items("src/id_codec.rs").expect("read");
+    assert!(items.contains(&decode_id), "{items:?}");
+    assert!(s.store.match_count("decode_id").expect("match") >= 1);
 }
 
 #[test]
@@ -95,7 +114,14 @@ fn passes_leave_the_tree_and_its_git_dir_byte_identical() {
 fn skipped_files_are_reported_and_not_stored() {
     let mut s = setup();
     let report = index(s.repo.root(), &mut s.store, &s.rust).expect("index");
-    for path in ["big.rs", "src/id_codec.rs", "link_in.rs", "link_out.rs"] {
+    for path in [
+        "big.rs",
+        "link_in.rs",
+        "link_out.rs",
+        "hard_out.rs",
+        "credentials",
+        "keys/id_ed25519",
+    ] {
         assert!(
             report.skipped.iter().any(|skip| skip.path == path),
             "{path}"

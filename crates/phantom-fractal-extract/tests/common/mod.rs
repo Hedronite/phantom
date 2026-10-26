@@ -49,7 +49,8 @@ impl Drop for TempDir {
 }
 
 /// The fixture repo, plus what git cannot carry: a `.git` directory with an
-/// exclude rule, a file over the size cap, one exactly at it, and symlinks.
+/// exclude rule, a file over the size cap, one exactly at it, symlinks, a
+/// hard link to an outside file, and more secret-named decoys.
 pub struct FixtureRepo {
     outside: TempDir,
     root: TempDir,
@@ -78,6 +79,18 @@ impl FixtureRepo {
             "elsewhere.rs",
             b"pub fn outside_root() {}\n",
         );
+        write(outside.path(), "hard_target.rs", HARD_OUT_TEXT);
+        fs::hard_link(
+            outside.path().join("hard_target.rs"),
+            path.join("hard_out.rs"),
+        )
+        .expect("hard link out");
+        for name in SECRET_DECOYS {
+            write(path, name, b"placeholder, not a real secret\n");
+        }
+        write(path, "credentials.rs", b"pub fn credentials_kept() {}\n");
+        write(path, "netrc.rs", b"pub fn netrc_kept() {}\n");
+        write(path, "npmrc.rs", b"pub fn npmrc_kept() {}\n");
         symlink(path.join("src/ledger.rs"), path.join("link_in.rs")).expect("link in");
         symlink(
             outside.path().join("elsewhere.rs"),
@@ -133,6 +146,20 @@ fn copy_tree(from: &Path, to: &Path) {
         }
     }
 }
+
+/// Text of the outside file hard-linked into the root as `hard_out.rs`.
+pub const HARD_OUT_TEXT: &[u8] = b"pub fn hard_outside() {}\n";
+
+/// Secret-named files the harness adds beside the checked-in ones.
+pub const SECRET_DECOYS: [&str; 7] = [
+    "credentials",
+    ".netrc",
+    ".npmrc",
+    "certs/client.p12",
+    "certs/client.pfx",
+    "keys/id_github",
+    "keys/id_rsa.pub",
+];
 
 /// First line of `big.rs`, one byte over the cap.
 pub const BIG_HEAD: &[u8] = b"pub fn big_prefix() {}\n";
