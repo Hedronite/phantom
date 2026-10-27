@@ -1,6 +1,7 @@
-//! `callers` and `callees` against a temp copy of `fixtures/resolve`, whose
-//! edges `fixtures/resolve/EXPECTED.md` lists, and against generated trees
-//! for the caps. The data directory is a second temp directory.
+//! `callers` and `callees` against temp copies of `fixtures/resolve`,
+//! `fixtures/resolve-self`, and `fixtures/workspace`, whose edges each
+//! `EXPECTED.md` lists, and against generated trees for the caps. The data
+//! directory is a second temp directory.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,11 @@ const BINS: [&str; 2] = [
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/resolve");
 
 const INDEX_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/index/repo");
+
+const RESOLVE_SELF_FIXTURE: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/resolve-self");
+
+const WORKSPACE_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/workspace");
 
 /// A fresh directory under the system temp dir, removed on drop.
 struct TempDir(PathBuf);
@@ -167,8 +173,8 @@ impl Fixture {
 fn confidence(reason: &str) -> f64 {
     match reason {
         "path-exact" => 1.0,
-        "local" | "use-alias" => 0.95,
-        "assoc" => 0.9,
+        "local" | "use-alias" | "crate-path" => 0.95,
+        "assoc" | "self-method" | "self-assoc" => 0.9,
         other => panic!("unknown reason {other}"),
     }
 }
@@ -196,14 +202,17 @@ fn hit_set(fixture: &Fixture, env: &Value, callee: Option<&str>) -> Vec<(String,
         assert_eq!(hit["confidence"], confidence(reason), "{hit}");
         assert!(name.starts_with("crate::"), "{hit}");
         assert!(hit["symbol_path"].as_str().is_some(), "{hit}");
-        // The call site names the callee, unless a `use … as` renamed it.
+        // The call site names the callee, unless a `use … as` or a
+        // re-export renamed it on the way.
         let site = fixture.source_line(
             hit["path"].as_str().expect("path"),
             hit["line"].as_u64().expect("line"),
         );
         let called = callee.unwrap_or(name);
         let last = called.rsplit("::").next().expect("a segment");
-        if reason != "use-alias" {
+        if reason == "use-alias" || reason == "crate-path" {
+            assert!(site.contains('('), "{hit} at {site:?}");
+        } else {
             assert!(site.contains(&format!("{last}(")), "{hit} at {site:?}");
         }
         set.push((name.to_owned(), reason.to_owned()));
@@ -339,6 +348,248 @@ fn callers_and_callees_return_the_expected_sets() {
             assert_eq!(got, pairs(expected), "{bin} callees {query}");
         }
     }
+}
+
+/// One lookup: the command, the query, the symbol's qualified name and
+/// path, its expected hits, and for `callees` its `unresolved_calls`.
+type Case = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    Expected,
+    Option<u64>,
+);
+
+/// Runs each case with both binaries and returns every reason it saw.
+fn check_cases(fixture: &Fixture, cases: &[Case]) -> Vec<String> {
+    let mut seen = Vec::new();
+    for bin in BINS {
+        for &(command, query, name, path, expected, unresolved) in cases {
+            let (code, env) = fixture.calls(bin, command, query);
+            assert_eq!(code, Some(0), "{bin} {command} {query}: {env}");
+            assert_eq!(env["data"]["symbol"]["name"], name, "{env}");
+            assert_eq!(env["data"]["symbol"]["path"], path, "{env}");
+            let callee = match command {
+                "callers" => Some(name),
+                _ => None,
+            };
+            if callee.is_none() {
+                for hit in env["data"]["hits"].as_array().expect("hits") {
+                    assert_eq!(
+                        hit["path"], path,
+                        "a callee's call site is in {path}: {hit}"
+                    );
+                }
+            }
+            match unresolved {
+                Some(count) => assert_eq!(env["data"]["unresolved_calls"], count, "{env}"),
+                None => assert!(env["data"].get("unresolved_calls").is_none(), "{env}"),
+            }
+            let got = hit_set(fixture, &env, callee);
+            assert_eq!(got, pairs(expected), "{bin} {command} {query}");
+            seen.extend(got.into_iter().map(|(_, reason)| reason));
+        }
+    }
+    seen.sort();
+    seen.dedup();
+    seen
+}
+
+/// `self.m()` and `Self::m()` edges of `fixtures/resolve-self/EXPECTED.md`
+/// at 0.9, and none for its no-edge cases.
+#[test]
+fn self_method_and_self_assoc_edges() {
+    let fixture = Fixture::of(RESOLVE_SELF_FIXTURE);
+    let cases: [Case; 9] = [
+        (
+            "callees",
+            "Counter::bump",
+            "crate::Counter::bump",
+            "src/lib.rs",
+            &[
+                ("crate::Counter::check", "self-method"),
+                ("crate::Counter::describe", "self-method"),
+                ("crate::Counter::new", "self-assoc"),
+            ],
+            Some(2),
+        ),
+        (
+            "callees",
+            "Counter::new",
+            "crate::Counter::new",
+            "src/lib.rs",
+            &[("crate::Counter::helper", "self-assoc")],
+            Some(0),
+        ),
+        (
+            "callees",
+            "Counter::unclear",
+            "crate::Counter::unclear",
+            "src/lib.rs",
+            &[("crate::Counter::check", "self-method")],
+            Some(2),
+        ),
+        (
+            "callees",
+            "Plot::describe",
+            "crate::shapes::Plot::describe",
+            "src/shapes.rs",
+            &[
+                ("crate::shapes::Plot::area", "self-method"),
+                ("crate::shapes::Plot::area", "self-assoc"),
+            ],
+            Some(0),
+        ),
+        (
+            "callees",
+            "Wrap::peek",
+            "crate::Wrap::peek",
+            "src/lib.rs",
+            &[("crate::Wrap::get", "self-method")],
+            Some(0),
+        ),
+        (
+            "callees",
+            "entry",
+            "crate::entry",
+            "src/lib.rs",
+            &[
+                ("crate::Counter::new", "assoc"),
+                ("crate::Counter::new", "assoc"),
+            ],
+            Some(2),
+        ),
+        (
+            "callers",
+            "Counter::check",
+            "crate::Counter::check",
+            "src/lib.rs",
+            &[
+                ("crate::Counter::bump", "self-method"),
+                ("crate::Counter::describe", "self-method"),
+                ("crate::Counter::unclear", "self-method"),
+                ("crate::shapes::Counter::from_shapes", "self-method"),
+            ],
+            None,
+        ),
+        (
+            "callers",
+            "Shape::area",
+            "crate::shapes::Shape::area",
+            "src/shapes.rs",
+            &[("crate::shapes::Shape::describe", "self-method")],
+            None,
+        ),
+        (
+            "callers",
+            "Inner::tick",
+            "crate::Inner::tick",
+            "src/lib.rs",
+            &[],
+            None,
+        ),
+    ];
+    let seen = check_cases(&fixture, &cases);
+    assert_eq!(seen, ["assoc", "self-assoc", "self-method"]);
+}
+
+/// `crate-path` edges of `fixtures/workspace/EXPECTED.md` at 0.95, across
+/// packages, and none where a package has no dependency or a local name
+/// wins.
+#[test]
+fn crate_path_edges_cross_packages() {
+    let fixture = Fixture::of(WORKSPACE_FIXTURE);
+    let cases: [Case; 7] = [
+        (
+            "callees",
+            "crate::run",
+            "crate::run",
+            "app/src/lib.rs",
+            &[
+                ("crate::f", "crate-path"),
+                ("crate::util::helper", "crate-path"),
+                ("crate::util::helper", "crate-path"),
+                ("crate::util::helper", "crate-path"),
+                ("crate::Thing::new", "crate-path"),
+                ("crate::Thing::new", "crate-path"),
+            ],
+            Some(2),
+        ),
+        (
+            "callees",
+            "main",
+            "crate::main",
+            "app/src/main.rs",
+            &[("crate::run", "crate-path"), ("crate::f", "crate-path")],
+            Some(0),
+        ),
+        (
+            "callees",
+            "Thing::new",
+            "crate::Thing::new",
+            "core-lib/src/lib.rs",
+            &[("crate::Thing::make", "self-assoc")],
+            Some(0),
+        ),
+        (
+            "callees",
+            "Thing::twice",
+            "crate::Thing::twice",
+            "app/src/lib.rs",
+            &[("crate::Thing::show", "self-method")],
+            Some(0),
+        ),
+        (
+            "callers",
+            "crate::f",
+            "crate::f",
+            "core-lib/src/lib.rs",
+            &[
+                ("crate::run", "crate-path"),
+                ("crate::main", "crate-path"),
+                ("crate::go", "crate-path"),
+            ],
+            None,
+        ),
+        (
+            "callers",
+            "util::helper",
+            "crate::util::helper",
+            "core-lib/src/util.rs",
+            &[
+                ("crate::run", "crate-path"),
+                ("crate::run", "crate-path"),
+                ("crate::run", "crate-path"),
+                ("crate::f", "local"),
+                ("crate::go", "crate-path"),
+            ],
+            None,
+        ),
+        (
+            "callers",
+            "core_lib::f",
+            "crate::core_lib::f",
+            "shadow/src/lib.rs",
+            &[("crate::go", "local")],
+            None,
+        ),
+    ];
+    let seen = check_cases(&fixture, &cases);
+    assert_eq!(seen, ["crate-path", "local", "self-assoc", "self-method"]);
+    // The callers of `f` come from `app` and `uses-ws` only.
+    let (_, env) = fixture.calls(BINS[1], "callers", "crate::f");
+    let mut packages: Vec<&str> = env["data"]["hits"]
+        .as_array()
+        .expect("hits")
+        .iter()
+        .map(|hit| hit["symbol_path"].as_str().expect("symbol_path"))
+        .collect();
+    packages.sort_unstable();
+    assert_eq!(
+        packages,
+        ["app/src/lib.rs", "app/src/main.rs", "uses-ws/src/lib.rs"]
+    );
 }
 
 #[test]

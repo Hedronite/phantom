@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use phantom_fractal_extract::{GraphReport, IndexError, IndexReport};
+use phantom_fractal_extract::{GraphReport, IndexError, IndexReport, ReasonCounts};
 use phantom_fractal_lang::{Item, Visibility};
 use phantom_fractal_lang_rust::RustLanguage;
 use phantom_fractal_proto::{Envelope, ErrorKind};
@@ -89,6 +89,39 @@ struct IndexSummary {
     no_source: u64,
     method_calls: u64,
     macros: u64,
+    edges_by_reason: EdgesByReason,
+}
+
+/// The stored edges for each reason, keyed by the reason text that
+/// `callers` and `callees` print. Every key is present, zero included.
+#[derive(Serialize)]
+struct EdgesByReason {
+    #[serde(rename = "path-exact")]
+    path_exact: u64,
+    local: u64,
+    #[serde(rename = "use-alias")]
+    use_alias: u64,
+    assoc: u64,
+    #[serde(rename = "self-method")]
+    self_method: u64,
+    #[serde(rename = "self-assoc")]
+    self_assoc: u64,
+    #[serde(rename = "crate-path")]
+    crate_path: u64,
+}
+
+impl From<ReasonCounts> for EdgesByReason {
+    fn from(counts: ReasonCounts) -> Self {
+        Self {
+            path_exact: counts.path_exact,
+            local: counts.local,
+            use_alias: counts.use_alias,
+            assoc: counts.assoc,
+            self_method: counts.self_method,
+            self_assoc: counts.self_assoc,
+            crate_path: counts.crate_path,
+        }
+    }
 }
 
 impl IndexSummary {
@@ -107,6 +140,7 @@ impl IndexSummary {
             no_source: counts.no_source,
             method_calls: counts.method_calls,
             macros: counts.macros,
+            edges_by_reason: graph.edges_by_reason.into(),
         }
     }
 }

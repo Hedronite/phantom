@@ -19,6 +19,22 @@ const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/index
 
 const RESOLVE_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/resolve");
 
+const RESOLVE_SELF_FIXTURE: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/resolve-self");
+
+const WORKSPACE_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/workspace");
+
+/// The keys of `edges_by_reason`: every reason `callers` and `callees` print.
+const REASONS: [&str; 7] = [
+    "path-exact",
+    "local",
+    "use-alias",
+    "assoc",
+    "self-method",
+    "self-assoc",
+    "crate-path",
+];
+
 /// The graph counts `index` adds, in `fixtures/resolve/EXPECTED.md` order.
 const GRAPH_COUNTS: [&str; 8] = [
     "edges",
@@ -223,6 +239,7 @@ fn index_json_holds_no_absolute_path() {
             keys,
             [
                 "edges",
+                "edges_by_reason",
                 "external",
                 "macros",
                 "method_calls",
@@ -238,7 +255,86 @@ fn index_json_holds_no_absolute_path() {
             "{bin}: {text}"
         );
         for (key, value) in env["data"].as_object().expect("data") {
-            assert!(value.is_u64(), "{bin}: {key} is not a count: {text}");
+            if key != "edges_by_reason" {
+                assert!(value.is_u64(), "{bin}: {key} is not a count: {text}");
+            }
+        }
+        let by_reason = reason_counts(&env);
+        let total: u64 = by_reason.values().sum();
+        assert_eq!(env["data"]["edges"], total, "{bin}: {text}");
+    }
+}
+
+/// `data.edges_by_reason`, after checking it has exactly the seven
+/// [`REASONS`] keys, each a count.
+fn reason_counts(env: &Value) -> BTreeMap<&str, u64> {
+    let object = env["data"]["edges_by_reason"]
+        .as_object()
+        .unwrap_or_else(|| panic!("edges_by_reason is not an object: {env}"));
+    let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    let mut reasons = REASONS;
+    reasons.sort_unstable();
+    assert_eq!(keys, reasons, "{env}");
+    object
+        .iter()
+        .map(|(key, value)| {
+            let count = value
+                .as_u64()
+                .unwrap_or_else(|| panic!("{key} is not a count: {env}"));
+            (key.as_str(), count)
+        })
+        .collect()
+}
+
+/// The **Edges** of a fixture's `EXPECTED.md`, counted by reason, and its
+/// **Counts** lines.
+fn expected_counts(fixture: &str) -> (BTreeMap<&'static str, u64>, BTreeMap<String, u64>) {
+    let text = fs::read_to_string(Path::new(fixture).join("EXPECTED.md")).expect("EXPECTED.md");
+    let mut by_reason: BTreeMap<&str, u64> = REASONS.into_iter().map(|key| (key, 0)).collect();
+    let mut counts = BTreeMap::new();
+    let mut section = "";
+    for line in text.lines() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            section = heading;
+        } else if let Some(item) = line.strip_prefix("- ") {
+            match section {
+                "Edges" => {
+                    let reason = item.trim_end_matches('`').rsplit(' ').next();
+                    let slot = REASONS
+                        .into_iter()
+                        .find(|key| Some(*key) == reason)
+                        .unwrap_or_else(|| panic!("{fixture}: no reason in {item}"));
+                    *by_reason.get_mut(slot).expect("a reason key") += 1;
+                }
+                "Counts" => {
+                    let (key, count) = item.split_once(": ").expect("key: count");
+                    counts.insert(key.to_owned(), count.parse().expect("a count"));
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(counts.len(), GRAPH_COUNTS.len(), "{fixture}: {counts:?}");
+    (by_reason, counts)
+}
+
+/// On each fixture with an `EXPECTED.md`, both passes report its counts and
+/// its edges by reason, zero included.
+#[test]
+fn index_reports_the_edges_by_reason_of_each_fixture() {
+    for fixture in [RESOLVE_FIXTURE, RESOLVE_SELF_FIXTURE, WORKSPACE_FIXTURE] {
+        let (by_reason, counts) = expected_counts(fixture);
+        let copy = Fixture::of(fixture);
+        let (_, first) = copy.index(BINS[0]);
+        let (_, second) = copy.index(BINS[1]);
+        assert_eq!(second["data"]["written"], 0, "{fixture}: {second}");
+        for env in [&first, &second] {
+            assert_eq!(env["ok"], true, "{fixture}: {env}");
+            assert_eq!(reason_counts(env), by_reason, "{fixture}: {env}");
+            for (key, count) in &counts {
+                assert_eq!(env["data"][key], *count, "{fixture} {key}: {env}");
+            }
         }
     }
 }
