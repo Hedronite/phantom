@@ -346,8 +346,14 @@ impl crate::Store {
 
     /// Symbols matching a bare name such as `open_ledger` or a
     /// module-qualified name such as `ledger::open_ledger` or
-    /// `ledger::Ledger::open`. `query` is bound, never spliced.
+    /// `ledger::Ledger::open` — the file module path without a leading
+    /// `crate::` joined to the in-file `qual_name`, so an inline module
+    /// never doubles, and the `crate::` prefixed spelling matches too.
+    /// `query` is bound, never spliced.
     pub fn symbols_matching(&self, query: &str) -> Result<Vec<SymbolMatch>, StoreError> {
+        // The optional `crate::` prefix of the query is stripped in the
+        // caller, not in SQL, so one bound value covers both spellings.
+        let qualified = query.strip_prefix("crate::").unwrap_or(query);
         let mut statement = self.conn.prepare(
             "SELECT s.id, s.kind, COALESCE(m.path, ''), s.qual_name, f.path, s.start_line
              FROM symbols s
@@ -355,10 +361,19 @@ impl crate::Store {
              LEFT JOIN modules m ON m.id = s.module_id
              WHERE s.name = ?1
                 OR s.qual_name = ?1
-                OR (m.path IS NOT NULL AND m.path || '::' || s.qual_name = ?1)
+                OR EXISTS (
+                    SELECT 1 FROM modules fm
+                    WHERE fm.file_id = s.file_id AND fm.scope = ''
+                      AND CASE
+                              WHEN fm.path = 'crate' THEN s.qual_name
+                              WHEN fm.path LIKE 'crate::%'
+                                    THEN substr(fm.path, 8) || '::' || s.qual_name
+                              ELSE fm.path || '::' || s.qual_name
+                          END = ?2
+                )
              ORDER BY s.qual_name, f.path, s.id",
         )?;
-        let mut rows = statement.query([query])?;
+        let mut rows = statement.query([query, qualified])?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
             out.push(SymbolMatch {
