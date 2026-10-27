@@ -17,6 +17,8 @@ const BINS: [&str; 2] = [
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/resolve");
 
+const INDEX_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/index/repo");
+
 /// A fresh directory under the system temp dir, removed on drop.
 struct TempDir(PathBuf);
 
@@ -93,8 +95,13 @@ struct Fixture {
 impl Fixture {
     /// A copy of `fixtures/resolve`, indexed.
     fn resolve() -> Self {
+        Self::of(FIXTURE)
+    }
+
+    /// A copy of the fixture tree at `source`, indexed.
+    fn of(source: &str) -> Self {
         let fixture = Self::empty();
-        copy_tree(Path::new(FIXTURE), fixture.repo.path());
+        copy_tree(Path::new(source), fixture.repo.path());
         fixture.index();
         fixture
     }
@@ -560,4 +567,92 @@ fn ambiguous_lists_at_most_10_candidates() {
     let (code, env) = fixture.calls(BINS[1], "callers", "m11::dup");
     assert_eq!(code, Some(0), "a qualified name picks one: {env}");
     assert_eq!(env["data"]["symbol"]["name"], "crate::m11::dup", "{env}");
+}
+
+/// The symbol a lookup named, or the envelope when it named none or many.
+fn named(fixture: &Fixture, bin: &str, query: &str) -> (Option<i32>, Value) {
+    let (code, env) = fixture.calls(bin, "callers", query);
+    (code, env["data"]["symbol"].clone())
+}
+
+/// The module-qualified form is the file module path, with or without
+/// `crate::`, joined to the in-file name. An inline module's scope is not
+/// doubled, and a partial module path is not a match.
+#[test]
+fn module_qualified_names_name_one_symbol() {
+    let index = Fixture::of(INDEX_FIXTURE);
+    let resolve = Fixture::resolve();
+    let found: [(&Fixture, &str, &str, &str); 8] = [
+        (
+            &index,
+            "ledger::open_ledger",
+            "crate::ledger::open_ledger",
+            "src/ledger.rs",
+        ),
+        (
+            &index,
+            "crate::ledger::open_ledger",
+            "crate::ledger::open_ledger",
+            "src/ledger.rs",
+        ),
+        (
+            &resolve,
+            "tests::check",
+            "crate::tests::check",
+            "src/lib.rs",
+        ),
+        (
+            &resolve,
+            "crate::tests::check",
+            "crate::tests::check",
+            "src/lib.rs",
+        ),
+        (
+            &resolve,
+            "util::deep::sink",
+            "crate::util::deep::sink",
+            "src/util/deep.rs",
+        ),
+        (
+            &resolve,
+            "crate::util::deep::sink",
+            "crate::util::deep::sink",
+            "src/util/deep.rs",
+        ),
+        (
+            &resolve,
+            "tricky::Guest::greet",
+            "crate::tricky::Guest::greet",
+            "src/tricky.rs",
+        ),
+        (
+            &resolve,
+            "shapes::circle::radius",
+            "crate::shapes::circle::radius",
+            "src/shapes/circle.rs",
+        ),
+    ];
+    let absent: [(&Fixture, &str); 5] = [
+        (&resolve, "crate::tests::tests::check"),
+        (&resolve, "tests::tests::check"),
+        (&resolve, "deep::sink"),
+        (&resolve, "crate::crate::util::helper"),
+        (&index, "ledger::ledger::open_ledger"),
+    ];
+    for bin in BINS {
+        for (fixture, query, name, path) in found {
+            let (code, symbol) = named(fixture, bin, query);
+            assert_eq!(code, Some(0), "{bin} {query}: {symbol}");
+            assert_eq!(symbol["name"], name, "{bin} {query}");
+            assert_eq!(symbol["path"], path, "{bin} {query}");
+        }
+        for (fixture, query) in absent {
+            let (code, env) = fixture.calls(bin, "callees", query);
+            assert_eq!(code, Some(3), "{bin} {query}: {env}");
+            assert_eq!(env["error"]["kind"], "not_found", "{env}");
+        }
+    }
+    let (_, symbol) = named(&index, BINS[1], "ledger::open_ledger");
+    assert_eq!(symbol["kind"], "function", "{symbol}");
+    assert_eq!(symbol["line"], 7, "{symbol}");
 }

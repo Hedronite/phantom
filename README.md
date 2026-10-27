@@ -52,7 +52,13 @@ The directories Phantom creates on the way to `graph.db` are private, mode `0700
 
 ## Calls
 
-SYMBOL is a bare name such as `helper`, or a module-qualified name such as `util::helper`, `crate::util::helper`, or `Counter::new`. A symbol's qualified name starts at `crate`, its target's root, and its last segments must equal SYMBOL's segments. A symbol in an orphan file has no module, so its qualified name starts at its own name or `impl` type.
+SYMBOL is one of:
+
+- a bare name, such as `helper`;
+- a name within its file, such as `Counter::new` or `tests::check` for a function in an inline `mod tests`;
+- a module-qualified name: the file's whole module path from the target root, with or without `crate::`, joined to the name within the file, such as `util::deep::sink` or `crate::util::deep::sink`. A partial path such as `deep::sink` does not match.
+
+Output names a symbol by its qualified name from `crate`, such as `crate::tests::check`. A symbol in an orphan file has no module, so its name starts at its own name or `impl` type.
 
 - No symbol matches: `not_found`, exit 3.
 - More than one matches: `ambiguous`, exit 6. The message lists up to 10 candidates with their paths and lines, `data.candidates` holds the same ones, and `data.total` counts them all. Qualify the name further to pick one.

@@ -1,8 +1,9 @@
 //! `callers` and `callees`: the stored call edges of one symbol.
 //!
-//! A query is a bare name such as `helper` or a module-qualified name such
-//! as `util::helper`, `crate::util::helper`, or `Counter::new`. Its
-//! segments must equal the last segments of a symbol's qualified name.
+//! A query is a bare name such as `helper`, an in-file name such as
+//! `Counter::new` or `tests::check`, or a module-qualified name such as
+//! `util::helper` or `crate::util::helper`. The store's `symbols_matching`
+//! decides which symbols it names.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -160,26 +161,13 @@ pub(crate) fn calls(direction: Direction, query: &str, repo: &Path) -> Result<Ca
 /// The one stored symbol `query` names. None is `NotFound`; more than one
 /// is `Ambiguous`, with up to [`CANDIDATE_CAP`] candidates.
 fn lookup(store: &Store, names: &Names, query: &str) -> Result<SymbolMatch, Failure> {
-    let segments: Vec<&str> = query.split("::").collect();
-    let not_found = || Failure::new(ErrorKind::NotFound, format!("no symbol named {query}"));
-    let Some(&name) = segments.last() else {
-        return Err(not_found());
-    };
-    if segments.iter().any(|segment| segment.is_empty()) {
-        return Err(not_found());
-    }
-    let mut matches: Vec<SymbolMatch> = store
-        .symbols_matching(name)?
-        .into_iter()
-        .filter(|found| {
-            names.symbols.get(&found.id).is_some_and(|symbol| {
-                symbol.name == name && ends_with(&names.qualified(symbol), &segments)
-            })
-        })
-        .collect();
+    let mut matches = store.symbols_matching(query)?;
     matches.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
     match matches.len() {
-        0 => Err(not_found()),
+        0 => Err(Failure::new(
+            ErrorKind::NotFound,
+            format!("no symbol named {query}"),
+        )),
         1 => Ok(matches.remove(0)),
         total => {
             let candidates: Vec<SymbolOut> = matches
@@ -207,12 +195,6 @@ fn lookup(store: &Store, names: &Names, query: &str) -> Result<SymbolMatch, Fail
             ))
         }
     }
-}
-
-/// True when the last segments of `qualified` are `segments`.
-fn ends_with(qualified: &str, segments: &[&str]) -> bool {
-    let parts: Vec<&str> = qualified.split("::").collect();
-    parts.len() >= segments.len() && parts[parts.len() - segments.len()..] == *segments
 }
 
 fn symbol_out(names: &Names, found: SymbolMatch) -> SymbolOut {
