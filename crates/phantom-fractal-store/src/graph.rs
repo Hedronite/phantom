@@ -50,6 +50,19 @@ pub struct CallHit {
     pub reason: String,
 }
 
+pub(crate) fn reason_from_text(reason: &str) -> Result<Reason, StoreError> {
+    match reason {
+        "path-exact" => Ok(Reason::PathExact),
+        "local" => Ok(Reason::Local),
+        "use-alias" => Ok(Reason::UseAlias),
+        "assoc" => Ok(Reason::Assoc),
+        "self-method" => Ok(Reason::SelfMethod),
+        "self-assoc" => Ok(Reason::SelfAssoc),
+        "crate-path" => Ok(Reason::CratePath),
+        other => Err(StoreError::UnknownReason(other.to_owned())),
+    }
+}
+
 pub(crate) fn reason_to_text(reason: Reason) -> &'static str {
     match reason {
         Reason::PathExact => "path-exact",
@@ -430,12 +443,13 @@ impl crate::Store {
         let mut rows = statement.query(id)?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
+            let reason = reason_from_text(&row.get::<_, String>(4)?)?;
             out.push(CallHit {
                 symbol: row.get(0)?,
                 file: row.get(1)?,
                 line: row.get(2)?,
                 confidence: row.get(3)?,
-                reason: row.get(4)?,
+                reason: reason_to_text(reason).to_owned(),
             });
         }
         Ok(out)
