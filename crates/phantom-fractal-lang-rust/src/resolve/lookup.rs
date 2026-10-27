@@ -2,7 +2,8 @@
 //!
 //! Inside a module, a local item or child module beats a `use` binding. A
 //! name only a glob could supply is not looked up. Inline modules nest by
-//! scope, and `super` moves one module up.
+//! scope, and `super` moves one module up. `self.m()` and `Self::m()` look
+//! up the methods of the calling impl's self type (SPEC-w4 G1).
 
 use std::collections::HashMap;
 
@@ -73,6 +74,9 @@ pub(crate) struct Index<'a> {
     /// Method name to `(method, owner type)` for every inherent method
     /// whose owner resolves to one type.
     inherent: HashMap<&'a str, Vec<(Id, Id)>>,
+    /// `(struct or enum, name)` to every method, inherent or trait impl,
+    /// whose owner resolves to that one type.
+    by_type: HashMap<(Id, &'a str), Vec<Id>>,
 }
 
 impl<'a> Index<'a> {
@@ -86,6 +90,7 @@ impl<'a> Index<'a> {
             items: HashMap::new(),
             uses: HashMap::new(),
             inherent: HashMap::new(),
+            by_type: HashMap::new(),
         };
         for module in &input.modules {
             index
@@ -121,23 +126,34 @@ impl<'a> Index<'a> {
             }
         }
         let mut inherent: HashMap<&'a str, Vec<(Id, Id)>> = HashMap::new();
+        let mut by_type: HashMap<(Id, &'a str), Vec<Id>> = HashMap::new();
         for method in &input.symbols {
-            if method.kind != SymbolKind::Method || method.trait_name.is_some() {
+            if method.kind != SymbolKind::Method {
                 continue;
             }
-            if let Some(owner) = index.owner_type(method) {
+            let Some(owner) = index.owner_type(method) else {
+                continue;
+            };
+            if method.trait_name.is_none() {
                 inherent
                     .entry(method.name.as_str())
                     .or_default()
                     .push((method.id, owner));
             }
+            if index.is_data_type(owner) {
+                by_type
+                    .entry((owner, method.name.as_str()))
+                    .or_default()
+                    .push(method.id);
+            }
         }
         index.inherent = inherent;
+        index.by_type = by_type;
         index
     }
 
-    /// Places one `Call` reference that has a source symbol.
-    pub(crate) fn place(&self, call: &CallRef) -> Placed {
+    /// Places one `Call` reference whose source symbol is `source`.
+    pub(crate) fn place(&self, call: &CallRef, source: Id) -> Placed {
         if call.shadowed {
             return Placed::Unresolved;
         }
@@ -147,6 +163,11 @@ impl<'a> Index<'a> {
         let Some(segs) = segments(&call.text) else {
             return Placed::Unresolved;
         };
+        if let [first, name] = &segs[..]
+            && first == "Self"
+        {
+            return self.place_self(source, name, Reason::SelfAssoc);
+        }
         let walked = match self.walk(module, &segs, 0, true) {
             Ok(walked) => walked,
             Err(Miss::External) => return Placed::External,
@@ -167,6 +188,35 @@ impl<'a> Index<'a> {
             Tier::UseAlias => Reason::UseAlias,
         };
         Placed::Edge(target, reason)
+    }
+
+    /// Places a call to method `name` of the calling method's own self
+    /// type: `self.name()` or `Self::name()` inside `source`.
+    ///
+    /// `source` must be a method of an `impl` whose self type resolves to
+    /// one struct or enum `T`. The candidates are the methods named `name`
+    /// whose own impl self type resolves to `T`, inherent or trait impl.
+    /// An owner path resolves inside its own target, so every candidate is
+    /// in the caller's target. Exactly one candidate gives an edge.
+    pub(crate) fn place_self(&self, source: Id, name: &str, reason: Reason) -> Placed {
+        match self.self_target(source, name) {
+            Some(target) => Placed::Edge(target, reason),
+            None => Placed::Unresolved,
+        }
+    }
+
+    fn self_target(&self, source: Id, name: &str) -> Option<Id> {
+        let method = self.symbols.get(&source)?;
+        if method.kind != SymbolKind::Method {
+            return None;
+        }
+        let ty = self
+            .owner_type(method)
+            .filter(|ty| self.is_data_type(*ty))?;
+        match self.by_type.get(&(ty, name)).map(Vec::as_slice) {
+            Some([one]) => Some(*one),
+            _ => None,
+        }
     }
 
     fn place_of(&self, file: &str, scope: &str) -> Option<Id> {
@@ -346,6 +396,11 @@ impl<'a> Index<'a> {
             self.kind(id),
             Some(SymbolKind::Struct | SymbolKind::Enum | SymbolKind::Trait)
         )
+    }
+
+    /// A struct or enum: a type a `self` receiver can have.
+    fn is_data_type(&self, id: Id) -> bool {
+        matches!(self.kind(id), Some(SymbolKind::Struct | SymbolKind::Enum))
     }
 
     /// Modules and types; a module symbol with no module row is a dead end

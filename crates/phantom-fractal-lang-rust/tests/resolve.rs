@@ -1,8 +1,8 @@
-//! The four-tier resolver over hand-built inputs (SPEC-w3 G2b).
+//! The resolver over hand-built inputs (SPEC-w3 G2b, SPEC-w4 G1a, G1b).
 
 use phantom_fractal_lang::{
-    CallRef, Dep, Edge, Id, Module, Reason, RefKind, ResolveCounts, ResolveInput, Symbol,
-    SymbolKind, Target, TargetKind, UseBinding,
+    CallRef, Edge, Id, Module, Reason, RefKind, ResolveCounts, ResolveInput, Symbol, SymbolKind,
+    Target, TargetKind, UseBinding,
 };
 use phantom_fractal_lang_rust::{confidence, resolve};
 
@@ -82,7 +82,17 @@ impl Input {
     }
 
     fn method(&mut self, owner_path: &str, trait_name: Option<&str>, name: &str) -> Id {
-        let id = self.symbol(SymbolKind::Method, name, "src/lib.rs", "");
+        self.method_in("src/lib.rs", owner_path, trait_name, name)
+    }
+
+    fn method_in(
+        &mut self,
+        file: &str,
+        owner_path: &str,
+        trait_name: Option<&str>,
+        name: &str,
+    ) -> Id {
+        let id = self.symbol(SymbolKind::Method, name, file, "");
         let symbol = self.input.symbols.last_mut().expect("symbol");
         symbol.owner = Some(
             owner_path
@@ -134,6 +144,13 @@ impl Input {
         self.call_in(Some(from), "src/lib.rs", "", text, RefKind::Call)
     }
 
+    /// A method call `receiver.name()` in `src/lib.rs`.
+    fn method_call(&mut self, from: Option<Id>, receiver: &str, name: &str) -> Id {
+        let id = self.call_in(from, "src/lib.rs", "", name, RefKind::MethodCall);
+        self.input.refs.last_mut().expect("ref").receiver = Some(receiver.to_owned());
+        id
+    }
+
     fn resolve(&self) -> (Vec<Edge>, ResolveCounts) {
         resolve(&self.input)
     }
@@ -168,27 +185,148 @@ fn confidences_are_the_spec_constants() {
 }
 
 #[test]
-fn self_calls_and_crate_paths_get_no_edge_yet() {
+fn self_method_and_self_assoc_reach_the_one_method_of_the_self_type() {
     let mut i = Input::new();
+    i.symbol(SymbolKind::Struct, "Counter", "src/lib.rs", "");
     let new = i.method("Counter", None, "new");
-    let get = i.method("Counter", None, "get");
-    i.call(new, "Self::get");
-    let receiver = i.call_in(Some(new), "src/lib.rs", "", "get", RefKind::MethodCall);
-    i.input.refs.last_mut().expect("ref").receiver = Some("self".to_owned());
-    i.call(get, "other_crate::f");
-    i.input.deps.push(Dep {
-        package: "pkg".to_owned(),
-        on: "other-crate".to_owned(),
-        crate_name: "other_crate".to_owned(),
-    });
+    let get = i.method("Counter<T>", None, "get");
+    let show = i.method("Counter", Some("fmt::Display"), "show");
+    let assoc = i.call(new, "Self::get");
+    let turbofish = i.call(new, "Self::get::<u8>");
+    let method = i.method_call(Some(new), "self", "get");
+    let generic = i.method_call(Some(new), "self", "get::<u8>");
+    let to_trait = i.method_call(Some(get), "self", "show");
+    let from_trait = i.method_call(Some(show), "self", "get");
     let (edges, counts) = i.resolve();
-    assert!(edges.is_empty(), "{edges:?} for ref {receiver}");
+    assert_eq!(
+        edges,
+        [
+            edge(assoc, new, get, Reason::SelfAssoc),
+            edge(turbofish, new, get, Reason::SelfAssoc),
+            edge(method, new, get, Reason::SelfMethod),
+            edge(generic, new, get, Reason::SelfMethod),
+            edge(to_trait, get, show, Reason::SelfMethod),
+            edge(from_trait, show, get, Reason::SelfMethod),
+        ]
+    );
     assert_eq!(
         counts,
         ResolveCounts {
-            // W3 sees `Self` and `other_crate` as unknown first segments.
-            external: 2,
-            method_calls: 1,
+            edges: 6,
+            ..ResolveCounts::default()
+        }
+    );
+}
+
+#[test]
+fn the_self_type_resolves_by_the_w3_tiers_from_the_impl() {
+    let mut i = Input::new();
+    i.module(1, "util", "src/util.rs", "");
+    i.symbol(SymbolKind::Struct, "Counter", "src/lib.rs", "");
+    i.symbol(SymbolKind::Enum, "Shape", "src/util.rs", "");
+    i.uses("src/lib.rs", "", "util::Shape", None, false);
+    let by_super = i.method_in("src/util.rs", "super::Counter", None, "bump");
+    let by_crate = i.method_in("src/util.rs", "crate::Counter", None, "reset");
+    let by_use = i.method("Shape", None, "area");
+    let by_path = i.method_in("src/util.rs", "self::Shape", None, "sides");
+    let up = i.method_call(Some(by_super), "self", "reset");
+    let down = i.method_call(Some(by_crate), "self", "bump");
+    let used = i.call(by_use, "Self::sides");
+    let pathed = i.method_call(Some(by_path), "self", "area");
+    let (edges, _) = i.resolve();
+    assert_eq!(
+        edges,
+        [
+            edge(up, by_super, by_crate, Reason::SelfMethod),
+            edge(down, by_crate, by_super, Reason::SelfMethod),
+            edge(used, by_use, by_path, Reason::SelfAssoc),
+            edge(pathed, by_path, by_use, Reason::SelfMethod),
+        ]
+    );
+}
+
+#[test]
+fn the_same_method_name_on_two_types_goes_to_each_own_type() {
+    let mut i = Input::new();
+    i.symbol(SymbolKind::Struct, "A", "src/lib.rs", "");
+    i.symbol(SymbolKind::Struct, "B", "src/lib.rs", "");
+    let a_run = i.method("A", None, "run");
+    let a_go = i.method("A", None, "go");
+    let b_run = i.method("B", Some("Runner"), "run");
+    let b_go = i.method("B", None, "go");
+    let from_a = i.method_call(Some(a_go), "self", "run");
+    let from_b = i.call(b_go, "Self::run");
+    let (edges, _) = i.resolve();
+    assert_eq!(
+        edges,
+        [
+            edge(from_a, a_go, a_run, Reason::SelfMethod),
+            edge(from_b, b_go, b_run, Reason::SelfAssoc),
+        ]
+    );
+}
+
+#[test]
+fn a_self_call_without_exactly_one_candidate_is_unresolved() {
+    let mut i = Input::new();
+    i.symbol(SymbolKind::Struct, "Both", "src/lib.rs", "");
+    i.symbol(SymbolKind::Struct, "Twin", "src/lib.rs", "");
+    i.symbol(SymbolKind::Enum, "Shape", "src/lib.rs", "");
+    i.symbol(SymbolKind::Trait, "Show", "src/lib.rs", "");
+    let both = i.method("Both", None, "m");
+    i.method("Both", Some("Show"), "m");
+    let twin = i.method("Twin", None, "m");
+    i.method("Twin", None, "m");
+    let shape = i.method("Shape", None, "area");
+    let foreign = i.method("Vec<u8>", Some("Show"), "show");
+    let on_trait = i.method("Show", None, "show");
+    let on_dyn = i.method("dyn Show", None, "show");
+    let free = i.function("free");
+    // An inherent and a trait-impl `m`, then two `#[cfg]` twins.
+    i.method_call(Some(both), "self", "m");
+    i.method_call(Some(twin), "self", "m");
+    // A variant, a method only a trait default provides, and a miss.
+    i.call(shape, "Self::Circle");
+    i.method_call(Some(shape), "self", "provided");
+    i.call(shape, "Self::missing");
+    // Self types that are not one struct or enum.
+    i.method_call(Some(foreign), "self", "show");
+    i.method_call(Some(on_trait), "self", "show");
+    i.method_call(Some(on_dyn), "self", "show");
+    // A free function, and a trait default body, which has no symbol.
+    i.method_call(Some(free), "self", "area");
+    i.call(free, "Self::area");
+    i.method_call(None, "self", "area");
+    let (edges, counts) = i.resolve();
+    assert!(edges.is_empty(), "{edges:?}");
+    assert_eq!(
+        counts,
+        ResolveCounts {
+            unresolved: 11,
+            ..ResolveCounts::default()
+        }
+    );
+}
+
+#[test]
+fn only_a_bare_self_receiver_is_resolved() {
+    let mut i = Input::new();
+    i.symbol(SymbolKind::Struct, "Counter", "src/lib.rs", "");
+    let new = i.method("Counter", None, "new");
+    i.method("Counter", None, "get");
+    for receiver in ["self.inner", "x", "(*self)", "Self", "&self", "self_"] {
+        i.method_call(Some(new), receiver, "get");
+    }
+    i.call_in(Some(new), "src/lib.rs", "", "get", RefKind::MethodCall);
+    // `Self::a::b` is not `Self::name`, so it stays a W3 miss.
+    i.call(new, "Self::a::get");
+    let (edges, counts) = i.resolve();
+    assert!(edges.is_empty(), "{edges:?}");
+    assert_eq!(
+        counts,
+        ResolveCounts {
+            external: 1,
+            method_calls: 7,
             ..ResolveCounts::default()
         }
     );

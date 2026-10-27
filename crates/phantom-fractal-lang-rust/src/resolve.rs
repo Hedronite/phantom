@@ -1,8 +1,9 @@
-//! The four-tier call resolver (SPEC-w3 G2b).
+//! The call resolver (SPEC-w3 G2b, SPEC-w4 G1).
 //!
-//! [`resolve`] is a pure function of its input. Only `Call` references with
-//! a `from` symbol that are not `shadowed` are candidates. Each candidate
-//! gets exactly one edge or none:
+//! [`resolve`] is a pure function of its input. The candidates are `Call`
+//! references with a `from` symbol that are not `shadowed`, and method
+//! calls whose receiver is exactly `self`. Each candidate gets exactly one
+//! edge or none:
 //!
 //! | Reason | Confidence | When |
 //! |---|---|---|
@@ -10,11 +11,13 @@
 //! | `Local` | 0.95 | The first segment is declared in the call's module. |
 //! | `UseAlias` | 0.95 | The first segment is bound by a non-glob `use`. |
 //! | `Assoc` | 0.9 | `Type::name` to the one inherent method of `Type`. |
+//! | `SelfMethod` | 0.9 | `self.m()` in an impl method to the one `m` of its self type. |
+//! | `SelfAssoc` | 0.9 | `Self::m()` in an impl method to the one `m` of its self type. |
 //!
-//! Method calls on values, trait dispatch, glob imports, and calls across
-//! crates are counted and never resolved. [`confidence`] already scores the
-//! `SelfMethod`, `SelfAssoc`, and `CratePath` reasons (SPEC-w4 G0a), but no
-//! tier places them yet.
+//! Method calls on any other receiver, trait dispatch, glob imports, and
+//! calls across crates are counted and never resolved; no receiver but
+//! `self` is typed. [`confidence`] already scores `CratePath`, but no tier
+//! places it yet.
 
 mod lookup;
 
@@ -35,31 +38,41 @@ pub fn confidence(reason: Reason) -> f64 {
 ///
 /// Counts: `edges` placed; `unresolved` for a call into the workspace no
 /// tier places, including a shadowed call, an ambiguous one, a name only a
-/// glob could supply, and a call in an orphan file; `external` when the
-/// first segment is `std`, `core`, `alloc`, or not found; `no_source` for a
-/// call outside any function symbol; `method_calls` and `macros` for the
-/// other reference kinds.
+/// glob could supply, a call in an orphan file, and a `self.m()` with no
+/// edge; `external` when the first segment is `std`, `core`, `alloc`, or not
+/// found; `no_source` for a `Call` outside any function symbol;
+/// `method_calls` for method calls on any receiver but `self`, and `macros`.
 pub fn resolve(input: &ResolveInput) -> (Vec<Edge>, ResolveCounts) {
     let index = Index::new(input);
     let mut edges = Vec::new();
     let mut counts = ResolveCounts::default();
     for call in &input.refs {
-        match call.kind {
-            RefKind::MethodCall => {
+        let (source, placed) = match call.kind {
+            RefKind::MethodCall if call.receiver.as_deref() != Some("self") => {
                 counts.method_calls += 1;
                 continue;
+            }
+            RefKind::MethodCall => {
+                let name = segments(&call.text).and_then(|segs| segs.last().cloned());
+                let (Some(source), Some(name)) = (call.from, name) else {
+                    counts.unresolved += 1;
+                    continue;
+                };
+                (source, index.place_self(source, &name, Reason::SelfMethod))
             }
             RefKind::Macro => {
                 counts.macros += 1;
                 continue;
             }
-            RefKind::Call => {}
-        }
-        let Some(source) = call.from else {
-            counts.no_source += 1;
-            continue;
+            RefKind::Call => {
+                let Some(source) = call.from else {
+                    counts.no_source += 1;
+                    continue;
+                };
+                (source, index.place(call, source))
+            }
         };
-        match index.place(call) {
+        match placed {
             Placed::Edge(target, reason) => {
                 counts.edges += 1;
                 edges.push(Edge {

@@ -1,0 +1,6 @@
+# Self-call fixture for SPEC-w4 G1d. Never built or run.
+[package]
+name = "resolve-self-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
