@@ -56,6 +56,9 @@ pub(crate) fn reason_to_text(reason: Reason) -> &'static str {
         Reason::Local => "local",
         Reason::UseAlias => "use-alias",
         Reason::Assoc => "assoc",
+        Reason::SelfMethod => "self-method",
+        Reason::SelfAssoc => "self-assoc",
+        Reason::CratePath => "crate-path",
     }
 }
 
@@ -273,7 +276,7 @@ impl crate::Store {
             let mut statement = self.conn.prepare(
                 "SELECT r.id, r.from_symbol,
                         (SELECT m.id FROM modules m WHERE m.file_id = r.file_id AND m.scope = ''),
-                        r.scope, f.path, r.kind, r.text, r.shadowed
+                        r.scope, f.path, r.kind, r.text, r.receiver, r.shadowed
                  FROM refs r JOIN files f ON f.id = r.file_id
                  WHERE r.kind IN ('call', 'method_call', 'macro') ORDER BY r.id",
             )?;
@@ -287,7 +290,8 @@ impl crate::Store {
                     file: row.get(4)?,
                     kind: rows::ref_kind_from_text(&row.get::<_, String>(5)?)?,
                     text: row.get(6)?,
-                    shadowed: row.get::<_, i64>(7)? != 0,
+                    receiver: row.get(7)?,
+                    shadowed: row.get::<_, i64>(8)? != 0,
                 });
             }
         }
@@ -297,6 +301,7 @@ impl crate::Store {
             symbols,
             uses,
             refs,
+            deps: Vec::new(),
         })
     }
 
