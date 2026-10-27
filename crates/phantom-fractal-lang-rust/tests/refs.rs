@@ -13,10 +13,11 @@ fn extract(source: &str) -> Extract {
         .expect("source parses")
 }
 
-fn caller(name: &str, owner: Option<&str>) -> Option<Caller> {
+fn caller(name: &str, owner: Option<&str>, start_line: u32) -> Option<Caller> {
     Some(Caller {
         name: name.to_owned(),
         owner: owner.map(str::to_owned),
+        start_line,
     })
 }
 
@@ -63,8 +64,8 @@ fn call<'a>(text: &'a str, last: &'a str, at: (u32, u32), from: Option<Caller>) 
 
 #[test]
 fn refs_fixture_gives_every_call_with_its_fields() {
-    let plain = || caller("plain", None);
-    let new = || caller("new", Some("Ledger"));
+    let plain = || caller("plain", None, 4);
+    let new = || caller("new", Some("Ledger"), 18);
     let wants = [
         call("helper", "helper", (5, 5), plain()),
         call("crate::helpers::helper", "helper", (6, 5), plain()),
@@ -93,13 +94,13 @@ fn refs_fixture_gives_every_call_with_its_fields() {
         call("first_byte", "first_byte", (25, 26), None),
         Want {
             scope: "tests",
-            ..call("super::plain", "plain", (29, 9), caller("checks", None))
+            ..call("super::plain", "plain", (29, 9), caller("checks", None, 28))
         },
         call(
             "say_hello",
             "say_hello",
             (35, 9),
-            caller("greet", Some("Greet")),
+            caller("greet", Some("Greet"), 34),
         ),
     ];
     let expected: Vec<Reference> = wants.iter().map(Want::reference).collect();
@@ -214,8 +215,8 @@ fn a_nested_fn_and_its_closures_are_the_caller() {
             .find(|r| r.last_segment == name)
             .and_then(|r| r.from.clone())
     };
-    assert_eq!(from("g"), caller("inner", None));
-    assert_eq!(from("h"), caller("outer", None));
+    assert_eq!(from("g"), caller("inner", None, 1));
+    assert_eq!(from("h"), caller("outer", None, 1));
 }
 
 #[test]
@@ -250,4 +251,65 @@ fn a_deeply_nested_expression_does_not_overflow() {
     let source = format!("fn f() {{ {}g(){} }}", "(".repeat(depth), ")".repeat(depth));
     let got = extract(&source);
     assert!(got.refs.iter().any(|r| r.text == "g"));
+}
+
+#[test]
+fn the_caller_start_line_tells_same_named_functions_apart() {
+    let source = "\
+pub trait Greet {
+    fn greet(&self) {
+        a();
+    }
+}
+
+impl Greet for A {
+    #[inline]
+    fn greet(&self) {
+        b();
+    }
+}
+
+fn outer() {
+    fn inner() {
+        c();
+    }
+}
+
+fn inner() {
+    d();
+}
+
+#[cfg(unix)]
+fn twin() {
+    e();
+}
+
+#[cfg(not(unix))]
+fn twin() {
+    f();
+}
+";
+    let got = extract(source);
+    let from = |text: &str| {
+        got.refs
+            .iter()
+            .find(|r| r.text == text)
+            .and_then(|r| r.from.clone())
+    };
+    assert_eq!(from("a"), caller("greet", Some("Greet"), 2));
+    assert_eq!(from("b"), caller("greet", Some("A"), 9));
+    assert_eq!(from("c"), caller("inner", None, 15));
+    assert_eq!(from("d"), caller("inner", None, 20));
+    assert_eq!(from("e"), caller("twin", None, 25));
+    assert_eq!(from("f"), caller("twin", None, 30));
+    // The impl method's caller line is its `Method` record's line.
+    let method = got.methods.iter().find(|m| m.owner == "A").expect("method");
+    assert_eq!(method.start_line, 9);
+    let twins: Vec<u32> = got
+        .items
+        .iter()
+        .filter(|item| item.name == "twin")
+        .map(|item| item.start_line)
+        .collect();
+    assert_eq!(twins, [25, 30]);
 }

@@ -235,7 +235,11 @@ fn caller(function: Node<'_>, src: &[u8]) -> Caller {
             .map(|name| compact(name, src)),
         _ => None,
     });
-    Caller { name, owner }
+    Caller {
+        name,
+        owner,
+        start_line: start_line(function),
+    }
 }
 
 /// The item whose body directly holds `function`, if any.
