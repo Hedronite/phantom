@@ -3,6 +3,7 @@
 
 mod util;
 pub mod shapes;
+mod tricky;
 #[path = "elsewhere/placed.rs"]
 mod placed;
 #[path = "../../outside.rs"]

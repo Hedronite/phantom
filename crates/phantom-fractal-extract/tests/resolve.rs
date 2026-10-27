@@ -71,8 +71,9 @@ fn expected() -> (Vec<String>, HashMap<String, u64>) {
 }
 
 /// `<target>:<module path>::<owner>::<name>` for each symbol, where the
-/// target is its root file's stem.
-fn labels(input: &ResolveInput) -> HashMap<Id, String> {
+/// target is its root file's stem, with `@<start line>` when another
+/// symbol in the same module has the same owner and name.
+fn labels(store: &Store, input: &ResolveInput) -> HashMap<Id, String> {
     let targets: HashMap<Id, String> = input
         .targets
         .iter()
@@ -94,10 +95,26 @@ fn labels(input: &ResolveInput) -> HashMap<Id, String> {
                 Some((path, target)) => format!("{}:{path}", targets[target]),
                 None => format!("orphan:{}", symbol.file),
             };
-            let name = match (&symbol.kind, &symbol.owner) {
+            let mut name = match (&symbol.kind, &symbol.owner) {
                 (SymbolKind::Method, Some(owner)) => format!("{owner}::{}", symbol.name),
                 _ => symbol.name.clone(),
             };
+            let twins = input.symbols.iter().filter(|other| {
+                other.module == symbol.module
+                    && other.file == symbol.file
+                    && other.owner == symbol.owner
+                    && other.name == symbol.name
+            });
+            if twins.count() > 1 {
+                let line = store
+                    .symbols_matching(&symbol.name)
+                    .expect("symbols matching")
+                    .into_iter()
+                    .find(|found| found.id == symbol.id)
+                    .and_then(|found| found.line)
+                    .expect("twin line");
+                name = format!("{name}@{line}");
+            }
             (symbol.id, format!("{place}::{name}"))
         })
         .collect()
@@ -107,7 +124,7 @@ fn labels(input: &ResolveInput) -> HashMap<Id, String> {
 /// confidence is checked against its reason.
 fn stored_edges(store: &Store) -> Vec<String> {
     let input = store.resolve_input().expect("resolve input");
-    let labels = labels(&input);
+    let labels = labels(store, &input);
     let mut out = Vec::new();
     for symbol in &input.symbols {
         for hit in store.callees(symbol.id).expect("callees") {
@@ -178,7 +195,7 @@ fn a_second_pass_over_an_unchanged_tree_writes_nothing() {
     assert!(report.written.is_empty(), "{:?}", report.written);
     assert!(report.removed.is_empty(), "{:?}", report.removed);
     assert_eq!(report.graph, None);
-    assert_eq!(report.unchanged.len(), 10);
+    assert_eq!(report.unchanged.len(), 11);
     assert_eq!(row_counts(&s.store), rows);
     assert_eq!(stored_edges(&s.store), edges);
     assert_eq!(fs::read(&db).expect("read db"), before);
@@ -194,7 +211,7 @@ fn a_database_at_extractor_version_1_is_fully_reextracted() {
     written.sort();
     let mut all = first.written.clone();
     all.sort();
-    assert_eq!(written.len(), 10);
+    assert_eq!(written.len(), 11);
     assert_eq!(written, all);
     assert!(report.unchanged.is_empty());
     assert!(report.graph.is_some());
@@ -224,10 +241,10 @@ fn a_deleted_file_loses_its_rows_and_edges() {
     let edges = stored_edges(&s.store);
     assert!(!edges.iter().any(|edge| edge.contains("sink")), "{edges:?}");
     let graph = graph(&report);
-    assert_eq!(graph.counts.edges, 16);
-    assert_eq!(graph.modules, 9);
+    assert_eq!(graph.counts.edges, 20);
+    assert_eq!(graph.modules, 10);
     // `deep::sink()` in `util::helper` now names a module with no file.
-    assert_eq!(graph.counts.unresolved, 8);
+    assert_eq!(graph.counts.unresolved, 9);
 }
 
 #[test]
