@@ -5,7 +5,7 @@ use phantom_fractal_lang::{Edge, Reason, ResolveInput};
 use phantom_fractal_lang_rust::RustLanguage;
 
 use super::{TempDb, assert_outside_workspace, fixture};
-use crate::{Package, Store};
+use crate::{Package, Store, StoreError};
 
 fn language() -> RustLanguage {
     RustLanguage::new().expect("grammar")
@@ -400,6 +400,69 @@ fn extractor_version_round_trips_in_meta() {
     assert_eq!(store.extractor_version().expect("set"), Some(2));
     store.set_extractor_version(1).expect("overwrite");
     assert_eq!(store.extractor_version().expect("overwritten"), Some(1));
+}
+
+#[test]
+fn unknown_reason_text_fails_the_edge_readers() {
+    let db = TempDb::new("badreason");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = language();
+    let source = "pub fn pick() -> u8 { 1 }\npub fn outer() { pick(); }\n";
+    store
+        .put_source("src/flow.rs", source, 0, &language)
+        .expect("put");
+    write_graph(&mut store, "src/flow.rs", 1);
+    let input = store.resolve_input().expect("input");
+    let outer = input
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "outer")
+        .expect("outer")
+        .id;
+    let pick = input
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "pick")
+        .expect("pick")
+        .id;
+    let reference = input
+        .refs
+        .iter()
+        .find(|reference| reference.text == "pick")
+        .expect("call ref");
+    store
+        .replace_edges(&[Edge {
+            ref_id: reference.id,
+            source: outer,
+            target: pick,
+            confidence: 1.0,
+            reason: Reason::PathExact,
+        }])
+        .expect("edge");
+    // A hand-inserted reason that is none of the seven texts makes both
+    // readers refuse instead of passing it through.
+    {
+        let conn = rusqlite::Connection::open(db.path()).expect("sqlite");
+        conn.execute("UPDATE edges SET reason = 'made-up'", [])
+            .expect("hand insert");
+    }
+    let callers = store.callers(pick);
+    assert!(
+        matches!(
+            &callers,
+            Err(StoreError::UnknownReason(text)) if text == "made-up"
+        ),
+        "{callers:?}"
+    );
+    let callees = store.callees(outer);
+    assert!(
+        matches!(
+            &callees,
+            Err(StoreError::UnknownReason(text)) if text == "made-up"
+        ),
+        "{callees:?}"
+    );
 }
 
 #[test]
