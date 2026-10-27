@@ -10,7 +10,6 @@
 
 mod calls;
 
-use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -230,7 +229,7 @@ fn index(path: &Path) -> Result<IndexSummary, Failure> {
     let report = phantom_fractal_extract::index(&root, &mut store, &language)?;
     let graph = match report.graph {
         Some(graph) => graph,
-        None => stored_graph(&store)?,
+        None => stored_graph(&store, &root)?,
     };
     Ok(IndexSummary::new(&report, &graph))
 }
@@ -238,24 +237,8 @@ fn index(path: &Path) -> Result<IndexSummary, Failure> {
 /// The graph counts of an index pass that rebuilt nothing, read from the
 /// stored graph without writing. The resolver is pure, so its counts over
 /// the stored input are the ones the last rebuild found.
-fn stored_graph(store: &Store) -> Result<GraphReport, Failure> {
-    let input = store.resolve_input()?;
-    let (_, counts) = phantom_fractal_lang_rust::resolve(&input);
-    let reached: HashSet<&str> = input
-        .modules
-        .iter()
-        .map(|module| module.file.as_str())
-        .collect();
-    let orphans = store
-        .file_paths()?
-        .iter()
-        .filter(|path| !reached.contains(path.as_str()))
-        .count();
-    Ok(GraphReport {
-        modules: input.modules.len(),
-        orphans,
-        counts,
-    })
+fn stored_graph(store: &Store, root: &Path) -> Result<GraphReport, Failure> {
+    Ok(phantom_fractal_extract::stored_graph(store, root)?)
 }
 
 /// The store for the tree at `repo`, which must already be indexed. It is
