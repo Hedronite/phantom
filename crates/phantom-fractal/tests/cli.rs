@@ -1,5 +1,5 @@
-//! Both binaries print one version line, list `index` and `find` in help,
-//! and refuse every other command.
+//! Both binaries print one version line, list `index`, `find`, `callers`,
+//! and `callees` in help, and refuse every other command.
 
 use std::process::{Command, Output};
 
@@ -36,7 +36,7 @@ fn version_prints_the_version_line() {
 
 /// `--help` and `-h` exit 0. A bare run is usage, so it exits 1, not clap's 2.
 #[test]
-fn help_lists_index_and_find() {
+fn help_lists_the_four_commands() {
     let cases: [(&[&str], i32); 3] = [(&["--help"], 0), (&["-h"], 0), (&[], 1)];
     for bin in BINS {
         for (args, code) in cases {
@@ -47,8 +47,9 @@ fn help_lists_index_and_find() {
                 String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr)
             );
-            assert!(text.contains("index"), "{bin} {args:?}\n{text}");
-            assert!(text.contains("find"), "{bin} {args:?}\n{text}");
+            for command in ["index", "find", "callers", "callees"] {
+                assert!(text.contains(command), "{bin} {args:?}\n{text}");
+            }
             assert!(text.contains("Usage"), "{bin} {args:?}\n{text}");
         }
     }
@@ -56,16 +57,19 @@ fn help_lists_index_and_find() {
 
 #[test]
 fn other_commands_and_unknown_flags_exit_one() {
-    let cases: [&[&str]; 9] = [
+    let cases: [&[&str]; 12] = [
         &["mcp"],
         &["serve"],
         &["impact"],
         &["map"],
         &["help"],
         &["--json"],
-        &["callers", "open_ledger"],
+        &["rank", "open_ledger"],
         &["index"],
         &["find"],
+        &["callers"],
+        &["callees"],
+        &["callers", "a", "b"],
     ];
     for bin in BINS {
         for args in cases {

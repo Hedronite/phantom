@@ -161,6 +161,17 @@ impl<T> Envelope<T> {
         }
     }
 
+    /// A failure that still carries `data`, such as the candidates of an
+    /// [`ErrorKind::Ambiguous`] lookup. `schema` is [`SCHEMA_VERSION`].
+    /// `exit` follows `kind`.
+    pub fn failure_with_data(kind: ErrorKind, message: impl Into<String>, data: T) -> Self {
+        Self::Failure {
+            error: EnvelopeError::new(kind, message),
+            data: Some(data),
+            schema: SCHEMA_VERSION,
+        }
+    }
+
     /// True when this value is [`Self::Success`].
     pub const fn ok(&self) -> bool {
         matches!(self, Self::Success { .. })
@@ -356,5 +367,23 @@ mod tests {
         assert!(!parsed.ok());
         let items = parsed.data().expect("candidates");
         assert_eq!(items.as_slice(), ["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn failure_with_data_serializes_both() {
+        let built = Envelope::failure_with_data(
+            ErrorKind::Ambiguous,
+            "two hits",
+            vec!["a".to_string(), "b".to_string()],
+        );
+        assert!(!built.ok());
+        assert_eq!(built.schema(), SCHEMA_VERSION);
+        assert_eq!(round_trip(&built), built);
+        let json = serde_json::to_value(&built).expect("json");
+        assert_eq!(json["ok"], false);
+        assert_eq!(json["data"], serde_json::json!(["a", "b"]));
+        assert_eq!(json["error"]["kind"], "ambiguous");
+        assert_eq!(json["error"]["exit"], 6);
+        assert_eq!(json["schema"], 1);
     }
 }
