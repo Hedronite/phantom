@@ -12,9 +12,12 @@
 
 mod bindings;
 mod imports;
+mod resolve;
 mod scan;
 
 use phantom_fractal_lang::{Extract, ExtractError, Item, ItemKind, Language, Visibility};
+
+pub use resolve::{confidence, resolve};
 use tree_sitter::{Node, Parser, Query, QueryCursor, QueryMatch, StreamingIterator};
 
 const QUERY: &str = include_str!("../queries/extract.scm");

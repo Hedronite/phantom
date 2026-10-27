@@ -134,7 +134,8 @@ fn snapshot_into(base: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Vec<u8>>) 
     }
 }
 
-fn copy_tree(from: &Path, to: &Path) {
+/// Copies the regular files and directories under `from` into `to`.
+pub fn copy_tree(from: &Path, to: &Path) {
     for entry in fs::read_dir(from).expect("read fixture") {
         let entry = entry.expect("fixture entry");
         let target = to.join(entry.file_name());
