@@ -3,12 +3,14 @@
 //! Inside a module, a local item or child module beats a `use` binding. A
 //! name only a glob could supply is not looked up. Inline modules nest by
 //! scope, and `super` moves one module up. `self.m()` and `Self::m()` look
-//! up the methods of the calling impl's self type (SPEC-w4 G1).
+//! up the methods of the calling impl's self type (SPEC-w4 G1). A first
+//! segment that nothing in scope binds may name a workspace lib the
+//! caller's target may call (SPEC-w4 G2b).
 
 use std::collections::HashMap;
 
 use phantom_fractal_lang::{
-    CallRef, Id, Module, Reason, ResolveInput, Symbol, SymbolKind, UseBinding,
+    CallRef, Id, Module, Reason, ResolveInput, Symbol, SymbolKind, TargetKind, UseBinding,
 };
 
 use super::segments;
@@ -47,15 +49,26 @@ enum Tier {
     PathExact,
     Local,
     UseAlias,
+    CratePath,
 }
 
 /// A walk's result: the entities the last segment names, how the first
-/// segment was bound, and whether the last hop went from a type to one of
-/// its methods.
+/// segment was bound, whether the last hop went from a type to one of its
+/// methods, and whether the walk entered another crate by name, directly or
+/// through a `use`.
 struct Walked {
     entities: Vec<Entity>,
     tier: Tier,
     method_hop: bool,
+    crossed: bool,
+}
+
+/// What a name binds in one module: the entities, whether they are
+/// declared there, and whether a `use` reached them through another crate.
+struct Found {
+    entities: Vec<Entity>,
+    local: bool,
+    crossed: bool,
 }
 
 pub(crate) struct Index<'a> {
@@ -77,6 +90,9 @@ pub(crate) struct Index<'a> {
     /// `(struct or enum, name)` to every method, inherent or trait impl,
     /// whose owner resolves to that one type.
     by_type: HashMap<(Id, &'a str), Vec<Id>>,
+    /// Target to the crate names it may call, each to that lib's root
+    /// module, or none when two libs share the name.
+    crates: HashMap<Id, HashMap<String, Option<Id>>>,
 }
 
 impl<'a> Index<'a> {
@@ -91,6 +107,7 @@ impl<'a> Index<'a> {
             uses: HashMap::new(),
             inherent: HashMap::new(),
             by_type: HashMap::new(),
+            crates: HashMap::new(),
         };
         for module in &input.modules {
             index
@@ -125,6 +142,8 @@ impl<'a> Index<'a> {
                 index.uses.entry(module).or_default().push(binding);
             }
         }
+        // Owner paths may start with a crate name, so the names come first.
+        index.crates = index.crate_names(input);
         let mut inherent: HashMap<&'a str, Vec<(Id, Id)>> = HashMap::new();
         let mut by_type: HashMap<(Id, &'a str), Vec<Id>> = HashMap::new();
         for method in &input.symbols {
@@ -150,6 +169,41 @@ impl<'a> Index<'a> {
         index.inherent = inherent;
         index.by_type = by_type;
         index
+    }
+
+    /// The crate names each target may call: every lib its package has a
+    /// `deps` entry for, and, for a bin, its own package's lib. A lib never
+    /// names itself.
+    fn crate_names(&self, input: &ResolveInput) -> HashMap<Id, HashMap<String, Option<Id>>> {
+        let lib_root = |package: &str| {
+            input
+                .targets
+                .iter()
+                .find(|t| t.kind == TargetKind::Lib && t.package == package)
+                .and_then(|t| self.roots.get(&t.id).copied())
+        };
+        let mut out: HashMap<Id, HashMap<String, Option<Id>>> = HashMap::new();
+        for target in &input.targets {
+            let mut callable: Vec<(String, Id)> = input
+                .deps
+                .iter()
+                .filter(|dep| dep.package == target.package && dep.on != target.package)
+                .filter_map(|dep| Some((dep.crate_name.clone(), lib_root(&dep.on)?)))
+                .collect();
+            if target.kind == TargetKind::Bin
+                && let Some(root) = lib_root(&target.package)
+            {
+                callable.push((target.package.replace('-', "_"), root));
+            }
+            let names = out.entry(target.id).or_default();
+            for (name, root) in callable {
+                let slot = names.entry(name).or_insert(Some(root));
+                if *slot != Some(root) {
+                    *slot = None;
+                }
+            }
+        }
+        out
     }
 
     /// Places one `Call` reference whose source symbol is `source`.
@@ -182,10 +236,12 @@ impl<'a> Index<'a> {
             return Placed::Unresolved;
         };
         let reason = match walked.tier {
+            _ if walked.crossed => Reason::CratePath,
             Tier::PathExact => Reason::PathExact,
             Tier::Local | Tier::UseAlias if segs.len() == 2 && walked.method_hop => Reason::Assoc,
             Tier::Local => Reason::Local,
             Tier::UseAlias => Reason::UseAlias,
+            Tier::CratePath => Reason::CratePath,
         };
         Placed::Edge(target, reason)
     }
@@ -195,9 +251,10 @@ impl<'a> Index<'a> {
     ///
     /// `source` must be a method of an `impl` whose self type resolves to
     /// one struct or enum `T`. The candidates are the methods named `name`
-    /// whose own impl self type resolves to `T`, inherent or trait impl.
-    /// An owner path resolves inside its own target, so every candidate is
-    /// in the caller's target. Exactly one candidate gives an edge.
+    /// whose own impl self type resolves to `T`, inherent or trait impl, in
+    /// any target. Exactly one candidate gives an edge, and only when it is
+    /// in the caller's target: a trait impl in one crate on another crate's
+    /// type never hides that type's inherent method.
     pub(crate) fn place_self(&self, source: Id, name: &str, reason: Reason) -> Placed {
         match self.self_target(source, name) {
             Some(target) => Placed::Edge(target, reason),
@@ -213,10 +270,35 @@ impl<'a> Index<'a> {
         let ty = self
             .owner_type(method)
             .filter(|ty| self.is_data_type(*ty))?;
-        match self.by_type.get(&(ty, name)).map(Vec::as_slice) {
-            Some([one]) => Some(*one),
-            _ => None,
+        let Some([one]) = self.by_type.get(&(ty, name)).map(Vec::as_slice) else {
+            return None;
+        };
+        let candidate = self.symbols.get(one)?;
+        (self.target_of(candidate)? == self.target_of(method)?).then_some(*one)
+    }
+
+    /// The target whose module holds `symbol`.
+    fn target_of(&self, symbol: &Symbol) -> Option<Id> {
+        let module = self.place_of(&symbol.file, &symbol.scope)?;
+        self.modules.get(&module).map(|module| module.target)
+    }
+
+    /// The root module of the workspace lib `name` names from `module`,
+    /// when nothing in `module` binds `name`: no local item, child module,
+    /// non-glob `use`, or glob that could supply it.
+    fn crate_root(&self, module: Id, name: &str) -> Option<Id> {
+        let bound = self.children.contains_key(&(module, name))
+            || self.items.contains_key(&(module, name))
+            || self.uses.get(&module).is_some_and(|bindings| {
+                bindings
+                    .iter()
+                    .any(|binding| binding.glob || bound_name(binding) == Some(name))
+            });
+        if bound {
+            return None;
         }
+        let target = self.modules.get(&module)?.target;
+        self.crates.get(&target)?.get(name).copied().flatten()
     }
 
     fn place_of(&self, file: &str, scope: &str) -> Option<Id> {
@@ -233,6 +315,7 @@ impl<'a> Index<'a> {
         method_hops: bool,
     ) -> Result<Walked, Miss> {
         let (first, rest) = segs.split_first().ok_or(Miss::Unresolved)?;
+        let mut crossed = false;
         let (mut entities, tier, rest) = match first.as_str() {
             "crate" => {
                 let target = self.modules.get(&module).ok_or(Miss::Unresolved)?.target;
@@ -258,11 +341,22 @@ impl<'a> Index<'a> {
             name if name.is_empty() || STANDARD_CRATES.contains(&name) => {
                 return Err(Miss::External);
             }
-            name => {
-                let (entities, local) = self.lookup(module, name, depth)?;
-                let tier = if local { Tier::Local } else { Tier::UseAlias };
-                (entities, tier, rest)
-            }
+            name => match self.crate_root(module, name) {
+                Some(root) => {
+                    crossed = true;
+                    (vec![Entity::Module(root)], Tier::CratePath, rest)
+                }
+                None => {
+                    let found = self.lookup(module, name, depth)?;
+                    crossed = found.crossed;
+                    let tier = if found.local {
+                        Tier::Local
+                    } else {
+                        Tier::UseAlias
+                    };
+                    (found.entities, tier, rest)
+                }
+            },
         };
         let mut method_hop = false;
         for (position, seg) in rest.iter().enumerate() {
@@ -279,9 +373,11 @@ impl<'a> Index<'a> {
                 // Past the first segment the path is inside the workspace,
                 // so a miss is unresolved, never external.
                 Entity::Module(inner) => {
-                    self.lookup(inner, seg, depth)
-                        .map_err(|_| Miss::Unresolved)?
-                        .0
+                    let found = self
+                        .lookup(inner, seg, depth)
+                        .map_err(|_| Miss::Unresolved)?;
+                    crossed |= found.crossed;
+                    found.entities
                 }
                 Entity::Symbol(ty) if last && method_hops && self.is_type(ty) => {
                     method_hop = true;
@@ -300,11 +396,12 @@ impl<'a> Index<'a> {
             entities,
             tier,
             method_hop,
+            crossed,
         })
     }
 
-    /// The entities `name` binds in `module`, and whether they are local.
-    fn lookup(&self, module: Id, name: &str, depth: u32) -> Result<(Vec<Entity>, bool), Miss> {
+    /// What `name` binds in `module`.
+    fn lookup(&self, module: Id, name: &str, depth: u32) -> Result<Found, Miss> {
         let mut local: Vec<Entity> = self
             .children
             .get(&(module, name))
@@ -322,20 +419,28 @@ impl<'a> Index<'a> {
                 .map(|id| Entity::Symbol(*id)),
         );
         if !local.is_empty() {
-            return Ok((local, true));
+            return Ok(Found {
+                entities: local,
+                local: true,
+                crossed: false,
+            });
         }
         if depth >= MAX_DEPTH {
             return Err(Miss::Unresolved);
         }
         let bindings = self.uses.get(&module).map_or(&[][..], Vec::as_slice);
         let mut found = Vec::new();
+        let mut crossed = false;
         let mut miss = None;
         for binding in bindings
             .iter()
             .filter(|binding| !binding.glob && bound_name(binding) == Some(name))
         {
             match self.use_entities(binding, depth + 1) {
-                Ok(entities) => found.extend(entities),
+                Ok(walked) => {
+                    crossed |= walked.crossed;
+                    found.extend(walked.entities);
+                }
                 Err(err) => miss = Some(miss.map_or(err, |prior| worse(prior, err))),
             }
         }
@@ -344,7 +449,11 @@ impl<'a> Index<'a> {
                 Entity::Module(id) | Entity::Symbol(id) => *id,
             });
             found.dedup();
-            return Ok((found, false));
+            return Ok(Found {
+                entities: found,
+                local: false,
+                crossed,
+            });
         }
         if let Some(miss) = miss {
             return Err(miss);
@@ -356,12 +465,12 @@ impl<'a> Index<'a> {
     }
 
     /// What a `use` path names, in any namespace.
-    fn use_entities(&self, binding: &UseBinding, depth: u32) -> Result<Vec<Entity>, Miss> {
+    fn use_entities(&self, binding: &UseBinding, depth: u32) -> Result<Walked, Miss> {
         let module = self
             .place_of(&binding.file, &binding.scope)
             .ok_or(Miss::Unresolved)?;
         let segs = segments(&binding.path).ok_or(Miss::Unresolved)?;
-        Ok(self.walk(module, &segs, depth, false)?.entities)
+        self.walk(module, &segs, depth, false)
     }
 
     /// The one type an inherent method's owner path names in its module.

@@ -3,12 +3,13 @@ title: Expected edges — resolve fixture
 type: fixture
 status: ground-truth
 created: "2026-10-26"
-updated: "2026-10-26"
+updated: "2026-10-27"
 owner: fullstack
 spec: "[[foundry/phantom/specs/SPEC-w3]]"
 cross_refs:
   - "[[foundry/phantom/checklists/CHECKLIST-w3]]"
   - "[[foundry/phantom/rubrics/RUBRIC-w3]]"
+  - "[[foundry/phantom/specs/SPEC-w4]]"
 tags:
   - phantom
   - fixture
@@ -79,11 +80,19 @@ edges from `Guest::greet` or the module-level `inner`. The two `#[cfg]`
 | `println!` | `entry` | A macro. |
 | `start_value()` | `static START` | Outside any function. |
 | `local_fn()` | `tests::check` | Only the glob `use super::*` supplies it. |
-| `resolve_fixture::entry()` | `main` | Another crate by name: external. |
+| `outside_crate::entry()` | `main` | A crate outside the workspace: external. |
 | `found()` | `src/orphan.rs` | No target reaches the file. |
 | `target()` | trait default `Greet::greet` | No source: a trait default body has no symbol. |
 | `target()` | nested `outer::inner` | No source: a nested fn has no symbol. |
 | `inner()` | `tricky::outer` | Shadowed by the nested `fn inner`. |
+
+## Change for SPEC-w4 G2c
+
+`src/main.rs:7` used to call `resolve_fixture::entry()`, this package's own lib by
+crate name. Under [[foundry/phantom/specs/SPEC-w4]] G2a a bin may call its own
+package's lib, so that call would now get a `crate-path` edge. The line now calls
+`outside_crate::entry()`, a crate outside the workspace, so the W3 edges and
+counts above are unchanged.
 
 ## Counts
 

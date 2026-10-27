@@ -7,6 +7,7 @@
 //! read; nothing in it is compiled or run.
 #![forbid(unsafe_code)]
 
+pub mod deps;
 pub mod graph;
 mod read;
 mod rebuild;
@@ -28,8 +29,8 @@ pub use walk::{Candidate, MAX_FILE_BYTES, SkipReason, Skipped, Walk, is_secret, 
 /// rebuild. Bump it when the stored rows for an unchanged file would differ:
 /// a database stamped with any other version is fully re-extracted. Version
 /// 2 adds call references, methods, scopes, and edges; version 3 adds the
-/// `self-method` and `self-assoc` edges.
-pub const EXTRACTOR_VERSION: u32 = 3;
+/// `self-method` and `self-assoc` edges; version 4 adds `crate-path` edges.
+pub const EXTRACTOR_VERSION: u32 = 4;
 
 /// What one [`index`] pass did, by repo-relative path, in walk order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -202,7 +203,7 @@ pub fn index(
         }
     }
     if reextract || !report.written.is_empty() || !report.removed.is_empty() {
-        report.graph = Some(rebuild::rebuild(root, &walk, &kept, store, language)?);
+        report.graph = Some(rebuild::rebuild(&walk, &kept, store, language)?);
     }
     Ok(report)
 }

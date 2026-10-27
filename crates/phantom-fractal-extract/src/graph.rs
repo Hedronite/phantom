@@ -284,7 +284,7 @@ fn index(id: Id) -> usize {
 }
 
 /// `path` with `.` and `..` folded, or none if it climbs out of the root.
-fn normalize(path: &str) -> Option<String> {
+pub(crate) fn normalize(path: &str) -> Option<String> {
     let mut parts: Vec<&str> = Vec::new();
     for part in path.split('/') {
         match part {
@@ -298,7 +298,7 @@ fn normalize(path: &str) -> Option<String> {
     Some(parts.join("/"))
 }
 
-fn join(dir: &str, rest: &str) -> String {
+pub(crate) fn join(dir: &str, rest: &str) -> String {
     match (dir.is_empty(), rest.is_empty()) {
         (true, _) => rest.to_owned(),
         (_, true) => dir.to_owned(),
@@ -314,7 +314,7 @@ fn join_scope(scope: &str, name: &str) -> String {
     }
 }
 
-fn parent_dir(path: &str) -> &str {
+pub(crate) fn parent_dir(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(dir, _)| dir)
 }
 

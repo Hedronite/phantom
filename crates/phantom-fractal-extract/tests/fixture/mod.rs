@@ -84,14 +84,26 @@ pub fn expected(text: &str) -> (Vec<String>, HashMap<String, u64>) {
 
 /// `<target>:<module path>::<owner>::<name>` for each symbol, where the
 /// target is its root file's stem, with `@<start line>` when another
-/// symbol in the same module has the same owner and name.
+/// symbol in the same module has the same owner and name. With more than
+/// one package, the target is `<package>/<stem>`.
 pub fn labels(store: &Store, input: &ResolveInput) -> HashMap<Id, String> {
+    let first = input.targets.first().map(|t| t.package.as_str());
+    let many = input
+        .targets
+        .iter()
+        .any(|t| Some(t.package.as_str()) != first);
     let targets: HashMap<Id, String> = input
         .targets
         .iter()
         .map(|t| {
             let stem = Path::new(&t.root).file_stem().and_then(|s| s.to_str());
-            (t.id, stem.unwrap_or_default().to_owned())
+            let stem = stem.unwrap_or_default();
+            let label = if many {
+                format!("{}/{stem}", t.package)
+            } else {
+                stem.to_owned()
+            };
+            (t.id, label)
         })
         .collect();
     let modules: HashMap<Id, (String, Id)> = input

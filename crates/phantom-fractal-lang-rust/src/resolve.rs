@@ -1,4 +1,4 @@
-//! The call resolver (SPEC-w3 G2b, SPEC-w4 G1).
+//! The call resolver (SPEC-w3 G2b, SPEC-w4 G1, G2b).
 //!
 //! [`resolve`] is a pure function of its input. The candidates are `Call`
 //! references with a `from` symbol that are not `shadowed`, and method
@@ -13,11 +13,11 @@
 //! | `Assoc` | 0.9 | `Type::name` to the one inherent method of `Type`. |
 //! | `SelfMethod` | 0.9 | `self.m()` in an impl method to the one `m` of its self type. |
 //! | `SelfAssoc` | 0.9 | `Self::m()` in an impl method to the one `m` of its self type. |
+//! | `CratePath` | 0.95 | The path enters a workspace lib the caller may call by crate name. |
 //!
 //! Method calls on any other receiver, trait dispatch, glob imports, and
-//! calls across crates are counted and never resolved; no receiver but
-//! `self` is typed. [`confidence`] already scores `CratePath`, but no tier
-//! places it yet.
+//! calls into crates outside the workspace are counted and never resolved;
+//! no receiver but `self` is typed.
 
 mod lookup;
 
@@ -40,7 +40,7 @@ pub fn confidence(reason: Reason) -> f64 {
 /// tier places, including a shadowed call, an ambiguous one, a name only a
 /// glob could supply, a call in an orphan file, and a `self.m()` with no
 /// edge; `external` when the first segment is `std`, `core`, `alloc`, or not
-/// found; `no_source` for a `Call` outside any function symbol;
+/// found, including a workspace lib the caller may not call; `no_source` for a `Call` outside any function symbol;
 /// `method_calls` for method calls on any receiver but `self`, and `macros`.
 pub fn resolve(input: &ResolveInput) -> (Vec<Edge>, ResolveCounts) {
     let index = Index::new(input);

@@ -1,0 +1,7 @@
+# Workspace fixture for SPEC-w4 G2c. Never built or run.
+[workspace]
+resolver = "3"
+members = ["core-lib", "app", "uses-ws", "ws-inline", "no-dep", "renamed", "shadow", "dev-only"]
+
+[workspace.dependencies]
+core-lib = { path = "core-lib", version = "0.1.0" }
