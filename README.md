@@ -32,7 +32,8 @@ The `index` envelope holds counts only, never a path:
 
 - files: `written`, `unchanged`, `not_utf8`, and `skipped`;
 - the graph: `modules`, `orphans` (`.rs` files no target reaches), and `edges`;
-- calls left without an edge: `unresolved`, `external`, `no_source`, `method_calls`, and `macros`.
+- `edges_by_reason`: the edges for each of the seven [reasons](#how-a-call-is-placed), keyed by reason, every key present even when it is 0;
+- calls left without an edge: `unresolved`, `external`, `no_source`, `method_calls` (method calls on a receiver other than `self`), and `macros`.
 
 A pass that rebuilds nothing reads the graph counts back from the stored graph.
 
@@ -58,7 +59,7 @@ SYMBOL is one of:
 - a name within its file, such as `Counter::new` or `tests::check` for a function in an inline `mod tests`;
 - a module-qualified name: the file's whole module path from the target root, with or without `crate::`, joined to the name within the file, such as `util::deep::sink` or `crate::util::deep::sink`. A partial path such as `deep::sink` does not match.
 
-Output names a symbol by its qualified name from `crate`, such as `crate::tests::check`. A symbol in an orphan file has no module, so its name starts at its own name or `impl` type.
+Output names a symbol by its qualified name from `crate`, such as `crate::tests::check`. In a workspace, `crate` is the symbol's own target, and `path` or `symbol_path` says which package it is in. A symbol in an orphan file has no module, so its name starts at its own name or `impl` type.
 
 - No symbol matches: `not_found`, exit 3.
 - More than one matches: `ambiguous`, exit 6. The message lists up to 10 candidates with their paths and lines, `data.candidates` holds the same ones, and `data.total` counts them all. Qualify the name further to pick one.
@@ -81,7 +82,7 @@ That output is cut to one hit.
 
 ### How a call is placed
 
-Only a path call inside a function is a candidate: `f()`, `a::f()`, or `Type::new()`. A single-segment name that the function binds with `let`, a parameter, a closure parameter, or a pattern is shadowed and not resolved. A call gets an edge only when exactly one symbol fits. Otherwise it gets no edge and is counted instead.
+A call inside a function is a candidate when it is a path call, such as `f()`, `a::f()`, `Type::new()`, or `Self::new()`, or a method call on `self`, such as `self.m()`. A single-segment name that the function binds with `let`, a parameter, a closure parameter, or a pattern is shadowed and not resolved. A call gets an edge only when exactly one symbol fits. Otherwise it gets no edge and is counted instead.
 
 | Reason | Confidence | When |
 |---|---|---|
@@ -89,19 +90,32 @@ Only a path call inside a function is a candidate: `f()`, `a::f()`, or `Type::ne
 | `local` | 0.95 | The first segment is an item or child module declared in the call's module, and the rest walks to one item or method. |
 | `use-alias` | 0.95 | The first segment is bound by a `use` that is not a glob, or by its `as` alias, in the call's module. The `use` path resolves by the rows above, and the rest walks to one item or method. |
 | `assoc` | 0.9 | `Type::name`, where `Type` resolves by the rows above to one struct, enum, or trait, and exactly one inherent method of that type is named `name`. |
+| `self-method` | 0.9 | `self.m()` in a method of an `impl` block. The impl's self type resolves by the path rows (`path-exact`, `local`, `use-alias`, and `crate-path`) to one struct or enum, so `impl Show for core_lib::Thing` counts. Exactly one method named `m` belongs to an impl of that type, inherent or trait, across the whole index, not only in the caller's target: a method of that name for the same type in another target means no edge. |
+| `self-assoc` | 0.9 | `Self::m()`, exactly two segments, in a method of an `impl` block, by the same rule as `self-method`: the self type resolves by the path rows, `crate-path` included, and the method is the only candidate across the whole index. |
+| `crate-path` | 0.95 | The first segment is the crate name of a workspace lib that the caller's package may call, as below, and the rest walks from that lib's root to one item or method. The path may be written in the call or reached through a `use`. A local item, child module, or `use` with that name wins. |
+
+So an inherent and a trait method with the same name, or two `#[cfg]` impls of one method, give `self.m()` no edge. A trait's own default body is not in an `impl` block, so its `self.m()` gets no edge either.
+
+For `crate-path`, the crate name is the package name with `-` turned to `_`. Package A depends on workspace package B only when one of these holds:
+
+- A's `[dependencies]` has one line `B = { … path = "…" … }` whose path, inside the indexed tree, is B's directory.
+- A's `[dependencies]` has `B.workspace = true` or `B = { workspace = true … }`, and the root `Cargo.toml`'s `[workspace.dependencies]` has one line `B = { … path = "…" … }` whose path, inside the indexed tree, is B's directory.
+- A is B and the call is in one of A's bins: a bin may call its own package's lib.
+
+Any other form gives no dependency: a `[dependencies.B]` table, a version-only line, an inline table split over lines, or the forms under [Never resolved](#never-resolved). A lib that calls its own crate by name gets no edge.
+
+Edges are rebuilt only when a `.rs` file changes. After a change to `Cargo.toml` alone, edges catch up on the next `index` that also changes a `.rs` file. Until then, `callers` and `callees` show the edges from the old manifests, while the counts a pass that rebuilds nothing prints already follow the new ones.
 
 ### Never resolved
 
-- Method calls on values, such as `x.m()` and `self.m()`, and `Self::m()`.
-- Trait dispatch, including `<T as Trait>::f` and a method only a trait impl defines.
-- Names that only a glob import such as `use a::*` supplies.
-- Macros. They are counted by name, and calls inside a macro's arguments are not seen.
-- Other crates, including `std`, `core`, and `alloc`, and a bin calling its own package's lib by crate name.
-- `[lib] path` and `[[bin]] path` in `Cargo.toml`. The targets are `src/lib.rs`, `src/main.rs`, and `src/bin/*.rs`.
+- **Receivers:** `x.m()` for any receiver but `self`, `self.field.m()`, `(*self).m()`, and deref and autoref chains.
+- **Dispatch:** a method that only a trait's provided default supplies, `<T as Trait>::f`, blanket impls, and dispatch on `dyn` or a generic.
+- **Crates:** `std`, `core`, `alloc`, registry and git crates, renamed dependencies (`package = "…"`), `[target.…].dependencies`, `[dev-dependencies]`, `extern crate … as …`, and `[lib] path` and `[[bin]] path`. The targets are `src/lib.rs`, `src/main.rs`, and `src/bin/*.rs`.
+- **Other edges:** edges for paths that are not calls, for types, and for struct literals, and names that only a glob import such as `use a::*` supplies.
 
 ### Nothing runs
 
-Phantom reads source text only. Macros are never expanded. Phantom never runs cargo, rustc, rust-analyzer, a build script, a proc macro, or any other code or command from the indexed repo.
+Phantom reads source text only. Macros are never expanded: they are counted by name, and calls inside a macro's arguments are not seen. There is no type inference, so no receiver other than `self` is typed. Phantom never runs cargo, rustc, rust-analyzer, a build script, a proc macro, or any other code or command from the indexed repo.
 
 ## Other
 
