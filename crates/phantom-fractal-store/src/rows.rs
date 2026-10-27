@@ -80,27 +80,29 @@ pub(crate) fn insert_file(
     Ok(conn.last_insert_rowid())
 }
 
-/// The row ids behind [`Caller`] lookups: `(owner, name, id)` triples in
-/// insert order. Items carry `None` as owner; methods their `impl` owner.
+/// The row ids behind [`Caller`] lookups: `(owner, name, start_line, id)`
+/// tuples in insert order. Items carry `None` as owner; methods their
+/// `impl` owner.
 pub(crate) struct SymbolIndex {
-    entries: Vec<(Option<String>, String, i64)>,
+    entries: Vec<(Option<String>, String, i64, i64)>,
 }
 
 impl SymbolIndex {
-    /// The enclosing symbol for `caller`: exact owner first, then any
-    /// same-named symbol in the file, then nothing.
+    /// The enclosing symbol row for `caller`: `name`, `owner`, and
+    /// `start_line` must all match. No fallback — a trait default body,
+    /// a nested inner fn, or a `#[cfg]` sibling never borrows another
+    /// declaration's row, and no exact match means nothing, not a
+    /// same-named neighbour.
     pub(crate) fn id(&self, caller: &Option<Caller>) -> Option<i64> {
         let caller = caller.as_ref()?;
-        let same_name = self
-            .entries
+        self.entries
             .iter()
-            .filter(|(_, name, _)| name == &caller.name);
-        same_name
-            .clone()
-            .find(|(owner, _, _)| owner.as_deref() == caller.owner.as_deref())
-            .or_else(|| same_name.clone().find(|(owner, _, _)| owner.is_none()))
-            .or_else(|| same_name.clone().next())
-            .map(|(_, _, id)| *id)
+            .find(|(owner, name, start_line, _)| {
+                name == &caller.name
+                    && owner.as_deref() == caller.owner.as_deref()
+                    && *start_line == i64::from(caller.start_line)
+            })
+            .map(|(_, _, _, id)| *id)
     }
 }
 
@@ -142,9 +144,12 @@ pub(crate) fn insert_symbols(
             i64::from(item.start_line),
             scope.clone(),
         ))?;
-        index
-            .entries
-            .push((None, item.name.clone(), conn.last_insert_rowid()));
+        index.entries.push((
+            None,
+            item.name.clone(),
+            i64::from(item.start_line),
+            conn.last_insert_rowid(),
+        ));
     }
     let mut method_statement = conn.prepare(
         "INSERT INTO symbols(
@@ -174,6 +179,7 @@ pub(crate) fn insert_symbols(
         index.entries.push((
             Some(method.owner.clone()),
             method.name.clone(),
+            i64::from(method.start_line),
             conn.last_insert_rowid(),
         ));
     }

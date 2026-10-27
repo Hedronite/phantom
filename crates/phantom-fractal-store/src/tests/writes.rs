@@ -326,14 +326,120 @@ fn use_rows_carry_alias_and_glob() {
     }
 }
 
-/// Replaces the three graph tables with one fake package, one lib target
-/// over the given file, and one file-level module row — enough for the
-/// rows API's tests to run against a graph without the resolver.
+#[test]
+fn trait_default_body_call_gets_no_from_symbol() {
+    let db = TempDb::new("traitbody");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = language();
+    let source = "pub trait Greet {\n    fn greet(&self) {\n        helper();\n    }\n}\n\nimpl Greet for Ledger {\n    fn greet(&self) {\n        wave();\n    }\n}\n\npub struct Ledger;\n\npub fn helper() {}\n\npub fn wave() {}\n\n";
+    store
+        .put_source("src/greet.rs", source, 0, &language)
+        .expect("put");
+    let input = store.resolve_input().expect("input");
+    // The impl method owns its own call: the from row is the method
+    // `greet` on the impl, not the item row of anything co-named.
+    let greet_method = input
+        .symbols
+        .iter()
+        .find(|symbol| {
+            symbol.name == "greet" && symbol.kind == phantom_fractal_lang::SymbolKind::Method
+        })
+        .expect("impl method row");
+    let wave_call = input
+        .refs
+        .iter()
+        .find(|reference| reference.text == "wave")
+        .expect("wave stored");
+    assert_eq!(
+        wave_call.from,
+        Some(greet_method.id),
+        "impl body encloses wave"
+    );
+    // The trait default body has no symbol row, so its call borrows
+    // nothing — never the impl method.
+    let helper_call = input
+        .refs
+        .iter()
+        .find(|reference| reference.text == "helper")
+        .expect("helper stored");
+    assert_eq!(helper_call.from, None, "trait body borrows nothing");
+    drop(store);
+}
+
+#[test]
+fn nested_inner_fn_call_gets_no_from_symbol() {
+    let db = TempDb::new("nested");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = language();
+    let source = "fn inner() { 0 }\n\npub fn outer() {\n    fn inner() { helper(); }\n    helper();\n}\n\npub fn helper() {}\n\n";
+    store
+        .put_source("src/nested.rs", source, 0, &language)
+        .expect("put");
+    let input = store.resolve_input().expect("input");
+    let outer_id = row_id(&input, "outer");
+    let calls: Vec<_> = input
+        .refs
+        .iter()
+        .filter(|reference| reference.text == "helper")
+        .collect();
+    assert_eq!(calls.len(), 2, "one call per inner fn");
+    let outer_starts_nested = calls
+        .iter()
+        .any(|reference| reference.from == Some(outer_id));
+    assert!(outer_starts_nested);
+    // The nested inner has no symbol row of its own.
+    assert!(calls.iter().any(|reference| reference.from.is_none()));
+    drop(store);
+}
+
+#[test]
+fn cfg_twins_match_by_start_line() {
+    let db = TempDb::new("twins");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = language();
+    let source = "#[cfg(unix)]\nfn twin() { helper(); }\n\n#[cfg(not(unix))]\nfn twin() { helper(); }\n\npub fn helper() {}\n\n";
+    store
+        .put_source("src/twins.rs", source, 0, &language)
+        .expect("put");
+    let input = store.resolve_input().expect("input");
+    let twins: Vec<_> = input
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.name == "twin")
+        .collect();
+    assert_eq!(twins.len(), 2, "both twins are rows");
+    let calls: Vec<_> = input
+        .refs
+        .iter()
+        .filter(|reference| reference.text == "helper")
+        .collect();
+    assert_eq!(calls.len(), 2);
+    assert_ne!(calls[0].from, calls[1].from, "each twin owns its own call");
+    assert_eq!(calls[0].from, Some(twins[0].id));
+    assert_eq!(calls[1].from, Some(twins[1].id));
+    drop(store);
+}
+
+fn row_id(input: &phantom_fractal_lang::ResolveInput, name: &str) -> i64 {
+    input
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == name)
+        .expect(name)
+        .id
+}
+
 fn rows_ref_kind(kind: phantom_fractal_lang::RefKind) -> String {
     let text = format!("{kind:?}");
     text.to_ascii_lowercase()
 }
 
+/// Replaces the three graph tables with one fake package, one lib target
+/// over the given file, and one file-level module row — enough for the
+/// rows API's tests to run against a graph without the resolver.
 fn write_lib_graph(store: &mut Store, file: &str) {
     store
         .write_crate_graph(
