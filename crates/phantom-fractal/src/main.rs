@@ -1,23 +1,29 @@
 //! Phantom command line. Builds as both `phantom-fractal` and `fract`.
 //!
 //! `index PATH` stores the Rust files under PATH in a database in the data
-//! directory. `find NAME` looks symbols up in that database and returns at
-//! most 100. Both print the JSON envelope from `phantom-fractal-proto`.
-//! There are no other commands.
+//! directory and resolves their calls. `find NAME` looks symbols up in that
+//! database and returns at most 100. `callers SYMBOL` and `callees SYMBOL`
+//! return the stored call edges of one symbol, at most 100. Each prints the
+//! JSON envelope from `phantom-fractal-proto`. There are no other commands.
 
 #![forbid(unsafe_code)]
 
+mod calls;
+
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use phantom_fractal_extract::{IndexError, IndexReport};
+use phantom_fractal_extract::{GraphReport, IndexError, IndexReport};
 use phantom_fractal_lang::{Item, Visibility};
 use phantom_fractal_lang_rust::RustLanguage;
 use phantom_fractal_proto::{Envelope, ErrorKind};
 use phantom_fractal_store::{Store, StoreError, index_database_path};
 use serde::Serialize;
+
+use crate::calls::{Candidates, Direction};
 
 /// Canon exit 1: usage or internal error.
 const EXIT_ERROR: u8 = 1;
@@ -52,24 +58,56 @@ enum Command {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
     },
+    /// List the resolved calls to one symbol, by bare or qualified name.
+    Callers {
+        symbol: String,
+        /// Tree that was indexed. Defaults to the current directory.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
+    /// List the resolved calls one symbol makes, by bare or qualified name.
+    Callees {
+        symbol: String,
+        /// Tree that was indexed. Defaults to the current directory.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
 }
 
 /// `data` of a successful `index`. It holds counts only, never a path.
+/// The graph counts describe the stored crate graph and edges.
 #[derive(Serialize)]
 struct IndexSummary {
     written: usize,
     unchanged: usize,
     not_utf8: usize,
     skipped: usize,
+    modules: usize,
+    orphans: usize,
+    edges: u64,
+    unresolved: u64,
+    external: u64,
+    no_source: u64,
+    method_calls: u64,
+    macros: u64,
 }
 
 impl IndexSummary {
-    fn new(report: &IndexReport) -> Self {
+    fn new(report: &IndexReport, graph: &GraphReport) -> Self {
+        let counts = &graph.counts;
         Self {
             written: report.written.len(),
             unchanged: report.unchanged.len(),
             not_utf8: report.not_utf8.len(),
             skipped: report.skipped.len(),
+            modules: graph.modules,
+            orphans: graph.orphans,
+            edges: counts.edges,
+            unresolved: counts.unresolved,
+            external: counts.external,
+            no_source: counts.no_source,
+            method_calls: counts.method_calls,
+            macros: counts.macros,
         }
     }
 }
@@ -110,10 +148,13 @@ impl SymbolHit {
     }
 }
 
-/// An envelope error. `message` never holds an absolute path.
+/// An envelope error. `message` and `candidates` never hold an absolute
+/// path.
 struct Failure {
     kind: ErrorKind,
     message: String,
+    /// The envelope's `data` for an `Ambiguous` lookup.
+    candidates: Option<Candidates>,
 }
 
 impl Failure {
@@ -121,6 +162,15 @@ impl Failure {
         Self {
             kind,
             message: message.into(),
+            candidates: None,
+        }
+    }
+
+    /// `Ambiguous`, with the candidates as the envelope's `data`.
+    fn ambiguous(message: impl Into<String>, candidates: Candidates) -> Self {
+        Self {
+            candidates: Some(candidates),
+            ..Self::new(ErrorKind::Ambiguous, message)
         }
     }
 }
@@ -152,6 +202,8 @@ fn main() -> ExitCode {
     match cli.command {
         Command::Index { path } => emit(index(&path)),
         Command::Find { query, repo } => emit(find(&query, &repo)),
+        Command::Callers { symbol, repo } => emit(calls::calls(Direction::Callers, &symbol, &repo)),
+        Command::Callees { symbol, repo } => emit(calls::calls(Direction::Callees, &symbol, &repo)),
     }
 }
 
@@ -176,15 +228,40 @@ fn index(path: &Path) -> Result<IndexSummary, Failure> {
         .map_err(|err| Failure::new(ErrorKind::Usage, format!("extract: {err}")))?;
     let mut store = Store::open(&database)?;
     let report = phantom_fractal_extract::index(&root, &mut store, &language)?;
-    Ok(IndexSummary::new(&report))
+    let graph = match report.graph {
+        Some(graph) => graph,
+        None => stored_graph(&store)?,
+    };
+    Ok(IndexSummary::new(&report, &graph))
 }
 
-/// Indexed symbols under `repo` named exactly `query`, ordered by path and
-/// then line, at most [`FIND_CAP`] of them.
-///
-/// The store's bound FTS match answers an absent name without a walk.
-/// Otherwise each `.rs` file the walk keeps is read back from the store.
-fn find(query: &str, repo: &Path) -> Result<FindResult, Failure> {
+/// The graph counts of an index pass that rebuilt nothing, read from the
+/// stored graph without writing. The resolver is pure, so its counts over
+/// the stored input are the ones the last rebuild found.
+fn stored_graph(store: &Store) -> Result<GraphReport, Failure> {
+    let input = store.resolve_input()?;
+    let (_, counts) = phantom_fractal_lang_rust::resolve(&input);
+    let reached: HashSet<&str> = input
+        .modules
+        .iter()
+        .map(|module| module.file.as_str())
+        .collect();
+    let orphans = store
+        .file_paths()?
+        .iter()
+        .filter(|path| !reached.contains(path.as_str()))
+        .count();
+    Ok(GraphReport {
+        modules: input.modules.len(),
+        orphans,
+        counts,
+    })
+}
+
+/// The store for the tree at `repo`, which must already be indexed. It is
+/// `NotFound` when `repo` does not exist and `NoIndex` when it has no
+/// database; neither case creates anything.
+fn open_index(repo: &Path) -> Result<Store, Failure> {
     let root = repo
         .canonicalize()
         .map_err(|_| Failure::new(ErrorKind::NotFound, "repo path not found"))?;
@@ -195,13 +272,25 @@ fn find(query: &str, repo: &Path) -> Result<FindResult, Failure> {
             "no index for this path; run index first",
         ));
     }
-    let store = Store::open(&database)?;
+    Ok(Store::open(&database)?)
+}
+
+/// Indexed symbols under `repo` named exactly `query`, ordered by path and
+/// then line, at most [`FIND_CAP`] of them.
+///
+/// The store's bound FTS match answers an absent name without a walk.
+/// Otherwise each `.rs` file the walk keeps is read back from the store.
+fn find(query: &str, repo: &Path) -> Result<FindResult, Failure> {
+    let store = open_index(repo)?;
     if query.is_empty() || store.match_count(query)? == 0 {
         return Ok(FindResult {
             hits: Vec::new(),
             truncated: false,
         });
     }
+    let root = repo
+        .canonicalize()
+        .map_err(|_| Failure::new(ErrorKind::NotFound, "repo path not found"))?;
     let walk = phantom_fractal_extract::walk(&root)
         .map_err(|err| Failure::new(ErrorKind::Usage, format!("walk failed: {err}")))?;
     let mut hits = Vec::new();
@@ -233,11 +322,21 @@ fn resolve(path: &Path) -> PathBuf {
 
 /// Prints the envelope for `result` and exits with its kind's code.
 fn emit<T: Serialize>(result: Result<T, Failure>) -> ExitCode {
-    let (envelope, code) = match result {
-        Ok(data) => (Envelope::success(data), 0),
-        Err(Failure { kind, message }) => (Envelope::failure(kind, message), kind.exit_code()),
+    let (json, code) = match result {
+        Ok(data) => (serde_json::to_string(&Envelope::success(data)), 0),
+        Err(Failure {
+            kind,
+            message,
+            candidates,
+        }) => {
+            let envelope = match candidates {
+                Some(candidates) => Envelope::failure_with_data(kind, message, candidates),
+                None => Envelope::<Candidates>::failure(kind, message),
+            };
+            (serde_json::to_string(&envelope), kind.exit_code())
+        }
     };
-    let Ok(json) = serde_json::to_string(&envelope) else {
+    let Ok(json) = json else {
         return ExitCode::from(EXIT_ERROR);
     };
     if writeln!(std::io::stdout().lock(), "{json}").is_err() {

@@ -17,6 +17,20 @@ const BINS: [&str; 2] = [
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/index/repo");
 
+const RESOLVE_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/resolve");
+
+/// The graph counts `index` adds, in `fixtures/resolve/EXPECTED.md` order.
+const GRAPH_COUNTS: [&str; 8] = [
+    "edges",
+    "unresolved",
+    "external",
+    "no_source",
+    "method_calls",
+    "macros",
+    "modules",
+    "orphans",
+];
+
 /// A fresh directory under the system temp dir, removed on drop.
 struct TempDir(PathBuf);
 
@@ -104,8 +118,12 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::of(FIXTURE)
+    }
+
+    fn of(fixture: &str) -> Self {
         let repo = TempDir::new("repo");
-        copy_tree(Path::new(FIXTURE), repo.path());
+        copy_tree(Path::new(fixture), repo.path());
         Self {
             repo,
             data: TempDir::new("data"),
@@ -203,10 +221,54 @@ fn index_json_holds_no_absolute_path() {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["not_utf8", "skipped", "unchanged", "written"],
+            [
+                "edges",
+                "external",
+                "macros",
+                "method_calls",
+                "modules",
+                "no_source",
+                "not_utf8",
+                "orphans",
+                "skipped",
+                "unchanged",
+                "unresolved",
+                "written",
+            ],
             "{bin}: {text}"
         );
+        for (key, value) in env["data"].as_object().expect("data") {
+            assert!(value.is_u64(), "{bin}: {key} is not a count: {text}");
+        }
     }
+}
+
+/// Each pass reports the eight graph counts of `EXPECTED.md`. The second
+/// pass rebuilds nothing, reads the same counts back, and leaves the
+/// database bytes as they were.
+#[test]
+fn index_reports_the_graph_counts_on_every_pass() {
+    let expected = [22, 8, 2, 3, 1, 1, 11, 1];
+    let fixture = Fixture::of(RESOLVE_FIXTURE);
+    let (code, first) = fixture.index(BINS[1]);
+    assert_eq!(code, Some(0), "{first}");
+    assert_eq!(first["data"]["written"], 11, "{first}");
+    let database = find_database(fixture.data.path());
+    let bytes = fs::read(&database).expect("read graph.db");
+    let (code, second) = fixture.index(BINS[0]);
+    assert_eq!(code, Some(0), "{second}");
+    assert_eq!(second["data"]["written"], 0, "{second}");
+    assert_eq!(second["data"]["unchanged"], 11, "{second}");
+    for env in [&first, &second] {
+        for (key, count) in GRAPH_COUNTS.into_iter().zip(expected) {
+            assert_eq!(env["data"][key], count, "{key}: {env}");
+        }
+    }
+    assert_eq!(
+        fs::read(&database).expect("read graph.db"),
+        bytes,
+        "the second pass changed graph.db"
+    );
 }
 
 #[test]
@@ -220,6 +282,9 @@ fn a_second_index_writes_nothing() {
         second["data"]["unchanged"], first["data"]["written"],
         "{second}"
     );
+    for key in GRAPH_COUNTS {
+        assert_eq!(second["data"][key], first["data"][key], "{key}: {second}");
+    }
 }
 
 #[test]
