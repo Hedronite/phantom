@@ -35,7 +35,8 @@ pub enum SkipReason {
     /// Name matches the secret denylist: `.env*`; the exact names
     /// `credentials`, `.netrc`, and `.npmrc`; the suffixes `.pem`, `.key`,
     /// `.p12`, and `.pfx`; and `id_<name>` or `id_<name>.pub` where `<name>`
-    /// has no dot, such as `id_rsa`. See [`is_secret`].
+    /// has no dot, such as `id_rsa`. ASCII case is ignored. See
+    /// [`is_secret`].
     Secret,
     /// Larger than [`MAX_FILE_BYTES`].
     TooLarge,
@@ -162,8 +163,11 @@ const SECRET_NAMES: [&str; 3] = ["credentials", ".netrc", ".npmrc"];
 const SECRET_SUFFIXES: [&str; 4] = [".pem", ".key", ".p12", ".pfx"];
 
 /// True for file names on the default secret denylist, listed on
-/// [`SkipReason::Secret`]. Only the name is matched, never the path.
+/// [`SkipReason::Secret`]. Only the name is matched, never the path, and
+/// ASCII case is ignored: `ID_RSA` and `.Env.local` are secrets.
 pub fn is_secret(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let name = name.as_str();
     name.starts_with(".env")
         || SECRET_NAMES.contains(&name)
         || SECRET_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))

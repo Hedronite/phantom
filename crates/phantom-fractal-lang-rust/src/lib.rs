@@ -4,9 +4,15 @@
 //! `queries/extract.scm`. Only module-scope declarations are extracted: those
 //! in the file body or in an inline `mod` body. Declarations inside function
 //! bodies, `impl` blocks, and trait bodies are skipped.
+//!
+//! A second pass over the tree records call references, the methods of
+//! module-scope `impl` blocks, and `mod` declarations. Nothing is resolved,
+//! and macros are never expanded.
 #![forbid(unsafe_code)]
 
+mod bindings;
 mod imports;
+mod scan;
 
 use phantom_fractal_lang::{Extract, ExtractError, Item, ItemKind, Language, Visibility};
 use tree_sitter::{Node, Parser, Query, QueryCursor, QueryMatch, StreamingIterator};
@@ -102,6 +108,7 @@ impl Language for RustLanguage {
         while let Some(found) = matches.next() {
             record(self.found(found), src, &mut out);
         }
+        scan::scan(tree.root_node(), src, &mut out);
         Ok(out)
     }
 }
@@ -131,17 +138,38 @@ fn record(found: Found<'_>, src: &[u8], out: &mut Extract) {
         .map_or(Visibility::Private, |node| visibility(node, src));
     let start_line = start_line(node);
     match (record, found.name, found.argument) {
-        (Record::Item(kind), Some(name), _) => out.items.push(Item {
-            kind,
-            name: compact(name, src),
-            visibility,
-            start_line,
-        }),
+        (Record::Item(kind), Some(name), _) => {
+            out.items.push(Item {
+                kind,
+                name: compact(name, src),
+                visibility,
+                start_line,
+            });
+            out.item_scopes.push(scope_of(node, src));
+        }
         (Record::Use, _, Some(argument)) => {
             imports::flatten(argument, src, &visibility, start_line, &mut out.imports);
+            let scope = scope_of(node, src);
+            out.import_scopes.resize(out.imports.len(), scope);
         }
         _ => {}
     }
+}
+
+/// The inline-module path around `node`, outermost first, joined with `::`.
+fn scope_of(node: Node<'_>, src: &[u8]) -> String {
+    let mut names = Vec::new();
+    let mut parent = node.parent();
+    while let Some(ancestor) = parent {
+        if ancestor.kind() == "mod_item"
+            && let Some(name) = ancestor.child_by_field_name("name")
+        {
+            names.push(compact(name, src));
+        }
+        parent = ancestor.parent();
+    }
+    names.reverse();
+    names.join("::")
 }
 
 /// True for a declaration in the file body or an inline `mod` body.

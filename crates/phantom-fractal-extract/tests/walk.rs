@@ -103,6 +103,28 @@ fn walk_of_a_missing_root_is_an_error() {
 }
 
 #[test]
+fn secret_denylist_ignores_ascii_case() {
+    for name in [
+        "ID_RSA",
+        "Id_Ed25519.PUB",
+        "CREDENTIALS",
+        ".NETRC",
+        ".Npmrc",
+        ".ENV",
+        ".Env.local",
+        "X.PEM",
+        "y.KEY",
+        "z.P12",
+        "w.PFX",
+    ] {
+        assert!(is_secret(name), "{name}");
+    }
+    for name in ["ID_CODEC.RS", "Credentials.rs", "NETRC.rs"] {
+        assert!(!is_secret(name), "{name}");
+    }
+}
+
+#[test]
 fn secret_denylist_matches_names_not_paths() {
     for name in [
         ".env",
