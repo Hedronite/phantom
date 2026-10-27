@@ -176,3 +176,72 @@ fn unique_path(label: &str) -> PathBuf {
             .unwrap_or(0)
     ))
 }
+
+#[test]
+#[cfg(unix)]
+fn open_fails_when_the_repo_dir_swaps_to_a_symlink() {
+    let data = TempData::new("swap-link");
+    mkdir_explicit(&data.root, 0o755);
+    mkdir_explicit(&data.root.join("repos"), 0o755);
+    let repo_dir = data.repo_dir();
+    mkdir_explicit(&repo_dir, 0o700);
+    let target = data.root.join("target");
+    mkdir_explicit(&target, 0o755);
+    let link_target = target.clone();
+    crate::dirs::swap_under_open(Some(Box::new(move |_| {
+        fs::remove_dir(&repo_dir).expect("remove repo dir");
+        std::os::unix::fs::symlink(&link_target, &repo_dir).expect("symlink");
+    })));
+    let opened = Store::open(&data.db());
+    crate::dirs::swap_under_open(None);
+    assert!(opened.is_err(), "the swap must not pass");
+    assert_eq!(file_mode(&target), 0o755, "target mode unchanged");
+}
+
+#[test]
+#[cfg(unix)]
+fn open_refuses_a_swapped_in_directory() {
+    let data = TempData::new("swap-dir");
+    mkdir_explicit(&data.root, 0o755);
+    mkdir_explicit(&data.root.join("repos"), 0o755);
+    let repo_dir = data.repo_dir();
+    mkdir_explicit(&repo_dir, 0o700);
+    let other = data.root.join("other");
+    mkdir_explicit(&other, 0o755);
+    crate::dirs::swap_under_open(Some(Box::new(move |_| {
+        fs::remove_dir(&repo_dir).expect("remove repo dir");
+        fs::rename(&other, &repo_dir).expect("swap in");
+    })));
+    let opened = Store::open(&data.db());
+    crate::dirs::swap_under_open(None);
+    assert!(opened.is_err(), "the swapped-in dir must be refused");
+}
+
+#[test]
+#[cfg(unix)]
+fn tighten_refuses_without_the_uid_and_narrows_with_it() {
+    use std::os::unix::fs::MetadataExt;
+    // Same dev/ino directory with a group bit: the chmod lands through
+    // the handle only after the uid check passes (the probe's uid).
+    let data = TempData::new("tighten-owned");
+    mkdir_explicit(&data.root, 0o755);
+    mkdir_explicit(&data.root.join("repos"), 0o755);
+    let repo_dir = data.repo_dir();
+    mkdir_explicit(&repo_dir, 0o711);
+    let probe = repo_dir.join(".owner-check");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .expect("probe file");
+    let uid = fs::metadata(&probe).expect("probe meta").uid();
+    fs::remove_file(&probe).expect("remove probe");
+    let chain = crate::dirs::Chain::new(&data.db()).expect("chain");
+    // A wrong uid is refused and the mode stays.
+    let refused = crate::dirs::tighten_directories(&chain, 4242);
+    assert!(refused.is_err());
+    assert_eq!(file_mode(&repo_dir), 0o711);
+    // The real effective uid narrows it.
+    crate::dirs::tighten_directories(&chain, uid).expect("tighten");
+    assert_eq!(file_mode(&repo_dir), 0o700);
+}

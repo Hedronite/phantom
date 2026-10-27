@@ -371,7 +371,7 @@ fn prepare_chain(path: &Path) -> Result<(), StoreError> {
         ));
         let effective_uid = dirs::effective_uid(&chain.repo_dir, &probe)?;
         dirs::verify_owned(&chain, effective_uid)?;
-        dirs::tighten_directories(&chain)?;
+        dirs::tighten_directories(&chain, effective_uid)?;
     } else {
         dirs::create_private_directories(path)?;
     }
@@ -490,7 +490,7 @@ pub(crate) fn phrase_quote(query: &str) -> String {
     out
 }
 
-/// Ordered record of the open path, test-only (Vini #12 N2). Every step
+/// Ordered record of the open path, test-only (SecOps review #12 N2). Every step
 /// between the connection opening and the migration appends its static
 /// name; `tests::harden_is_first_on_an_existing_database` fails unless
 /// `harden` is recorded before the stamp probe and both migrations.
