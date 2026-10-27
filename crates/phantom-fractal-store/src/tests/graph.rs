@@ -5,7 +5,7 @@ use phantom_fractal_lang::{Edge, Reason, ResolveInput};
 use phantom_fractal_lang_rust::RustLanguage;
 
 use super::{TempDb, assert_outside_workspace, fixture};
-use crate::{Package, Store};
+use crate::{Package, Store, StoreError};
 
 fn language() -> RustLanguage {
     RustLanguage::new().expect("grammar")
@@ -109,6 +109,94 @@ fn write_crate_graph_replaces_tables_and_links_ids() {
     assert_eq!(replaced.name, "other");
 }
 
+#[test]
+fn all_seven_reasons_round_trip_through_the_edges() {
+    let db = TempDb::new("reasons");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = language();
+    let source = "fn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\nfn e() {}\nfn f() {}\nfn g() {}\npub fn caller() { a(); b(); c(); d(); e(); f(); g(); }\n";
+    store
+        .put_source("src/reasons.rs", source, 0, &language)
+        .expect("put");
+    write_graph(&mut store, "src/reasons.rs", 1);
+    let input = store.resolve_input().expect("input");
+    // The store leaves the workspace dependency list to the index pass.
+    assert!(input.deps.is_empty(), "no deps are store-made");
+    let caller = input
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "caller")
+        .expect("caller")
+        .id;
+    let mut refs: Vec<_> = input
+        .refs
+        .iter()
+        .filter(|reference| {
+            reference.from == Some(caller) && reference.kind == phantom_fractal_lang::RefKind::Call
+        })
+        .collect();
+    refs.sort_by_key(|reference| reference.id);
+    assert_eq!(refs.len(), 7, "{refs:?}");
+    let reasons: [(Reason, f64, &str); 7] = [
+        (Reason::PathExact, 1.0, "path-exact"),
+        (Reason::Local, 0.95, "local"),
+        (Reason::UseAlias, 0.95, "use-alias"),
+        (Reason::Assoc, 0.9, "assoc"),
+        (Reason::SelfMethod, 0.9, "self-method"),
+        (Reason::SelfAssoc, 0.9, "self-assoc"),
+        (Reason::CratePath, 0.95, "crate-path"),
+    ];
+    let names = ["a", "b", "c", "d", "e", "f", "g"];
+    let target_ids: Vec<i64> = names
+        .iter()
+        .map(|name| {
+            input
+                .symbols
+                .iter()
+                .find(|symbol| &symbol.name == name)
+                .expect("target fn")
+                .id
+        })
+        .collect();
+    let edges: Vec<Edge> = refs
+        .iter()
+        .zip(target_ids.iter())
+        .zip(reasons.iter())
+        .map(|((reference, target), (reason, confidence, _))| Edge {
+            ref_id: reference.id,
+            source: caller,
+            target: *target,
+            confidence: *confidence,
+            reason: *reason,
+        })
+        .collect();
+    store.replace_edges(&edges).expect("edges");
+    // `callees` reads every edge back with its stored reason text and
+    // confidence, in call-site order.
+    let callees = store.callees(caller).expect("callees");
+    assert_eq!(callees.len(), 7, "{callees:?}");
+    for (hit, (_, _, text)) in callees.iter().zip(reasons.iter()) {
+        assert_eq!(hit.reason, *text);
+    }
+    let confidences: Vec<u8> = callees
+        .iter()
+        .map(|hit| (hit.confidence * 100.0).round() as u8)
+        .collect();
+    let expected: Vec<u8> = reasons
+        .iter()
+        .map(|(_, confidence, _)| (confidence * 100.0).round() as u8)
+        .collect();
+    assert_eq!(confidences, expected);
+    // And each edge reads back through `callers` on its own target with
+    // the same reason.
+    for ((name, edge), (_, _, text)) in names.iter().zip(edges.iter()).zip(reasons) {
+        let hits = store.callers(edge.target).expect("callers");
+        assert_eq!(hits.len(), 1, "{name}: {hits:?}");
+        assert_eq!(hits[0].reason, text);
+        assert_eq!(hits[0].symbol, caller);
+    }
+}
 #[test]
 fn replace_edges_wipes_and_inserts() {
     let db = TempDb::new("rted");
@@ -312,6 +400,69 @@ fn extractor_version_round_trips_in_meta() {
     assert_eq!(store.extractor_version().expect("set"), Some(2));
     store.set_extractor_version(1).expect("overwrite");
     assert_eq!(store.extractor_version().expect("overwritten"), Some(1));
+}
+
+#[test]
+fn unknown_reason_text_fails_the_edge_readers() {
+    let db = TempDb::new("badreason");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = language();
+    let source = "pub fn pick() -> u8 { 1 }\npub fn outer() { pick(); }\n";
+    store
+        .put_source("src/flow.rs", source, 0, &language)
+        .expect("put");
+    write_graph(&mut store, "src/flow.rs", 1);
+    let input = store.resolve_input().expect("input");
+    let outer = input
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "outer")
+        .expect("outer")
+        .id;
+    let pick = input
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "pick")
+        .expect("pick")
+        .id;
+    let reference = input
+        .refs
+        .iter()
+        .find(|reference| reference.text == "pick")
+        .expect("call ref");
+    store
+        .replace_edges(&[Edge {
+            ref_id: reference.id,
+            source: outer,
+            target: pick,
+            confidence: 1.0,
+            reason: Reason::PathExact,
+        }])
+        .expect("edge");
+    // A hand-inserted reason that is none of the seven texts makes both
+    // readers refuse instead of passing it through.
+    {
+        let conn = rusqlite::Connection::open(db.path()).expect("sqlite");
+        conn.execute("UPDATE edges SET reason = 'made-up'", [])
+            .expect("hand insert");
+    }
+    let callers = store.callers(pick);
+    assert!(
+        matches!(
+            &callers,
+            Err(StoreError::UnknownReason(text)) if text == "made-up"
+        ),
+        "{callers:?}"
+    );
+    let callees = store.callees(outer);
+    assert!(
+        matches!(
+            &callees,
+            Err(StoreError::UnknownReason(text)) if text == "made-up"
+        ),
+        "{callees:?}"
+    );
 }
 
 #[test]

@@ -13,8 +13,8 @@ use std::error::Error;
 use std::fmt;
 
 pub use resolve::{
-    CallRef, Edge, Id, Module, Reason, ResolveCounts, ResolveInput, Symbol, SymbolKind, Target,
-    TargetKind, UseBinding,
+    CallRef, Dep, Edge, Id, Module, Reason, ResolveCounts, ResolveInput, Symbol, SymbolKind,
+    Target, TargetKind, UseBinding,
 };
 
 /// A language Phantom can extract.

@@ -1,4 +1,5 @@
-//! The contract between the store and a call resolver (SPEC-w3 G0c).
+//! The contract between the store and a call resolver (SPEC-w3 G0c,
+//! SPEC-w4 G0a).
 //!
 //! The store fills a [`ResolveInput`] from its rows. A resolver reads it and
 //! returns [`Edge`]s and [`ResolveCounts`]. Nothing here resolves anything.
@@ -17,6 +18,20 @@ pub struct ResolveInput {
     pub symbols: Vec<Symbol>,
     pub uses: Vec<UseBinding>,
     pub refs: Vec<CallRef>,
+    /// Which workspace libs each package may call by crate name.
+    pub deps: Vec<Dep>,
+}
+
+/// Package `package` may call the lib of workspace package `on`, written
+/// as `crate_name`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dep {
+    /// The calling package's name.
+    pub package: String,
+    /// The called package's name.
+    pub on: String,
+    /// The first path segment a caller writes: `on` with `-` turned to `_`.
+    pub crate_name: String,
 }
 
 /// One compilation target of a package.
@@ -125,6 +140,9 @@ pub struct CallRef {
     pub kind: RefKind,
     /// The callee as written, whitespace removed.
     pub text: String,
+    /// The receiver text of a method call as stored, such as `self`; none
+    /// for other kinds.
+    pub receiver: Option<String>,
     pub shadowed: bool,
 }
 
@@ -153,6 +171,15 @@ pub enum Reason {
     UseAlias,
     /// `Type::name` to the one inherent method of that type.
     Assoc,
+    /// `self.m()` in an impl method to the one method `m` of the impl's
+    /// self type.
+    SelfMethod,
+    /// `Self::name()` in an impl method to the one method `name` of the
+    /// impl's self type.
+    SelfAssoc,
+    /// The first segment is the crate name of a workspace lib the caller's
+    /// package may call.
+    CratePath,
 }
 
 /// What one resolve pass did with the call references it saw.

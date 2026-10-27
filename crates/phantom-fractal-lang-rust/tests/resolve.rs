@@ -1,8 +1,8 @@
 //! The four-tier resolver over hand-built inputs (SPEC-w3 G2b).
 
 use phantom_fractal_lang::{
-    CallRef, Edge, Id, Module, Reason, RefKind, ResolveCounts, ResolveInput, Symbol, SymbolKind,
-    Target, TargetKind, UseBinding,
+    CallRef, Dep, Edge, Id, Module, Reason, RefKind, ResolveCounts, ResolveInput, Symbol,
+    SymbolKind, Target, TargetKind, UseBinding,
 };
 use phantom_fractal_lang_rust::{confidence, resolve};
 
@@ -124,6 +124,7 @@ impl Input {
             file: file.to_owned(),
             kind,
             text: text.to_owned(),
+            receiver: None,
             shadowed: false,
         });
         id
@@ -161,6 +162,36 @@ fn confidences_are_the_spec_constants() {
     assert_eq!(confidence(Reason::Local), 0.95);
     assert_eq!(confidence(Reason::UseAlias), 0.95);
     assert_eq!(confidence(Reason::Assoc), 0.9);
+    assert_eq!(confidence(Reason::SelfMethod), 0.9);
+    assert_eq!(confidence(Reason::SelfAssoc), 0.9);
+    assert_eq!(confidence(Reason::CratePath), 0.95);
+}
+
+#[test]
+fn self_calls_and_crate_paths_get_no_edge_yet() {
+    let mut i = Input::new();
+    let new = i.method("Counter", None, "new");
+    let get = i.method("Counter", None, "get");
+    i.call(new, "Self::get");
+    let receiver = i.call_in(Some(new), "src/lib.rs", "", "get", RefKind::MethodCall);
+    i.input.refs.last_mut().expect("ref").receiver = Some("self".to_owned());
+    i.call(get, "other_crate::f");
+    i.input.deps.push(Dep {
+        package: "pkg".to_owned(),
+        on: "other-crate".to_owned(),
+        crate_name: "other_crate".to_owned(),
+    });
+    let (edges, counts) = i.resolve();
+    assert!(edges.is_empty(), "{edges:?} for ref {receiver}");
+    assert_eq!(
+        counts,
+        ResolveCounts {
+            // W3 sees `Self` and `other_crate` as unknown first segments.
+            external: 2,
+            method_calls: 1,
+            ..ResolveCounts::default()
+        }
+    );
 }
 
 #[test]

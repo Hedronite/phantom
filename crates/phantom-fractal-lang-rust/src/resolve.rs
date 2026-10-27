@@ -12,7 +12,9 @@
 //! | `Assoc` | 0.9 | `Type::name` to the one inherent method of `Type`. |
 //!
 //! Method calls on values, trait dispatch, glob imports, and calls across
-//! crates are counted and never resolved.
+//! crates are counted and never resolved. [`confidence`] already scores the
+//! `SelfMethod`, `SelfAssoc`, and `CratePath` reasons (SPEC-w4 G0a), but no
+//! tier places them yet.
 
 mod lookup;
 
@@ -24,8 +26,8 @@ use lookup::{Index, Placed};
 pub fn confidence(reason: Reason) -> f64 {
     match reason {
         Reason::PathExact => 1.0,
-        Reason::Local | Reason::UseAlias => 0.95,
-        Reason::Assoc => 0.9,
+        Reason::Local | Reason::UseAlias | Reason::CratePath => 0.95,
+        Reason::Assoc | Reason::SelfMethod | Reason::SelfAssoc => 0.9,
     }
 }
 

@@ -50,12 +50,28 @@ pub struct CallHit {
     pub reason: String,
 }
 
+pub(crate) fn reason_from_text(reason: &str) -> Result<Reason, StoreError> {
+    match reason {
+        "path-exact" => Ok(Reason::PathExact),
+        "local" => Ok(Reason::Local),
+        "use-alias" => Ok(Reason::UseAlias),
+        "assoc" => Ok(Reason::Assoc),
+        "self-method" => Ok(Reason::SelfMethod),
+        "self-assoc" => Ok(Reason::SelfAssoc),
+        "crate-path" => Ok(Reason::CratePath),
+        other => Err(StoreError::UnknownReason(other.to_owned())),
+    }
+}
+
 pub(crate) fn reason_to_text(reason: Reason) -> &'static str {
     match reason {
         Reason::PathExact => "path-exact",
         Reason::Local => "local",
         Reason::UseAlias => "use-alias",
         Reason::Assoc => "assoc",
+        Reason::SelfMethod => "self-method",
+        Reason::SelfAssoc => "self-assoc",
+        Reason::CratePath => "crate-path",
     }
 }
 
@@ -273,7 +289,7 @@ impl crate::Store {
             let mut statement = self.conn.prepare(
                 "SELECT r.id, r.from_symbol,
                         (SELECT m.id FROM modules m WHERE m.file_id = r.file_id AND m.scope = ''),
-                        r.scope, f.path, r.kind, r.text, r.shadowed
+                        r.scope, f.path, r.kind, r.text, r.receiver, r.shadowed
                  FROM refs r JOIN files f ON f.id = r.file_id
                  WHERE r.kind IN ('call', 'method_call', 'macro') ORDER BY r.id",
             )?;
@@ -287,7 +303,8 @@ impl crate::Store {
                     file: row.get(4)?,
                     kind: rows::ref_kind_from_text(&row.get::<_, String>(5)?)?,
                     text: row.get(6)?,
-                    shadowed: row.get::<_, i64>(7)? != 0,
+                    receiver: row.get(7)?,
+                    shadowed: row.get::<_, i64>(8)? != 0,
                 });
             }
         }
@@ -297,6 +314,7 @@ impl crate::Store {
             symbols,
             uses,
             refs,
+            deps: Vec::new(),
         })
     }
 
@@ -425,12 +443,13 @@ impl crate::Store {
         let mut rows = statement.query(id)?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
+            let reason = reason_from_text(&row.get::<_, String>(4)?)?;
             out.push(CallHit {
                 symbol: row.get(0)?,
                 file: row.get(1)?,
                 line: row.get(2)?,
                 confidence: row.get(3)?,
-                reason: row.get(4)?,
+                reason: reason_to_text(reason).to_owned(),
             });
         }
         Ok(out)
