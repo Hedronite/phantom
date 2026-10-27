@@ -150,31 +150,136 @@ fn symbols_matching_takes_bare_and_qualified_names() {
     assert_outside_workspace(db.path());
     let mut store = Store::open(db.path()).expect("open");
     let language = language();
-    let (source, mtime_ns) = fixture();
+    // lib.rs is the crate root with an inline `mod tests`; ledger.rs is
+    // the file module `crate::ledger` with an inline `mod tests` of its
+    // own; a.rs is filed one module deeper, `crate::a::b`.
+    let lib = "pub fn root_item() {}\n\n#[cfg(test)]\nmod tests {\n    pub fn probe() {}\n}\n";
+    let ledger = "pub fn open_ledger() {}\n\npub struct Ledger;\n\nimpl Ledger {\n    pub fn open(&self) {}\n}\n\n#[cfg(test)]\nmod tests {\n    pub fn check() {}\n}\n";
+    let a = "pub fn foo() {}\n";
+    put(&mut store, &language, "src/lib.rs", lib);
+    put(&mut store, &language, "src/ledger.rs", ledger);
+    put(&mut store, &language, "src/a.rs", a);
+    let modules = vec![
+        phantom_fractal_lang::Module {
+            id: 10,
+            target: 1,
+            parent: None,
+            path: "crate".to_owned(),
+            file: "src/lib.rs".to_owned(),
+            scope: String::new(),
+        },
+        phantom_fractal_lang::Module {
+            id: 11,
+            target: 1,
+            parent: None,
+            path: "crate::ledger".to_owned(),
+            file: "src/ledger.rs".to_owned(),
+            scope: String::new(),
+        },
+        phantom_fractal_lang::Module {
+            id: 12,
+            target: 1,
+            parent: Some(11),
+            path: "crate::ledger::tests".to_owned(),
+            file: "src/ledger.rs".to_owned(),
+            scope: "tests".to_owned(),
+        },
+        phantom_fractal_lang::Module {
+            id: 13,
+            target: 1,
+            parent: None,
+            path: "crate::a::b".to_owned(),
+            file: "src/a.rs".to_owned(),
+            scope: String::new(),
+        },
+    ];
     store
-        .put_source("src/items.rs", &source, mtime_ns, &language)
-        .expect("put");
-    write_graph(&mut store, "src/items.rs", 1);
+        .write_crate_graph(
+            &[crate::Package {
+                name: "sample".to_owned(),
+                version: None,
+                manifest_path: "Cargo.toml".to_owned(),
+            }],
+            &[phantom_fractal_lang::Target {
+                id: 1,
+                package: "sample".to_owned(),
+                name: "sample".to_owned(),
+                kind: phantom_fractal_lang::TargetKind::Lib,
+                root: "src/lib.rs".to_owned(),
+            }],
+            &modules,
+        )
+        .expect("graph");
+
+    // A bare name.
     let hits = store.symbols_matching("open_ledger").expect("bare");
     assert_eq!(hits.len(), 1, "{hits:?}");
     assert_eq!(hits[0].kind, "function");
-    assert_eq!(hits[0].file, "src/items.rs");
-    assert_eq!(hits[0].module_path, "crate");
+    assert_eq!(hits[0].file, "src/ledger.rs");
+    assert_eq!(hits[0].module_path, "crate::ledger");
     assert_eq!(hits[0].qual_name, "open_ledger");
     assert!(hits[0].line.is_some());
-    // A method hides under its qualified method name, both in file and
-    // in module terms.
-    let hits = store
-        .symbols_matching("Ledger::measure")
-        .expect("qualified");
-    assert_eq!(hits.len(), 1, "{hits:?}");
-    assert_eq!(hits[0].kind, "method");
-    assert_eq!(hits[0].qual_name, "Ledger::measure");
-    let hits = store
-        .symbols_matching("crate::Ledger::measure")
-        .expect("module-qualified");
-    assert_eq!(hits.len(), 1, "{hits:?}");
-    assert_eq!(hits[0].qual_name, "Ledger::measure");
+    // The SPEC's two module-qualified spellings, with and without crate::.
+    for spelling in ["ledger::open_ledger", "crate::ledger::open_ledger"] {
+        let hits = store.symbols_matching(spelling).expect(spelling);
+        assert_eq!(hits.len(), 1, "{spelling}: {hits:?}");
+        assert_eq!(hits[0].qual_name, "open_ledger");
+    }
+    // A method under its file-module path.
+    for spelling in ["ledger::Ledger::open", "crate::ledger::Ledger::open"] {
+        let hits = store.symbols_matching(spelling).expect(spelling);
+        assert_eq!(hits.len(), 1, "{spelling}: {hits:?}");
+        assert_eq!(hits[0].kind, "method");
+        assert_eq!(hits[0].qual_name, "Ledger::open");
+    }
+    // A fn inside the inline `mod tests` of ledger.rs: the module form
+    // carries one inline scope, not a doubled one.
+    for spelling in ["ledger::tests::check", "crate::ledger::tests::check"] {
+        let hits = store.symbols_matching(spelling).expect(spelling);
+        assert_eq!(hits.len(), 1, "{spelling}: {hits:?}");
+        assert_eq!(hits[0].module_path, "crate::ledger::tests");
+    }
+    assert!(
+        store
+            .symbols_matching("ledger::tests::tests::check")
+            .expect("no doubled scope")
+            .is_empty()
+    );
+    // The in-file qualified spelling still matches on its own.
+    assert_eq!(
+        store
+            .symbols_matching("tests::check")
+            .expect("in-file")
+            .len(),
+        1
+    );
+    // lib.rs: the file module is the crate root, so the qualified form is
+    // just the in-file qual name, with and without the crate:: prefix.
+    assert_eq!(
+        store.symbols_matching("tests::probe").expect("probe").len(),
+        1
+    );
+    assert_eq!(
+        store
+            .symbols_matching("crate::tests::probe")
+            .expect("crate probe")
+            .len(),
+        1
+    );
+    assert_eq!(store.symbols_matching("root_item").expect("root").len(), 1);
+    assert_eq!(
+        store
+            .symbols_matching("crate::root_item")
+            .expect("crate root")
+            .len(),
+        1
+    );
+    // A nested module path sorts out to a::b without the prefix.
+    for spelling in ["a::b::foo", "crate::a::b::foo"] {
+        let hits = store.symbols_matching(spelling).expect(spelling);
+        assert_eq!(hits.len(), 1, "{spelling}: {hits:?}");
+        assert_eq!(hits[0].file, "src/a.rs");
+    }
     assert!(
         store
             .symbols_matching("no_such_symbol_anywhere")
@@ -191,6 +296,10 @@ fn symbols_matching_takes_bare_and_qualified_names() {
             "{spliced} must not match"
         );
     }
+}
+
+fn put(store: &mut Store, language: &RustLanguage, path: &str, source: &str) {
+    store.put_source(path, source, 0, language).expect("put");
 }
 
 #[test]
