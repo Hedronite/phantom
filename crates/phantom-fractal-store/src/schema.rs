@@ -1,5 +1,6 @@
-//! Canon §6.3 tables. A later pack fills every table except `meta`, `files`,
-//! and `symbols`.
+//! Canon §6.3 tables. W3 fills `meta`, `files`, `symbols`, `refs`,
+//! `packages`, `targets`, `modules`, and `edges`; the rest stay empty
+//! until later packs.
 
 use rusqlite::Connection;
 
@@ -44,6 +45,7 @@ CREATE TABLE modules(
     path TEXT NOT NULL,
     file_id INTEGER REFERENCES files,
     parent_id INTEGER REFERENCES modules,
+    scope TEXT NOT NULL DEFAULT '',
     UNIQUE(target_id, path)
 ) STRICT;
 
@@ -64,7 +66,11 @@ CREATE TABLE symbols(
     start_line INTEGER,
     end_line INTEGER,
     is_test INTEGER NOT NULL DEFAULT 0,
-    is_entry INTEGER NOT NULL DEFAULT 0
+    is_entry INTEGER NOT NULL DEFAULT 0,
+    scope TEXT NOT NULL DEFAULT '',
+    owner TEXT,
+    owner_path TEXT,
+    trait_name TEXT
 ) STRICT;
 CREATE INDEX symbols_name ON symbols(name);
 
@@ -98,9 +104,15 @@ CREATE TABLE refs(
     last_segment TEXT NOT NULL,
     line INTEGER,
     col INTEGER,
-    receiver_hint TEXT
+    receiver_hint TEXT,
+    scope TEXT NOT NULL DEFAULT '',
+    receiver TEXT,
+    shadowed INTEGER NOT NULL DEFAULT 0,
+    alias TEXT,
+    glob INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 CREATE INDEX refs_last ON refs(last_segment);
+CREATE INDEX refs_from ON refs(from_symbol);
 
 CREATE TABLE edges(
     id INTEGER PRIMARY KEY,
@@ -166,19 +178,6 @@ CREATE TABLE index_runs(
     extractor_versions TEXT
 ) STRICT;
 "#;
-
-pub(crate) const EMPTY_TABLES: &[&str] = &[
-    "packages",
-    "targets",
-    "modules",
-    "refs",
-    "edges",
-    "cochange",
-    "file_history",
-    "git_scan",
-    "rank",
-    "index_runs",
-];
 
 pub(crate) fn meta_table_exists(conn: &Connection) -> Result<bool, StoreError> {
     #[cfg(test)]
@@ -268,7 +267,7 @@ pub(crate) fn check_stamp(conn: &Connection) -> Result<i64, StoreError> {
     if found > SCHEMA_VERSION {
         return Err(StoreError::SchemaNewer { found });
     }
-    if found != 1 && found != SCHEMA_VERSION {
+    if found != 1 && found != 2 && found != SCHEMA_VERSION {
         return Err(StoreError::UnreadableStamp);
     }
     let user_version = user_version(conn)?;
@@ -281,7 +280,8 @@ pub(crate) fn check_stamp(conn: &Connection) -> Result<i64, StoreError> {
     Ok(found)
 }
 
-/// Moves a version-1 database to [`SCHEMA_VERSION`] in one transaction.
+/// Moves a version-1 database to version 2 in one transaction. Version 3
+/// columns follow on its own step for a v1 database too.
 pub(crate) fn migrate_v1_to_v2(conn: &mut Connection) -> Result<(), StoreError> {
     #[cfg(test)]
     crate::open_trace::record("migrate_v1_to_v2");
@@ -291,6 +291,83 @@ pub(crate) fn migrate_v1_to_v2(conn: &mut Connection) -> Result<(), StoreError> 
         "INSERT INTO symbols_fts(symbols_fts) VALUES ('rebuild')",
         [],
     )?;
+    tx.execute(
+        "UPDATE meta SET value = '2' WHERE key = 'schema_version'",
+        [],
+    )?;
+    tx.pragma_update(None, "user_version", 2)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// The additive columns of version 3, as `(table, column, add)`. A
+/// migration on a downgrade-simulated database skips columns that a
+/// fresh-create database already has.
+const V3_COLUMNS: &[(&str, &str, &str)] = &[
+    (
+        "symbols",
+        "scope",
+        "ALTER TABLE symbols ADD COLUMN scope TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "symbols",
+        "owner",
+        "ALTER TABLE symbols ADD COLUMN owner TEXT",
+    ),
+    (
+        "symbols",
+        "owner_path",
+        "ALTER TABLE symbols ADD COLUMN owner_path TEXT",
+    ),
+    (
+        "symbols",
+        "trait_name",
+        "ALTER TABLE symbols ADD COLUMN trait_name TEXT",
+    ),
+    (
+        "modules",
+        "scope",
+        "ALTER TABLE modules ADD COLUMN scope TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "refs",
+        "scope",
+        "ALTER TABLE refs ADD COLUMN scope TEXT NOT NULL DEFAULT ''",
+    ),
+    (
+        "refs",
+        "receiver",
+        "ALTER TABLE refs ADD COLUMN receiver TEXT",
+    ),
+    (
+        "refs",
+        "shadowed",
+        "ALTER TABLE refs ADD COLUMN shadowed INTEGER NOT NULL DEFAULT 0",
+    ),
+    ("refs", "alias", "ALTER TABLE refs ADD COLUMN alias TEXT"),
+    (
+        "refs",
+        "glob",
+        "ALTER TABLE refs ADD COLUMN glob INTEGER NOT NULL DEFAULT 0",
+    ),
+];
+
+/// Moves a version-2 database to [`SCHEMA_VERSION`] in one transaction.
+/// Only nullable or defaulted columns are added; nothing is dropped.
+pub(crate) fn migrate_v2_to_v3(conn: &mut Connection) -> Result<(), StoreError> {
+    #[cfg(test)]
+    crate::open_trace::record("migrate_v2_to_v3");
+    let tx = conn.transaction()?;
+    for (table, column, add) in V3_COLUMNS {
+        let present: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+            [table, column],
+            |row| row.get(0),
+        )?;
+        if present == 0 {
+            tx.execute_batch(add)?;
+        }
+    }
     tx.execute(
         "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
         [SCHEMA_VERSION.to_string()],
@@ -314,11 +391,26 @@ pub(crate) fn user_version(conn: &Connection) -> Result<i64, StoreError> {
     Ok(conn.pragma_query_value(None, "user_version", |row| row.get(0))?)
 }
 
+/// Every canon table `row_count` may answer for.
+pub(crate) const COUNT_TABLES: &[&str] = &[
+    "meta",
+    "files",
+    "symbols",
+    "symbols_fts",
+    "packages",
+    "targets",
+    "modules",
+    "refs",
+    "edges",
+    "cochange",
+    "file_history",
+    "git_scan",
+    "rank",
+    "index_runs",
+];
+
 pub(crate) fn row_count(conn: &Connection, table: &str) -> Result<i64, StoreError> {
-    let allowed = EMPTY_TABLES
-        .iter()
-        .chain(["meta", "files", "symbols", "symbols_fts"].iter())
-        .any(|name| *name == table);
+    let allowed = COUNT_TABLES.contains(&table);
     if !allowed {
         return Err(StoreError::UnknownTable);
     }

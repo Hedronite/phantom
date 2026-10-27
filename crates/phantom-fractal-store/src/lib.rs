@@ -5,23 +5,34 @@
 //! A new database gets the canon §6.3 tables, `producer = phantom-fractal`,
 //! and `user_version` equal to [`SCHEMA_VERSION`]. Opening a database with
 //! no producer row fails. A `schema_version` newer than this binary fails
-//! too. Symbol rows come from [`Language::extract`]; this crate does not
-//! invent them.
+//! too. A version-1 or version-2 database migrates additively to
+//! [`SCHEMA_VERSION`].
+//!
+//! `put_source` replaces a path's rows in one transaction, so an edit and
+//! a new index cannot collide on `UNIQUE`, and `remove_file` drops a
+//! deleted file. The crate-graph API ([`Store::write_crate_graph`],
+//! [`Store::resolve_input`], [`Store::replace_edges`], and the caller
+//! counters) serves the resolver on top of the same rows.
 
+mod dirs;
+mod graph;
+mod rows;
 mod schema;
 
 use std::path::Path;
 
-use phantom_fractal_lang::{Extract, ExtractError, Item, ItemKind, Language, Visibility};
+use phantom_fractal_lang::{ExtractError, Item, Language};
 use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags};
+
+pub use crate::graph::{CallHit, Package, SymbolMatch};
 
 /// Producer stamp written into `meta`.
 pub const PRODUCER: &str = "phantom-fractal";
 
 /// Schema this binary creates and will open. A higher `meta.schema_version`
 /// is refused.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Open failure, or a write that could not be stored.
 #[derive(Debug)]
@@ -54,10 +65,21 @@ pub enum StoreError {
     UnknownTable,
     /// The extractor failed before any row was written.
     Extract(ExtractError),
-    /// A stored kind is not one this slice writes.
+    /// A stored kind or ref kind is not one this slice writes.
     UnknownKind(String),
     /// A stored visibility is not one this slice writes.
     UnknownVisibility(String),
+    /// A stored edge reason is not one this slice writes.
+    UnknownReason(String),
+    /// A target names a package the crate graph does not carry.
+    UnknownPackage(String),
+    /// A module names a target the crate graph does not carry.
+    UnknownTarget(i64),
+    /// `repos/` or the repo directory is a symlink or not a directory.
+    DataDirectory(String, String),
+    /// A store directory is owned by another uid, or the owner probe
+    /// could not be written where the effective uid owns.
+    NotOwnedByUs(String, String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -81,8 +103,21 @@ impl std::fmt::Display for StoreError {
             Self::ForeignDatabase => f.write_str("database is not a phantom-fractal index"),
             Self::UnknownTable => f.write_str("table name is not allowed"),
             Self::Extract(err) => write!(f, "extract: {err}"),
-            Self::UnknownKind(kind) => write!(f, "unknown item kind {kind}"),
+            Self::UnknownKind(kind) => write!(f, "unknown kind {kind}"),
             Self::UnknownVisibility(text) => write!(f, "unknown visibility {text}"),
+            Self::UnknownReason(reason) => write!(f, "unknown edge reason {reason}"),
+            Self::UnknownPackage(name) => {
+                write!(f, "the graph has no package named {name}")
+            }
+            Self::UnknownTarget(target) => {
+                write!(f, "the graph has no target with id {target}")
+            }
+            Self::DataDirectory(path, detail) => {
+                write!(f, "{path}: {detail}")
+            }
+            Self::NotOwnedByUs(path, detail) => {
+                write!(f, "{path}: {detail}")
+            }
         }
     }
 }
@@ -117,15 +152,14 @@ impl Store {
     /// new, `repos/`, and `repos/<name>-<hash>/` — are created `0700`.
     /// On open, `repos/` and the repo directory are narrowed to `0700`
     /// when they carry any group or other bit; a data root that already
-    /// existed is never changed.
+    /// existed is never changed. A `repos/` or repo directory that is a
+    /// symlink or not a directory fails the open before anything is
+    /// chmodded, and a chain member owned by another uid fails it too.
     /// An existing SQLite file with no `meta` table, or a `producer` other
     /// than [`PRODUCER`], is left unchanged and returns an error.
     pub fn open(path: &Path) -> Result<Self, StoreError> {
         #[cfg(unix)]
-        {
-            create_private_directories(path)?;
-            tighten_directories(path)?;
-        }
+        prepare_chain(path)?;
         if path.exists() {
             Self::open_existing(path)
         } else {
@@ -150,16 +184,23 @@ impl Store {
         if !schema::meta_table_exists(&conn)? {
             return Err(StoreError::ForeignDatabase);
         }
-        let version = schema::check_stamp(&conn)?;
-        if version < SCHEMA_VERSION {
+        let mut version = schema::check_stamp(&conn)?;
+        if version < 2 {
             schema::migrate_v1_to_v2(&mut conn)?;
+            version = 2;
+        }
+        if version < SCHEMA_VERSION {
+            schema::migrate_v2_to_v3(&mut conn)?;
         }
         enable_wal(&conn)?;
         Ok(Self { conn })
     }
 
-    /// Extracts `source` with `language` and writes the file row plus one
-    /// symbol row per extracted item.
+    /// Extracts `source` with `language` and **replaces** the rows stored
+    /// for `path` in one transaction: the file row, its symbols, its use
+    /// and call refs, methods as symbols of kind `method`, and every edge
+    /// whose ref, source, or target the file owned. A UNIQUE collision on
+    /// `files.path` cannot happen.
     pub fn put_source(
         &mut self,
         path: &str,
@@ -168,7 +209,29 @@ impl Store {
         language: &impl Language,
     ) -> Result<(), StoreError> {
         let extract = language.extract(source).map_err(StoreError::Extract)?;
-        self.insert_extract(path, source, mtime_ns, language.name(), &extract)
+        rows::replace_extract(
+            &mut self.conn,
+            path,
+            source,
+            mtime_ns,
+            language.name(),
+            &extract,
+        )
+    }
+
+    /// Deletes the rows stored for `path` and the file row, with every
+    /// edge that named its symbols. `Ok(true)` when a row was deleted,
+    /// `Ok(false)` when `path` had none.
+    pub fn remove_file(&mut self, path: &str) -> Result<bool, StoreError> {
+        rows::delete_file_rows(&self.conn, path)
+    }
+
+    /// Every stored repo-relative path, sorted.
+    pub fn file_paths(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.conn.prepare("SELECT path FROM files ORDER BY path")?;
+        let rows = statement.query_map([], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
     }
 
     pub fn trusted_schema_is_off(&self) -> Result<bool, StoreError> {
@@ -183,13 +246,14 @@ impl Store {
         defensive_on(&self.conn)
     }
 
-    /// Items previously stored for `path`, in insert order.
+    /// Items stored for `path`, in insert order. Methods stay out: they
+    /// are symbols of kind `method`, not items.
     pub fn read_items(&self, path: &str) -> Result<Vec<Item>, StoreError> {
         let mut statement = self.conn.prepare(
             "SELECT symbols.kind, symbols.name, symbols.visibility, symbols.start_line
              FROM symbols
              JOIN files ON files.id = symbols.file_id
-             WHERE files.path = ?1
+             WHERE files.path = ?1 AND symbols.kind <> 'method'
              ORDER BY symbols.id",
         )?;
         let rows = statement.query_map([path], |row| {
@@ -200,7 +264,7 @@ impl Store {
                 row.get::<_, Option<i64>>(3)?,
             ))
         })?;
-        rows.map(|row| row.map_err(StoreError::from).and_then(item_from_row))
+        rows.map(|row| row.map_err(StoreError::from).and_then(rows::item_from_row))
             .collect()
     }
 
@@ -265,22 +329,6 @@ impl Store {
     pub fn row_count(&self, table: &str) -> Result<i64, StoreError> {
         schema::row_count(&self.conn, table)
     }
-
-    fn insert_extract(
-        &mut self,
-        path: &str,
-        source: &str,
-        mtime_ns: i64,
-        lang: &str,
-        extract: &Extract,
-    ) -> Result<(), StoreError> {
-        let tx = self.conn.unchecked_transaction()?;
-        let file_id = insert_file(&tx, path, source, mtime_ns, lang)?;
-        insert_symbols(&tx, file_id, path, &extract.items)?;
-        insert_refs(&tx, file_id, &extract.imports)?;
-        tx.commit()?;
-        Ok(())
-    }
 }
 
 /// Flags for [`Store::open`]. `SQLITE_OPEN_URI` is never set.
@@ -304,57 +352,28 @@ fn create_private_file(path: &Path) -> Result<(), StoreError> {
     Ok(())
 }
 
-/// Mode for every directory the store creates and for `repos/` and the
-/// repo directory after a tighten.
-const DIR_MODE: u32 = 0o700;
-
-/// Creates every directory the store is missing on the way to the
-/// database with a recursive [`std::fs::DirBuilder`] at mode `0o700`.
-///
-/// [`std::fs::DirBuilder`] only assigns the mode to directories it
-/// creates, so a data root that already existed — say a
-/// `PHANTOM_FRACTAL_DATA` the user pointed at — keeps its mode here.
+/// Runs the W2 `0700` work over the recognized chain: shape refusal
+/// first, then creation, then the effective-uid check with a probe file
+/// the store itself creates, then the tighten. A plain database with no
+/// `repos/` ancestor keeps the W2 behavior alone.
 #[cfg(unix)]
-fn create_private_directories(path: &Path) -> Result<(), StoreError> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        let mut dirs = std::fs::DirBuilder::new();
-        dirs.recursive(true);
-        dirs.mode(DIR_MODE);
-        dirs.create(parent).map_err(StoreError::Io)?;
-    }
-    Ok(())
-}
-
-/// Narrows `repos/` and the repo directory holding a `graph.db` under
-/// them to [`DIR_MODE`] when either still has group or other bits.
-///
-/// The chain is recognized by its shape: the repo directory is the
-/// `graph.db` parent and `repos/` is named `repos` above it. Anything
-/// above `repos/` — the data root in particular — is never changed, and
-/// a database with no `repos/` in its ancestor chain is left alone.
-#[cfg(unix)]
-fn tighten_directories(path: &Path) -> Result<(), StoreError> {
-    use std::os::unix::fs::PermissionsExt;
-    let Some(repos) = path.parent().and_then(Path::parent) else {
-        return Ok(());
-    };
-    if repos.file_name() != Some(std::ffi::OsStr::new("repos")) {
-        return Ok(());
-    }
-    let repo_dir = path.parent().expect("repos has a parent");
-    for dir in [repo_dir, repos] {
-        let mode = std::fs::metadata(dir)
-            .map_err(StoreError::Io)?
-            .permissions()
-            .mode();
-        if mode & 0o077 == 0 {
-            continue;
-        }
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(DIR_MODE))
-            .map_err(StoreError::Io)?;
+fn prepare_chain(path: &Path) -> Result<(), StoreError> {
+    if let Some(chain) = dirs::Chain::new(path) {
+        dirs::verify_shape(&chain)?;
+        dirs::create_private_directories(path)?;
+        let probe = chain.repo_dir.join(format!(
+            ".owner-check-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|dur| dur.as_nanos())
+                .unwrap_or(0)
+        ));
+        let effective_uid = dirs::effective_uid(&chain.repo_dir, &probe)?;
+        dirs::verify_owned(&chain, effective_uid)?;
+        dirs::tighten_directories(&chain)?;
+    } else {
+        dirs::create_private_directories(path)?;
     }
     Ok(())
 }
@@ -471,129 +490,10 @@ pub(crate) fn phrase_quote(query: &str) -> String {
     out
 }
 
-fn last_segment(path: &str) -> &str {
-    path.rsplit("::")
-        .next()
-        .filter(|segment| !segment.is_empty())
-        .unwrap_or(path)
-}
-
-fn insert_refs(
-    conn: &Connection,
-    file_id: i64,
-    imports: &[phantom_fractal_lang::Import],
-) -> Result<(), StoreError> {
-    let mut statement = conn.prepare(
-        "INSERT INTO refs(file_id, kind, text, last_segment, line)
-         VALUES (?1, 'use', ?2, ?3, ?4)",
-    )?;
-    for import in imports {
-        statement.execute((
-            file_id,
-            &import.path,
-            last_segment(&import.path),
-            i64::from(import.start_line),
-        ))?;
-    }
-    Ok(())
-}
-
-fn insert_file(
-    conn: &Connection,
-    path: &str,
-    source: &str,
-    mtime_ns: i64,
-    lang: &str,
-) -> Result<i64, StoreError> {
-    let hash = blake3::hash(source.as_bytes());
-    let size = i64::try_from(source.len()).unwrap_or(i64::MAX);
-    conn.execute(
-        "INSERT INTO files(path, lang, blake3, size, mtime_ns, generated, parse_status)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, 'ok')",
-        (path, lang, hash.as_bytes().as_slice(), size, mtime_ns),
-    )?;
-    Ok(conn.last_insert_rowid())
-}
-
-fn insert_symbols(
-    conn: &Connection,
-    file_id: i64,
-    path: &str,
-    items: &[Item],
-) -> Result<(), StoreError> {
-    let mut statement = conn.prepare(
-        "INSERT INTO symbols(
-            file_id, kind, name, qual_name, stable_key, visibility, start_line
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-    )?;
-    for (index, item) in items.iter().enumerate() {
-        let ordinal = items[..index]
-            .iter()
-            .filter(|prior| prior.name == item.name && prior.kind == item.kind)
-            .count();
-        let kind = item.kind.as_str();
-        let stable_key = format!("{path}#{}#{kind}#{ordinal}", item.name);
-        statement.execute((
-            file_id,
-            kind,
-            &item.name,
-            &item.name,
-            stable_key,
-            visibility_to_text(&item.visibility),
-            i64::from(item.start_line),
-        ))?;
-    }
-    Ok(())
-}
-
-fn item_from_row(row: (String, String, String, Option<i64>)) -> Result<Item, StoreError> {
-    let (kind, name, visibility, start_line) = row;
-    let start_line = start_line.ok_or(StoreError::UnreadableStamp)?;
-    let start_line = u32::try_from(start_line).map_err(|_| StoreError::UnreadableStamp)?;
-    Ok(Item {
-        kind: kind_from_text(&kind)?,
-        name,
-        visibility: visibility_from_text(&visibility)?,
-        start_line,
-    })
-}
-
-fn visibility_to_text(visibility: &Visibility) -> String {
-    match visibility {
-        Visibility::Private => "private".to_owned(),
-        Visibility::Public => "public".to_owned(),
-        Visibility::Crate => "crate".to_owned(),
-        Visibility::Restricted(text) => format!("restricted:{text}"),
-    }
-}
-
-fn visibility_from_text(text: &str) -> Result<Visibility, StoreError> {
-    match text {
-        "private" => Ok(Visibility::Private),
-        "public" => Ok(Visibility::Public),
-        "crate" => Ok(Visibility::Crate),
-        other => match other.strip_prefix("restricted:") {
-            Some(rest) => Ok(Visibility::Restricted(rest.to_owned())),
-            None => Err(StoreError::UnknownVisibility(other.to_owned())),
-        },
-    }
-}
-
-fn kind_from_text(text: &str) -> Result<ItemKind, StoreError> {
-    match text {
-        "function" => Ok(ItemKind::Function),
-        "struct" => Ok(ItemKind::Struct),
-        "enum" => Ok(ItemKind::Enum),
-        "trait" => Ok(ItemKind::Trait),
-        "module" => Ok(ItemKind::Module),
-        other => Err(StoreError::UnknownKind(other.to_owned())),
-    }
-}
-
 /// Ordered record of the open path, test-only (Vini #12 N2). Every step
 /// between the connection opening and the migration appends its static
 /// name; `tests::harden_is_first_on_an_existing_database` fails unless
-/// `harden` is recorded before the stamp probe and the migration.
+/// `harden` is recorded before the stamp probe and both migrations.
 #[cfg(test)]
 pub(crate) mod open_trace {
     use std::cell::RefCell;
