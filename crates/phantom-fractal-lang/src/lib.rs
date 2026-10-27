@@ -106,6 +106,10 @@ pub struct Caller {
     /// The `impl` self type's last path segment for a method, without
     /// generics, or the trait name for a trait's default body.
     pub owner: Option<String>,
+    /// 1-based line of the `fn`'s first token, after any attributes: the
+    /// same line as its [`Item`] or [`Method`] record, so a store can tell
+    /// apart two functions with one name and owner.
+    pub start_line: u32,
 }
 
 /// A `fn` inside an `impl` block.
