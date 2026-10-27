@@ -59,9 +59,14 @@ jobs:
       - run: cargo nextest run --workspace --all-features --locked --profile ci --no-tests=warn
 
   # Clean-room rule §3.3–3.5: no GitNexus paths or names, no Empryo names,
-  # in crates/ or README.md.
+  # in crates/ or README.md. No fleet agent name in any tracked file; that
+  # list comes from the BANNED_NAMES secret and is never printed. A fork PR
+  # gets no secrets, so there the fleet check is skipped with a notice.
   banned-names:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: scripts/banned-names.sh
+        env:
+          BANNED_NAMES: ${{ secrets.BANNED_NAMES }}
+          BANNED_NAMES_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
