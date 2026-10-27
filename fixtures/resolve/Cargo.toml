@@ -1,0 +1,6 @@
+# Resolve fixture for SPEC-w3 G2d. Never built or run.
+[package]
+name = "resolve-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false

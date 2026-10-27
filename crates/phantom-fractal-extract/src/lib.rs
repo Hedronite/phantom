@@ -2,25 +2,32 @@
 //! steps 2, 3, and 5).
 //!
 //! The walk is language-agnostic; [`index`] keeps the `.rs` files and writes
-//! each through [`Store::put_source`]. The walked tree is only read.
+//! each through [`Store::put_source`], then rebuilds the crate graph and the
+//! call edges when anything changed (SPEC-w3 G2c). The walked tree is only
+//! read; nothing in it is compiled or run.
 #![forbid(unsafe_code)]
 
+pub mod graph;
 mod read;
+mod rebuild;
 mod walk;
 
+use std::collections::HashSet;
 use std::fmt;
 use std::path::Path;
 
+use phantom_fractal_lang::ResolveCounts;
 use phantom_fractal_lang_rust::RustLanguage;
 use phantom_fractal_store::{Store, StoreError};
 
 pub use read::{Source, read_source};
 pub use walk::{Candidate, MAX_FILE_BYTES, SkipReason, Skipped, Walk, is_secret, walk};
 
-/// Version of the extraction this walker writes. Bump it when the stored
-/// rows for an unchanged file would differ. The store does not record it in
-/// this slice, so a bump needs a fresh database.
-pub const EXTRACTOR_VERSION: u32 = 1;
+/// Version of the extraction this walker writes, stored after each graph
+/// rebuild. Bump it when the stored rows for an unchanged file would differ:
+/// a database stamped with any other version is fully re-extracted. Version
+/// 2 adds call references, methods, scopes, and edges.
+pub const EXTRACTOR_VERSION: u32 = 2;
 
 /// What one [`index`] pass did, by repo-relative path, in walk order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -33,6 +40,20 @@ pub struct IndexReport {
     pub not_utf8: Vec<String>,
     /// Everything the walk skipped, any extension.
     pub skipped: Vec<Skipped>,
+    /// Stored `.rs` paths this pass no longer keeps; their rows are gone.
+    pub removed: Vec<String>,
+    /// The crate graph and resolve pass, or none when nothing changed and
+    /// the stored extractor version is current, so nothing was rebuilt.
+    pub graph: Option<GraphReport>,
+}
+
+/// What one crate-graph rebuild found.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GraphReport {
+    pub modules: usize,
+    /// Kept `.rs` files no target reaches.
+    pub orphans: usize,
+    pub counts: ResolveCounts,
 }
 
 /// Why an [`index`] pass stopped.
@@ -76,18 +97,24 @@ impl From<StoreError> for IndexError {
     }
 }
 
-/// Walks `root` and stores every kept `.rs` file whose hash is not already
-/// stored for its path.
+/// Walks `root`, stores every kept `.rs` file whose hash is not already
+/// stored for its path, and removes the stored paths the walk no longer
+/// keeps. When anything was written or removed, or the stored extractor
+/// version is not [`EXTRACTOR_VERSION`], it then rebuilds the crate graph,
+/// resolves calls, replaces the edges, and stores the version. A stored
+/// version other than the current one re-extracts every file first.
 pub fn index(
     root: &Path,
     store: &mut Store,
     language: &RustLanguage,
 ) -> Result<IndexReport, IndexError> {
     let walk = walk(root)?;
+    let reextract = store.extractor_version()? != Some(EXTRACTOR_VERSION);
     let mut report = IndexReport {
-        skipped: walk.skipped,
+        skipped: walk.skipped.clone(),
         ..IndexReport::default()
     };
+    let mut kept: Vec<&Candidate> = Vec::new();
     for file in walk.files.iter().filter(|file| is_rust(&file.path)) {
         let (bytes, mtime_ns) = match read_source(&file.abs_path)? {
             Source::Bytes { bytes, mtime_ns } => (bytes, mtime_ns),
@@ -103,12 +130,23 @@ pub fn index(
             report.not_utf8.push(file.path.clone());
             continue;
         };
-        if is_unchanged(store, &file.path, &source)? {
+        kept.push(file);
+        if !reextract && is_unchanged(store, &file.path, &source)? {
             report.unchanged.push(file.path.clone());
             continue;
         }
         store.put_source(&file.path, &source, mtime_ns, language)?;
         report.written.push(file.path.clone());
+    }
+    let kept_paths: HashSet<&str> = kept.iter().map(|file| file.path.as_str()).collect();
+    for path in store.file_paths()? {
+        if !kept_paths.contains(path.as_str()) {
+            store.remove_file(&path)?;
+            report.removed.push(path);
+        }
+    }
+    if reextract || !report.written.is_empty() || !report.removed.is_empty() {
+        report.graph = Some(rebuild::rebuild(&walk, &kept, store, language)?);
     }
     Ok(report)
 }
