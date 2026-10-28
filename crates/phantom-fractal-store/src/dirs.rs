@@ -17,14 +17,20 @@ pub(crate) const DIR_MODE: u32 = 0o700;
 
 /// The checked-dir open flags, per target. On these three targets the
 /// kernel itself refuses symlinks and non-directories — no follow ever
-/// happens at the open (SecOps review #21 N1). The values are fixed:
-/// `O_DIRECTORY` `0o200000` and `O_NOFOLLOW` `0o400000` come from the
-/// Linux headers (`bits/fcntl-linux.h`, exposed by `<fcntl.h>`, same
-/// values on x86_64 and aarch64); `O_DIRECTORY` `0x00100000` and
-/// `O_NOFOLLOW` `0x00000100` come from macOS `<sys/fcntl.h>`. The
-/// kernel-level check is redundant with the `dev`/`ino` compare below,
-/// which stays on every target, so other unix targets keep the plain
-/// open. No `libc` call: the values are constants, not a link.
+/// happens at the open (SecOps review #21 N1). The values differ by
+/// arch, so they are fixed per cfg with the system header named, and a
+/// compile-time assert pins each pair: distinct, and equal to the
+/// header value. Linux x86_64 takes `O_DIRECTORY` `0o200000` and
+/// `O_NOFOLLOW` `0o400000` from `bits/fcntl-linux.h` (exposed by
+/// `<fcntl.h>`). Linux aarch64 takes `O_DIRECTORY` `0o40000` and
+/// `O_NOFOLLOW` `0o100000` from the arm64 wiring of
+/// `<asm-generic/fcntl.h>` — the same numbers the vendored libc crate
+/// carries in its gnu b64 aarch64 module. macOS takes
+/// `O_DIRECTORY` `0x00100000` and `O_NOFOLLOW` `0x00000100` from
+/// `<sys/fcntl.h>`. The kernel-level check is redundant with the
+/// `dev`/`ino` compare below, which stays on every target, so other
+/// unix targets keep the plain open. No `libc` call: the values are
+/// constants, not a link.
 #[cfg(any(
     target_os = "macos",
     all(
@@ -33,24 +39,42 @@ pub(crate) const DIR_MODE: u32 = 0o700;
     ),
 ))]
 mod checked_flags {
-    /// `O_DIRECTORY` for the listed targets.
-    #[cfg(all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ))]
+    /// `O_DIRECTORY` for Linux x86_64 (`bits/fcntl-linux.h`: `0o200000`).
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     pub(crate) const O_DIRECTORY: i32 = 0o200000;
-    /// `O_NOFOLLOW` for the listed targets.
-    #[cfg(all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ))]
+    /// `O_NOFOLLOW` for Linux x86_64 (`bits/fcntl-linux.h`: `0o400000`).
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     pub(crate) const O_NOFOLLOW: i32 = 0o400000;
-    /// `O_DIRECTORY` for macOS.
+    /// `O_DIRECTORY` for Linux aarch64 (arm64
+    /// `<asm-generic/fcntl.h>`: `0o40000`).
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    pub(crate) const O_DIRECTORY: i32 = 0o40000;
+    /// `O_NOFOLLOW` for Linux aarch64 (`0o100000`).
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    pub(crate) const O_NOFOLLOW: i32 = 0o100000;
+    /// `O_DIRECTORY` for macOS (`<sys/fcntl.h>`: `0x00100000`).
     #[cfg(target_os = "macos")]
     pub(crate) const O_DIRECTORY: i32 = 0x00100000;
-    /// `O_NOFOLLOW` for macOS.
+    /// `O_NOFOLLOW` for macOS (`0x00000100`).
     #[cfg(target_os = "macos")]
     pub(crate) const O_NOFOLLOW: i32 = 0x00000100;
+
+    const _: () = {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        assert!(
+            O_DIRECTORY == 0o200000 as i32
+                && O_NOFOLLOW == 0o400000 as i32
+                && O_DIRECTORY != O_NOFOLLOW
+        );
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        assert!(
+            O_DIRECTORY == 0o40000 as i32
+                && O_NOFOLLOW == 0o100000 as i32
+                && O_DIRECTORY != O_NOFOLLOW
+        );
+        #[cfg(target_os = "macos")]
+        assert!(O_DIRECTORY == 0x00100000 && O_NOFOLLOW == 0x00000100 && O_DIRECTORY != O_NOFOLLOW);
+    };
 }
 
 /// Opens the checked directory. On the flagged targets the open itself
