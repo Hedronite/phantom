@@ -45,7 +45,7 @@ pub(crate) struct CallResult {
 
 /// One symbol, by qualified name. `path` is relative to the indexed tree.
 #[derive(Serialize)]
-struct SymbolOut {
+pub(crate) struct SymbolOut {
     name: String,
     kind: String,
     path: String,
@@ -76,7 +76,7 @@ pub(crate) struct Candidates {
 }
 
 /// Qualified names for every stored symbol, built from the resolver input.
-struct Names {
+pub(crate) struct Names {
     symbols: HashMap<Id, Symbol>,
     modules: HashMap<Id, String>,
 }
@@ -95,6 +95,11 @@ impl Names {
                 .map(|module| (module.id, module.path))
                 .collect(),
         }
+    }
+
+    /// The qualified name of symbol `id`, when the resolver input holds it.
+    pub(crate) fn of(&self, id: Id) -> Option<String> {
+        self.symbols.get(&id).map(|symbol| self.qualified(symbol))
     }
 
     /// `crate::a::Owner::name`. A symbol in an orphan file has no module,
@@ -117,14 +122,7 @@ impl Names {
 /// The edges of the one symbol `query` names, sorted by path and then
 /// line, at most [`CALL_CAP`] of them.
 pub(crate) fn calls(direction: Direction, query: &str, repo: &Path) -> Result<CallResult, Failure> {
-    let store = open_index(repo)?;
-    if store.extractor_version()? != Some(EXTRACTOR_VERSION) {
-        return Err(Failure::new(
-            ErrorKind::NoIndex,
-            "the index has no call edges; run index again",
-        ));
-    }
-    let names = Names::new(store.resolve_input()?);
+    let (store, names) = current_index(repo)?;
     let symbol = lookup(&store, &names, query)?;
     // A call ref sits in the file of the symbol it is inside, so a callee's
     // call site is in the queried symbol's file. The store gives the
@@ -158,9 +156,24 @@ pub(crate) fn calls(direction: Direction, query: &str, repo: &Path) -> Result<Ca
     })
 }
 
+/// The store for the tree at `repo` and its symbol names. It is `NoIndex`
+/// unless the index was written by this extractor version, as well as in
+/// every case [`open_index`] refuses.
+pub(crate) fn current_index(repo: &Path) -> Result<(Store, Names), Failure> {
+    let store = open_index(repo)?;
+    if store.extractor_version()? != Some(EXTRACTOR_VERSION) {
+        return Err(Failure::new(
+            ErrorKind::NoIndex,
+            "the index has no call edges; run index again",
+        ));
+    }
+    let names = Names::new(store.resolve_input()?);
+    Ok((store, names))
+}
+
 /// The one stored symbol `query` names. None is `NotFound`; more than one
 /// is `Ambiguous`, with up to [`CANDIDATE_CAP`] candidates.
-fn lookup(store: &Store, names: &Names, query: &str) -> Result<SymbolMatch, Failure> {
+pub(crate) fn lookup(store: &Store, names: &Names, query: &str) -> Result<SymbolMatch, Failure> {
     let mut matches = store.symbols_matching(query)?;
     matches.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
     match matches.len() {
@@ -197,7 +210,7 @@ fn lookup(store: &Store, names: &Names, query: &str) -> Result<SymbolMatch, Fail
     }
 }
 
-fn symbol_out(names: &Names, found: SymbolMatch) -> SymbolOut {
+pub(crate) fn symbol_out(names: &Names, found: SymbolMatch) -> SymbolOut {
     let name = names
         .symbols
         .get(&found.id)
