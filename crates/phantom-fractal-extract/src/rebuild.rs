@@ -46,7 +46,12 @@ pub(crate) fn rebuild(
         });
     }
     let graph = graph::build(&manifests, &files);
-    store.write_crate_graph(&graph.packages, &graph.targets, &graph.modules)?;
+    store.write_crate_graph(
+        &graph.packages,
+        &graph.targets,
+        &graph.modules,
+        &graph.test_modules,
+    )?;
     let input = resolve_input(store, &manifests)?;
     let (edges, counts) = resolve(&input);
     store.replace_edges(&edges)?;

@@ -85,6 +85,10 @@ fn refs_fixture_gives_every_call_with_its_fields() {
             kind: RefKind::Macro,
             ..call("println", "println", (10, 5), plain())
         },
+        Want {
+            kind: RefKind::MacroArg,
+            ..call("hidden_in_macro", "hidden_in_macro", (10, 20), plain())
+        },
         call("std::mem::drop", "drop", (11, 5), plain()),
         call("helper_in_closure", "helper_in_closure", (19, 30), new()),
         Want {
@@ -108,13 +112,15 @@ fn refs_fixture_gives_every_call_with_its_fields() {
 }
 
 #[test]
-fn calls_inside_a_macro_token_tree_are_not_seen() {
+fn a_call_inside_a_macro_token_tree_is_only_a_macro_arg() {
     let got = extract(REFS);
-    assert!(
-        !got.refs.iter().any(|r| r.text == "hidden_in_macro"),
-        "{:?}",
-        got.refs
-    );
+    let kinds: Vec<RefKind> = got
+        .refs
+        .iter()
+        .filter(|r| r.text == "hidden_in_macro")
+        .map(|r| r.kind)
+        .collect();
+    assert_eq!(kinds, [RefKind::MacroArg]);
 }
 
 /// The `shadowed` flag of the one call to `g` in `source`.

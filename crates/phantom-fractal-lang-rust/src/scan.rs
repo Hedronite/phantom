@@ -2,8 +2,9 @@
 //! declarations (SPEC-w3 G0a, G0b).
 //!
 //! The pass keeps an explicit stack, so a deeply nested expression cannot
-//! overflow the thread stack. Macro token trees are not entered: macros are
-//! never expanded.
+//! overflow the thread stack. Macros are never expanded: the tree walk does
+//! not enter a token tree, and a macro invocation's tokens are only read for
+//! call-shaped names (SPEC-w5 G1a).
 
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -11,7 +12,8 @@ use std::rc::Rc;
 use phantom_fractal_lang::{Caller, Extract, Method, ModDecl, RefKind, Reference, Visibility};
 use tree_sitter::Node;
 
-use crate::{at_module_scope, bindings, compact, start_line, visibility};
+use crate::macro_args::call_shapes;
+use crate::{at_module_scope, attrs, bindings, compact, start_line, visibility};
 
 /// What a node inherits from its ancestors.
 struct Context {
@@ -64,6 +66,7 @@ fn visit(node: Node<'_>, src: &[u8], context: Rc<Context>, out: &mut Extract) ->
                     inline: body.is_some(),
                     path: path_attribute(node, src),
                     line: start_line(node),
+                    cfg_test: attrs::cfg_test(node, src),
                 });
             }
             if body.is_none() {
@@ -100,6 +103,17 @@ fn visit(node: Node<'_>, src: &[u8], context: Rc<Context>, out: &mut Extract) ->
         "macro_invocation" => {
             if let Some(reference) = macro_call(node, src, &context) {
                 out.refs.push(reference);
+            }
+            for shape in call_shapes(node, src) {
+                let callee = Callee {
+                    kind: RefKind::MacroArg,
+                    text: shape.text,
+                    last_segment: shape.last_segment,
+                    at: shape.at,
+                    receiver: None,
+                    single_segment: false,
+                };
+                out.refs.push(reference(callee, false, &context));
             }
             context
         }
@@ -272,6 +286,7 @@ fn method(function: Node<'_>, src: &[u8], scope: &str) -> Option<Method> {
         visibility,
         scope: scope.to_owned(),
         start_line: start_line(function),
+        is_test: attrs::is_test(function, src),
     })
 }
 
@@ -294,20 +309,9 @@ fn owner_name(self_type: Node<'_>, src: &[u8]) -> String {
 
 /// The value of a `#[path = "..."]` outer attribute on a `mod` item.
 fn path_attribute(module: Node<'_>, src: &[u8]) -> Option<String> {
-    let mut sibling = module.prev_named_sibling();
-    while let Some(node) = sibling {
-        match node.kind() {
-            "attribute_item" => {
-                if let Some(value) = node.named_child(0).and_then(|attr| path_value(attr, src)) {
-                    return Some(value);
-                }
-            }
-            "line_comment" | "block_comment" => {}
-            _ => return None,
-        }
-        sibling = node.prev_named_sibling();
-    }
-    None
+    attrs::outer(module)
+        .into_iter()
+        .find_map(|attribute| path_value(attribute, src))
 }
 
 fn path_value(attribute: Node<'_>, src: &[u8]) -> Option<String> {

@@ -42,6 +42,7 @@ pub fn confidence(reason: Reason) -> f64 {
 /// edge; `external` when the first segment is `std`, `core`, `alloc`, or not
 /// found, including a workspace lib the caller may not call; `no_source` for a `Call` outside any function symbol;
 /// `method_calls` for method calls on any receiver but `self`, and `macros`.
+/// A [`RefKind::MacroArg`] gets no edge and no count.
 pub fn resolve(input: &ResolveInput) -> (Vec<Edge>, ResolveCounts) {
     let index = Index::new(input);
     let mut edges = Vec::new();
@@ -64,6 +65,8 @@ pub fn resolve(input: &ResolveInput) -> (Vec<Edge>, ResolveCounts) {
                 counts.macros += 1;
                 continue;
             }
+            // A name inside a macro's tokens: never placed, never counted.
+            RefKind::MacroArg => continue,
             RefKind::Call => {
                 let Some(source) = call.from else {
                     counts.no_source += 1;

@@ -140,7 +140,12 @@ fn index_without_fingerprint(s: &mut Setup) {
     }
     let graph = graph::build(&manifests, &files);
     s.store
-        .write_crate_graph(&graph.packages, &graph.targets, &graph.modules)
+        .write_crate_graph(
+            &graph.packages,
+            &graph.targets,
+            &graph.modules,
+            &graph.test_modules,
+        )
         .expect("crate graph");
     let mut input = s.store.resolve_input().expect("resolve input");
     input.deps = deps::scan(&manifests);

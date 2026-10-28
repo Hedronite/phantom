@@ -30,6 +30,9 @@ pub struct Graph {
     pub packages: Vec<Package>,
     pub targets: Vec<Target>,
     pub modules: Vec<Module>,
+    /// Every module whose declaration carries `#[cfg(test)]`, and every
+    /// module below one, in module order.
+    pub test_modules: Vec<Id>,
     /// Kept `.rs` files no target reaches, in walk order.
     pub orphans: Vec<String>,
 }
@@ -47,6 +50,8 @@ pub struct Graph {
 ///   module row on its own file. `#[path]` counts only when it stays inside
 ///   the root and names a kept file.
 /// - A file reached twice keeps its first module.
+/// - A module is a test module when its declaration carries `#[cfg(test)]`
+///   or its parent is a test module.
 pub fn build(manifests: &[Manifest], files: &[SourceFile]) -> Graph {
     let kept: HashMap<&str, &SourceFile> = files.iter().map(|f| (f.path.as_str(), f)).collect();
     let mut graph = Graph::default();
@@ -83,11 +88,22 @@ pub fn build(manifests: &[Manifest], files: &[SourceFile]) -> Graph {
         kept: &kept,
         modules: Vec::new(),
         claimed: HashSet::new(),
+        cfg_test: HashSet::new(),
     };
     for target in &graph.targets {
         tree.target(target);
     }
     let claimed = tree.claimed;
+    // A parent is always pushed before its children.
+    let mut tests: HashSet<Id> = HashSet::new();
+    for module in &tree.modules {
+        if tree.cfg_test.contains(&module.id)
+            || module.parent.is_some_and(|parent| tests.contains(&parent))
+        {
+            tests.insert(module.id);
+            graph.test_modules.push(module.id);
+        }
+    }
     graph.modules = tree.modules;
     graph.orphans = files
         .iter()
@@ -174,6 +190,8 @@ struct Tree<'a> {
     kept: &'a HashMap<&'a str, &'a SourceFile>,
     modules: Vec<Module>,
     claimed: HashSet<&'a str>,
+    /// Modules whose own declaration carries `#[cfg(test)]`.
+    cfg_test: HashSet<Id>,
 }
 
 impl<'a> Tree<'a> {
@@ -210,6 +228,9 @@ impl<'a> Tree<'a> {
             if decl.inline {
                 let scope = join_scope(&decl.scope, &decl.name);
                 let id = self.push(target, Some(parent), path, &file.path, scope.clone());
+                if decl.cfg_test {
+                    self.cfg_test.insert(id);
+                }
                 scopes.insert(scope, id);
                 continue;
             }
@@ -220,6 +241,9 @@ impl<'a> Tree<'a> {
                 continue;
             }
             let id = self.push(target, Some(parent), path, &child.path, String::new());
+            if decl.cfg_test {
+                self.cfg_test.insert(id);
+            }
             // A `#[path]` file declares its children beside itself, as a
             // `mod.rs` does.
             let child_mod_rs = decl.path.is_some() || file_name(&child.path) == "mod.rs";

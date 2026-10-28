@@ -104,6 +104,7 @@ fn method(
         visibility,
         scope: scope.to_owned(),
         start_line,
+        is_test: false,
     }
 }
 
@@ -154,6 +155,7 @@ fn module(name: &str, scope: &str, inline: bool, path: Option<&str>, line: u32) 
         inline,
         path: path.map(str::to_owned),
         line,
+        cfg_test: false,
     }
 }
 
@@ -164,7 +166,10 @@ fn mod_decls_carry_inline_and_path() {
         module("placed", "", false, Some("other/place.rs"), 8),
         module("outer", "", true, None, 28),
         module("inner", "outer", true, None, 33),
-        module("tests", "", true, None, 43),
+        ModDecl {
+            cfg_test: true,
+            ..module("tests", "", true, None, 43)
+        },
     ];
     assert_eq!(extract(SCOPES).mod_decls, expected);
 }

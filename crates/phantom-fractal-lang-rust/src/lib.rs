@@ -7,11 +7,14 @@
 //!
 //! A second pass over the tree records call references, the methods of
 //! module-scope `impl` blocks, and `mod` declarations. Nothing is resolved,
-//! and macros are never expanded.
+//! and macros are never expanded: a call-shaped name inside a macro's
+//! tokens is recorded as written.
 #![forbid(unsafe_code)]
 
+mod attrs;
 mod bindings;
 mod imports;
+mod macro_args;
 mod resolve;
 mod scan;
 
@@ -147,6 +150,7 @@ fn record(found: Found<'_>, src: &[u8], out: &mut Extract) {
                 name: compact(name, src),
                 visibility,
                 start_line,
+                is_test: attrs::is_test(node, src),
             });
             out.item_scopes.push(scope_of(node, src));
         }
