@@ -4,9 +4,7 @@
 mod common;
 mod fixture;
 
-use std::fs;
-
-use fixture::{assert_matches_expected, graph, run, setup, stored_edges};
+use fixture::{assert_matches_expected, db_digest, graph, run, setup, stored_edges};
 use phantom_fractal_extract::{EXTRACTOR_VERSION, stored_graph};
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/resolve-self");
@@ -28,8 +26,7 @@ fn a_second_pass_writes_nothing_and_reads_the_same_report_back() {
     let mut s = setup(FIXTURE);
     let first = graph(&run(&mut s));
     let edges = stored_edges(&s.store);
-    let db = s.db_dir.path().join("graph.db");
-    let before = fs::read(&db).expect("read db");
+    let before = db_digest(&s);
     let report = run(&mut s);
     assert!(report.written.is_empty(), "{:?}", report.written);
     assert_eq!(report.graph, None);
@@ -39,5 +36,5 @@ fn a_second_pass_writes_nothing_and_reads_the_same_report_back() {
         stored_graph(&s.store, s.repo.path()).expect("stored graph"),
         first
     );
-    assert_eq!(fs::read(&db).expect("read db"), before);
+    assert_eq!(db_digest(&s), before);
 }

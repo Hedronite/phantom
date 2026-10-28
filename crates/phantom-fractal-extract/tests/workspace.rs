@@ -6,7 +6,7 @@ mod fixture;
 
 use std::fs;
 
-use fixture::{assert_matches_expected, graph, run, setup, stored_edges};
+use fixture::{assert_matches_expected, db_digest, graph, run, setup, stored_edges};
 use phantom_fractal_extract::{EXTRACTOR_VERSION, stored_graph};
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/workspace");
@@ -28,8 +28,7 @@ fn a_second_pass_writes_nothing_and_reads_the_same_report_back() {
     let mut s = setup(FIXTURE);
     let first = graph(&run(&mut s));
     let edges = stored_edges(&s.store);
-    let db = s.db_dir.path().join("graph.db");
-    let before = fs::read(&db).expect("read db");
+    let before = db_digest(&s);
     let report = run(&mut s);
     assert!(report.written.is_empty(), "{:?}", report.written);
     assert_eq!(report.graph, None);
@@ -39,7 +38,7 @@ fn a_second_pass_writes_nothing_and_reads_the_same_report_back() {
     let again = stored_graph(&s.store, s.repo.path()).expect("stored graph");
     assert_eq!(again, first);
     assert_eq!(again.edges_by_reason.crate_path, 10);
-    assert_eq!(fs::read(&db).expect("read db"), before);
+    assert_eq!(db_digest(&s), before);
 }
 
 #[test]
@@ -53,11 +52,9 @@ fn a_dependency_line_decides_the_edge() {
         text.replace("core-lib.workspace = true", "core-lib = \"0.1.0\""),
     )
     .expect("edit manifest");
-    // A manifest-only change rebuilds nothing, so touch the caller too.
-    let lib = s.repo.path().join("uses-ws/src/lib.rs");
-    let source = fs::read_to_string(&lib).expect("read lib");
-    fs::write(&lib, format!("{source}\n")).expect("touch lib");
+    // A manifest-only change rebuilds through the workspace fingerprint.
     let report = run(&mut s);
+    assert!(report.written.is_empty(), "{:?}", report.written);
     let graph = graph(&report);
     assert_eq!(graph.edges_by_reason.crate_path, 9);
     assert!(

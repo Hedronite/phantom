@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod deps;
+mod fingerprint;
 pub mod graph;
 mod read;
 mod rebuild;
@@ -20,6 +21,8 @@ use std::path::Path;
 use phantom_fractal_lang::{Edge, Reason, ResolveCounts};
 use phantom_fractal_lang_rust::RustLanguage;
 use phantom_fractal_store::{Store, StoreError};
+
+use fingerprint::{Unread, read_manifests, stamp};
 
 pub use read::{Source, read_source};
 pub use rebuild::stored_graph;
@@ -156,10 +159,16 @@ impl From<StoreError> for IndexError {
 
 /// Walks `root`, stores every kept `.rs` file whose hash is not already
 /// stored for its path, and removes the stored paths the walk no longer
-/// keeps. When anything was written or removed, or the stored extractor
-/// version is not [`EXTRACTOR_VERSION`], it then rebuilds the crate graph,
-/// resolves calls, replaces the edges, and stores the version. A stored
-/// version other than the current one re-extracts every file first.
+/// keeps. When anything was written or removed, the stored extractor
+/// version is not [`EXTRACTOR_VERSION`], or the stored workspace
+/// fingerprint is not this pass's, it then rebuilds the crate graph,
+/// resolves calls, replaces the edges, and stores the version and the
+/// fingerprint. A stored version other than the current one re-extracts
+/// every file first.
+///
+/// The fingerprint covers every walked `Cargo.toml`, and every `.rs` file
+/// the walk or the read skipped or that is not UTF-8. So a manifest edit
+/// alone, or a change in which `.rs` files are skipped, rebuilds.
 pub fn index(
     root: &Path,
     store: &mut Store,
@@ -202,8 +211,27 @@ pub fn index(
             report.removed.push(path);
         }
     }
-    if reextract || !report.written.is_empty() || !report.removed.is_empty() {
-        report.graph = Some(rebuild::rebuild(&walk, &kept, store, language)?);
+    // Every skipped `.rs` file, the walk's skips then the read's, then
+    // every one that is not UTF-8, each in walk order.
+    let unread: Vec<(&str, Unread)> = report
+        .skipped
+        .iter()
+        .filter(|skip| is_rust(&skip.path))
+        .map(|skip| (skip.path.as_str(), Unread::Skipped))
+        .chain(
+            report
+                .not_utf8
+                .iter()
+                .map(|path| (path.as_str(), Unread::NotUtf8)),
+        )
+        .collect();
+    let manifests = read_manifests(&walk)?;
+    let stamp = stamp(&manifests, &unread);
+    let stale = store.workspace_fingerprint()? != Some(stamp.fingerprint);
+    if reextract || !report.written.is_empty() || !report.removed.is_empty() || stale {
+        report.graph = Some(rebuild::rebuild(
+            &manifests, &stamp, &kept, store, language,
+        )?);
     }
     Ok(report)
 }

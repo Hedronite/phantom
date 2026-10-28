@@ -6,7 +6,9 @@ mod fixture;
 
 use std::fs;
 
-use fixture::{Setup, assert_matches_expected, expected, graph, row_counts, run, stored_edges};
+use fixture::{
+    Setup, assert_matches_expected, db_digest, expected, graph, row_counts, run, stored_edges,
+};
 use phantom_fractal_extract::{EXTRACTOR_VERSION, stored_graph};
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/resolve");
@@ -33,8 +35,7 @@ fn a_second_pass_over_an_unchanged_tree_writes_nothing() {
     let first = graph(&run(&mut s));
     let edges = stored_edges(&s.store);
     let rows = row_counts(&s.store);
-    let db = s.db_dir.path().join("graph.db");
-    let before = fs::read(&db).expect("read db");
+    let before = db_digest(&s);
     let report = run(&mut s);
     assert!(report.written.is_empty(), "{:?}", report.written);
     assert!(report.removed.is_empty(), "{:?}", report.removed);
@@ -42,10 +43,10 @@ fn a_second_pass_over_an_unchanged_tree_writes_nothing() {
     assert_eq!(report.unchanged.len(), 11);
     assert_eq!(row_counts(&s.store), rows);
     assert_eq!(stored_edges(&s.store), edges);
-    assert_eq!(fs::read(&db).expect("read db"), before);
+    assert_eq!(db_digest(&s), before);
     let again = stored_graph(&s.store, s.repo.path()).expect("stored graph");
     assert_eq!(again, first);
-    assert_eq!(fs::read(&db).expect("read db"), before);
+    assert_eq!(db_digest(&s), before);
 }
 
 #[test]
