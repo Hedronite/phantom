@@ -2,6 +2,9 @@
 # Kept: fmt, clippy -D warnings, deny, nextest. Coverage, CRAP, mutants,
 # and laws stay off until the crates they measure exist.
 #
+# Floor (rust-tops G2): msrv checks the workspace on the repo toolchain, and
+# floor-arch and floor-macos run the five floor commands on Arch and macOS.
+#
 # Toolchain: rust-toolchain.toml is the pin. Each job reads its channel and
 # hands it to dtolnay/rust-toolchain, pinned by commit. No job installs
 # `stable`. -D warnings belongs on the clippy command, not job-level RUSTFLAGS.
@@ -70,3 +73,74 @@ jobs:
         env:
           BANNED_NAMES: ${{ secrets.BANNED_NAMES }}
           BANNED_NAMES_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+
+  # MSRV is the repo toolchain: rust-toolchain.toml, read as the jobs above
+  # read it. No second toolchain is declared.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # 2026-10-16
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo check --workspace --all-features --locked
+
+  # Floor on Arch. Actions has no Arch label, so this runs the archlinux
+  # container on an Ubuntu runner: an Arch userland on the runner's kernel.
+  # cargo-deny and cargo-nextest are built from source at the versions the
+  # Ubuntu jobs install.
+  floor-arch:
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: bootstrap
+        run: pacman -Syu --noconfirm --needed git curl base-devel ca-certificates
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # 2026-10-16
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: clippy, rustfmt
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - name: cargo deny
+        run: |
+          cargo install cargo-deny --version 0.20.2 --locked
+          cargo deny check
+      - name: cargo nextest
+        run: |
+          cargo install cargo-nextest --version 0.9.149 --locked
+          cargo nextest run --workspace --all-features --locked --profile ci
+      - name: msrv
+        run: cargo check --workspace --all-features --locked
+
+  # Floor on macOS: the same five commands.
+  floor-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - id: toolchain
+        run: echo "channel=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # 2026-10-16
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: clippy -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - uses: taiki-e/install-action@704dd1f1a46347196de316ebf7f5d05ed6b8279f # cargo-deny
+      - name: cargo deny
+        run: cargo deny check
+      - uses: taiki-e/install-action@42b98ff034a377bb5e4aa99118b5b160f96a8ef2 # nextest
+      - name: cargo nextest
+        run: cargo nextest run --workspace --all-features --locked --profile ci
+      - name: msrv
+        run: cargo check --workspace --all-features --locked
