@@ -50,6 +50,41 @@ pub struct CallHit {
     pub reason: String,
 }
 
+/// 64 lowercase hex characters for one fingerprint's bytes.
+fn hex_lower(bytes: &[u8; 32]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        _ => None,
+    }
+}
+
+/// Decodes 64 lowercase hex characters into 32 bytes, or nothing when
+/// the text is any other shape — uppercase, short, or not hex.
+fn parse_fingerprint(text: &str) -> Option<[u8; 32]> {
+    let data = text.as_bytes();
+    if data.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for index in 0..32 {
+        let high = hex_value(data[index * 2])?;
+        let low = hex_value(data[index * 2 + 1])?;
+        out[index] = (high << 4) | low;
+    }
+    Some(out)
+}
+
 pub(crate) fn reason_from_text(reason: &str) -> Result<Reason, StoreError> {
     match reason {
         "path-exact" => Ok(Reason::PathExact),
@@ -335,6 +370,46 @@ impl crate::Store {
                     reason_to_text(edge.reason),
                     edge.ref_id,
                 ),
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The stored workspace fingerprint, or nothing when it was never
+    /// stored or is not 64 lowercase hex characters. A malformed stored
+    /// text reads as `None` so a rebuild follows, never an error.
+    pub fn workspace_fingerprint(&self) -> Result<Option<[u8; 32]>, StoreError> {
+        Ok(
+            crate::schema::meta_get(&self.conn, "workspace_fingerprint")?
+                .and_then(|value| parse_fingerprint(&value)),
+        )
+    }
+
+    /// The stored `.rs` skip count, or nothing when it was never stored
+    /// or is not decimal text.
+    pub fn rs_skipped(&self) -> Result<Option<u64>, StoreError> {
+        Ok(crate::schema::meta_get(&self.conn, "rs_skipped")?.and_then(|value| value.parse().ok()))
+    }
+
+    /// Writes both meta keys in one transaction — the fingerprint as 64
+    /// lowercase hex characters, the skip count as decimal text.
+    pub fn set_workspace_fingerprint(
+        &mut self,
+        fingerprint: &[u8; 32],
+        rs_skipped: u64,
+    ) -> Result<(), StoreError> {
+        let hex = hex_lower(fingerprint);
+        let skipped = rs_skipped.to_string();
+        let tx = self.conn.transaction()?;
+        for (key, value) in [
+            ("workspace_fingerprint", hex.as_str()),
+            ("rs_skipped", skipped.as_str()),
+        ] {
+            tx.execute(
+                "INSERT INTO meta(key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
             )?;
         }
         tx.commit()?;

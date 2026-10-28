@@ -11,6 +11,58 @@ fn language() -> RustLanguage {
     RustLanguage::new().expect("grammar")
 }
 
+#[test]
+fn fingerprint_stamps_round_trip_and_read_malformed_as_none() {
+    let db = TempDb::new("fingerprint");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    // Nothing stored yet: both read as None.
+    assert_eq!(store.workspace_fingerprint().expect("unset"), None);
+    assert_eq!(store.rs_skipped().expect("unset"), None);
+    // Round trip.
+    let fingerprint: [u8; 32] = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+        0xff, 0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+        0x32, 0x10,
+    ];
+    store
+        .set_workspace_fingerprint(&fingerprint, 7)
+        .expect("write");
+    assert_eq!(
+        store.workspace_fingerprint().expect("set"),
+        Some(fingerprint)
+    );
+    assert_eq!(store.rs_skipped().expect("set"), Some(7));
+    // A second write replaces both keys.
+    store
+        .set_workspace_fingerprint(&[0u8; 32], 0)
+        .expect("rewrite");
+    assert_eq!(
+        store.workspace_fingerprint().expect("rewritten"),
+        Some([0u8; 32])
+    );
+    assert_eq!(store.rs_skipped().expect("rewritten"), Some(0));
+    // Malformed stored text reads as None, not an error, so a rebuild
+    // follows and nothing is refused.
+    {
+        let conn = rusqlite::Connection::open(db.path()).expect("sqlite");
+        for (key, text) in [("workspace_fingerprint", "zz"), ("rs_skipped", "12abc")] {
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, text),
+            )
+            .expect("malformed insert");
+        }
+    }
+    assert_eq!(store.workspace_fingerprint().expect("malformed hex"), None);
+    assert_eq!(store.rs_skipped().expect("malformed count"), None);
+    // SCHEMA_VERSION stays 3: no migration.
+    assert_eq!(store.schema_version().expect("schema"), 3);
+    assert_eq!(store.user_version().expect("user_version"), 3);
+    drop(store);
+}
+
 /// One package, one lib target rooted at `file`, and one file-level
 /// module row, for tests that need a graph without the resolver.
 fn lib_graph(
