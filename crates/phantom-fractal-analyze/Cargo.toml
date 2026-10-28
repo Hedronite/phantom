@@ -1,0 +1,16 @@
+[package]
+name = "phantom-fractal-analyze"
+description = "Impact analysis over a Phantom call graph."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+phantom-fractal-store = { path = "../phantom-fractal-store", version = "0.0.0" }
+
+[dev-dependencies]
+phantom-fractal-extract = { path = "../phantom-fractal-extract", version = "0.0.0" }
+phantom-fractal-lang-rust = { path = "../phantom-fractal-lang-rust", version = "0.0.0" }
