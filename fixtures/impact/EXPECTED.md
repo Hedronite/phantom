@@ -1,13 +1,31 @@
 ---
-title: fixtures/impact — expected impact
-type: fixture-expected
-spec: SPEC-w5 G2d
+title: Expected impact — impact fixture
+type: fixture
+status: ground-truth
+created: "2026-10-28"
+updated: "2026-10-28"
+owner: fullstack
+spec: "[[foundry/phantom/specs/SPEC-w5]]"
+cross_refs:
+  - "[[foundry/phantom/checklists/CHECKLIST-w5]]"
+  - "[[foundry/phantom/rubrics/RUBRIC-w5]]"
+  - "[[foundry/phantom/w5]]"
 options: "max_depth 3, min_confidence 0.2, include_tests true"
+tags:
+  - phantom
+  - fixture
+  - w5
 ---
 
-# fixtures/impact — expected impact
+# Expected impact — `fixtures/impact`
 
-A two-package workspace for `impact`. `engine` is a lib and `app` is a bin that depends on it by `path`. Every target below is checked at the default options: `max_depth` 3, `min_confidence` 0.2, `include_tests` true.
+Ground truth for [[foundry/phantom/specs/SPEC-w5]] G2d. The test
+`crates/phantom-fractal-analyze/tests/fixture.rs` indexes this workspace
+and runs `impact` on every target below at the default options:
+`max_depth` 3, `min_confidence` 0.2, `include_tests` true. It asserts
+that each target's lines match exactly.
+
+A two-package workspace for `impact`. `engine` is a lib and `app` is a bin that depends on it by `path`.
 
 ## Line format
 
