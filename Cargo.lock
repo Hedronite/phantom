@@ -384,6 +384,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "phantom-fractal-analyze"
+version = "0.0.0"
+dependencies = [
+ "phantom-fractal-extract",
+ "phantom-fractal-lang-rust",
+ "phantom-fractal-store",
+]
+
+[[package]]
 name = "phantom-fractal-extract"
 version = "0.0.0"
 dependencies = [
