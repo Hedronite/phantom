@@ -62,15 +62,11 @@ mod checked_flags {
     const _: () = {
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         assert!(
-            O_DIRECTORY == 0o200000 as i32
-                && O_NOFOLLOW == 0o400000 as i32
-                && O_DIRECTORY != O_NOFOLLOW
+            O_DIRECTORY == 0o200000_i32 && O_NOFOLLOW == 0o400000_i32 && O_DIRECTORY != O_NOFOLLOW
         );
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
         assert!(
-            O_DIRECTORY == 0o40000 as i32
-                && O_NOFOLLOW == 0o100000 as i32
-                && O_DIRECTORY != O_NOFOLLOW
+            O_DIRECTORY == 0o40000_i32 && O_NOFOLLOW == 0o100000_i32 && O_DIRECTORY != O_NOFOLLOW
         );
         #[cfg(target_os = "macos")]
         assert!(O_DIRECTORY == 0x00100000 && O_NOFOLLOW == 0x00000100 && O_DIRECTORY != O_NOFOLLOW);
