@@ -619,7 +619,6 @@ fn symbol_id(input: &phantom_fractal_lang::ResolveInput, name: &str) -> i64 {
 }
 
 /// Replaces the three graph tables with one fake package, one lib target
-
 /// over the given file, and one file-level module row — enough for the
 /// rows API's tests to run against a graph without the resolver.
 fn write_lib_graph(store: &mut Store, file: &str) {
