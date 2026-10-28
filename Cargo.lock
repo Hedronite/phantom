@@ -374,6 +374,7 @@ name = "phantom-fractal"
 version = "0.0.0"
 dependencies = [
  "clap",
+ "phantom-fractal-analyze",
  "phantom-fractal-extract",
  "phantom-fractal-lang",
  "phantom-fractal-lang-rust",

@@ -3,18 +3,23 @@
 //! `index PATH` stores the Rust files under PATH in a database in the data
 //! directory and resolves their calls. `find NAME` looks symbols up in that
 //! database and returns at most 100. `callers SYMBOL` and `callees SYMBOL`
-//! return the stored call edges of one symbol, at most 100. Each prints the
+//! return the stored call edges of one symbol, at most 100. `impact SYMBOL`
+//! walks those edges backwards to say what a change to the symbol reaches.
+//! `version` says what this binary is and needs no index. Each prints the
 //! JSON envelope from `phantom-fractal-proto`. There are no other commands.
 
 #![forbid(unsafe_code)]
 
 mod calls;
+mod impact;
+mod version;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use phantom_fractal_analyze::ImpactOptions;
 use phantom_fractal_extract::{GraphReport, IndexError, IndexReport, ReasonCounts};
 use phantom_fractal_lang::{Item, Visibility};
 use phantom_fractal_lang_rust::RustLanguage;
@@ -23,6 +28,7 @@ use phantom_fractal_store::{Store, StoreError, index_database_path};
 use serde::Serialize;
 
 use crate::calls::{Candidates, Direction};
+use crate::impact::Request;
 
 /// Canon exit 1: usage or internal error.
 const EXIT_ERROR: u8 = 1;
@@ -41,6 +47,10 @@ const FIND_CAP: usize = 100;
     disable_help_subcommand = true
 )]
 struct Cli {
+    /// Output is always the JSON envelope. Accepted anywhere, so a caller
+    /// that asks for JSON is not refused; it changes nothing.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -71,6 +81,29 @@ enum Command {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
     },
+    /// Walk the calls into one symbol backwards: what a change to it reaches.
+    Impact {
+        symbol: String,
+        /// Tree that was indexed. Defaults to the current directory.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Deepest level reported, 1 to 5.
+        #[arg(long, default_value_t = ImpactOptions::default().max_depth,
+              value_parser = clap::value_parser!(u8).range(1..=i64::from(ImpactOptions::MAX_DEPTH)))]
+        depth: u8,
+        /// Lowest path confidence reported, above 0 and at most 1.
+        #[arg(long, default_value_t = ImpactOptions::default().min_confidence,
+              value_parser = min_confidence)]
+        min_confidence: f64,
+        /// Leave tests out of the answer.
+        #[arg(long)]
+        no_tests: bool,
+        /// Counts, reasons, and risk only, without the hits.
+        #[arg(long)]
+        summary: bool,
+    },
+    /// Print the name, version, and commit of this binary. Needs no index.
+    Version,
 }
 
 /// `data` of a successful `index`. It holds counts only, never a path.
@@ -237,6 +270,41 @@ fn main() -> ExitCode {
         Command::Find { query, repo } => emit(find(&query, &repo)),
         Command::Callers { symbol, repo } => emit(calls::calls(Direction::Callers, &symbol, &repo)),
         Command::Callees { symbol, repo } => emit(calls::calls(Direction::Callees, &symbol, &repo)),
+        Command::Impact {
+            symbol,
+            repo,
+            depth,
+            min_confidence,
+            no_tests,
+            summary,
+        } => {
+            let request = Request {
+                options: ImpactOptions {
+                    max_depth: depth,
+                    min_confidence,
+                    include_tests: !no_tests,
+                },
+                summary,
+            };
+            emit(impact::impact(&symbol, &repo, &request))
+        }
+        Command::Version => emit(Ok::<_, Failure>(version::version())),
+    }
+}
+
+/// `--min-confidence`: a number above 0 and at most 1. NaN is refused.
+fn min_confidence(text: &str) -> Result<f64, String> {
+    let value: f64 = text
+        .parse()
+        .map_err(|_| format!("{text} is not a number"))?;
+    let options = ImpactOptions {
+        min_confidence: value,
+        ..ImpactOptions::default()
+    };
+    if options.in_range() {
+        Ok(value)
+    } else {
+        Err(format!("{text} is not above 0 and at most 1"))
     }
 }
 

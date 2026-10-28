@@ -1,5 +1,6 @@
 //! Both binaries print one version line, list `index`, `find`, `callers`,
-//! and `callees` in help, and refuse every other command.
+//! `callees`, `impact`, and `version` in help, and refuse every other
+//! command.
 
 use std::process::{Command, Output};
 
@@ -36,7 +37,7 @@ fn version_prints_the_version_line() {
 
 /// `--help` and `-h` exit 0. A bare run is usage, so it exits 1, not clap's 2.
 #[test]
-fn help_lists_the_four_commands() {
+fn help_lists_the_six_commands() {
     let cases: [(&[&str], i32); 3] = [(&["--help"], 0), (&["-h"], 0), (&[], 1)];
     for bin in BINS {
         for (args, code) in cases {
@@ -47,7 +48,7 @@ fn help_lists_the_four_commands() {
                 String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr)
             );
-            for command in ["index", "find", "callers", "callees"] {
+            for command in ["index", "find", "callers", "callees", "impact", "version"] {
                 assert!(text.contains(command), "{bin} {args:?}\n{text}");
             }
             assert!(text.contains("Usage"), "{bin} {args:?}\n{text}");
