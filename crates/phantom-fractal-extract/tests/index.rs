@@ -64,6 +64,7 @@ fn id_codec_is_not_a_key_and_its_symbol_is_stored() {
         name: "decode_id".to_owned(),
         visibility: Visibility::Public,
         start_line: 3,
+        is_test: false,
     };
     let items = s.store.read_items("src/id_codec.rs").expect("read");
     assert!(items.contains(&decode_id), "{items:?}");
@@ -80,6 +81,7 @@ fn stored_items_use_repo_relative_paths() {
         name: "open_ledger".to_owned(),
         visibility: Visibility::Public,
         start_line: 7,
+        is_test: false,
     };
     assert!(items.contains(&open_ledger), "{items:?}");
     let absolute = s.repo.root().join("src/ledger.rs");

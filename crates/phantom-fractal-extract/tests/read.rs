@@ -158,6 +158,7 @@ fn index_stores_the_cap_file_and_no_prefix_of_a_longer_one() {
         name: "edge_symbol".to_owned(),
         visibility: Visibility::Public,
         start_line: 1,
+        is_test: false,
     };
     let items = store.read_items("edge.rs").expect("read");
     assert!(items.contains(&edge_symbol), "{items:?}");

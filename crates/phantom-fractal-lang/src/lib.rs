@@ -46,7 +46,8 @@ pub struct Extract {
     pub item_scopes: Vec<String>,
     /// The scope of each import, parallel to `imports`.
     pub import_scopes: Vec<String>,
-    /// Calls, method calls, and macro invocations, by line then column.
+    /// Calls, method calls, macro invocations, and the call-shaped names
+    /// inside macro token trees, by line then column.
     pub refs: Vec<Reference>,
     /// Every `fn` inside an `impl` block at module scope.
     pub methods: Vec<Method>,
@@ -56,14 +57,15 @@ pub struct Extract {
 
 /// One call site, as written. Nothing is resolved.
 ///
-/// Calls inside a macro's token tree are not visible: macros are never
-/// expanded.
+/// Macros are never expanded. A call-shaped name inside a macro's token
+/// tree is recorded as a [`RefKind::MacroArg`], which no resolver places.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reference {
     pub kind: RefKind,
     /// The callee with whitespace removed and generic arguments kept:
     /// `a::f`, `Vec::<u8>::new`, `collect::<Vec<_>>` for a method, or the
-    /// macro path without `!`.
+    /// macro path without `!`. For a [`RefKind::MacroArg`], the path or
+    /// method name before the parentheses.
     pub text: String,
     /// The last path segment of the callee, without generic arguments.
     pub last_segment: String,
@@ -97,6 +99,13 @@ pub enum RefKind {
     MethodCall,
     /// A macro invocation, recorded by name only.
     Macro,
+    /// A call-shaped name inside a macro invocation's token tree, nested
+    /// token trees included: an identifier or `::` path directly followed
+    /// by a parenthesised token tree, as in `f(..)` or `a::f(..)`, or `.`
+    /// and an identifier so followed, as in `.m(..)`. Nothing is expanded,
+    /// and a `macro_rules!` body is not scanned. It is never resolved and
+    /// never counted.
+    MacroArg,
 }
 
 /// The function a [`Reference`] sits in.
@@ -128,6 +137,8 @@ pub struct Method {
     pub scope: String,
     /// 1-based line of the `fn`'s first token, after any attributes.
     pub start_line: u32,
+    /// See [`Item::is_test`].
+    pub is_test: bool,
 }
 
 /// A `mod` declaration.
@@ -142,6 +153,8 @@ pub struct ModDecl {
     pub path: Option<String>,
     /// 1-based line of the `mod` keyword or its visibility.
     pub line: u32,
+    /// True when the declaration carries `#[cfg(test)]` exactly.
+    pub cfg_test: bool,
 }
 
 /// A declared item.
@@ -152,6 +165,12 @@ pub struct Item {
     pub visibility: Visibility,
     /// 1-based line of the item's first token, after any attributes.
     pub start_line: u32,
+    /// True when the item has `#[test]` or another attribute whose path
+    /// ends in `test`, such as `#[tokio::test]`; or has `#[cfg(test)]`
+    /// exactly, whitespace removed; or sits inside an inline `mod` that
+    /// has `#[cfg(test)]`. `#[cfg(all(test, ..))]` and other forms do not
+    /// count.
+    pub is_test: bool,
 }
 
 /// The kinds of item this slice extracts.

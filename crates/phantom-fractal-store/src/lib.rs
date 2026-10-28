@@ -16,8 +16,11 @@
 
 mod dirs;
 mod graph;
+mod impact;
 mod rows;
 mod schema;
+
+pub use crate::impact::SymbolFacts;
 
 use std::path::Path;
 
@@ -250,7 +253,8 @@ impl Store {
     /// are symbols of kind `method`, not items.
     pub fn read_items(&self, path: &str) -> Result<Vec<Item>, StoreError> {
         let mut statement = self.conn.prepare(
-            "SELECT symbols.kind, symbols.name, symbols.visibility, symbols.start_line
+            "SELECT symbols.kind, symbols.name, symbols.visibility, symbols.start_line,
+                    symbols.is_test
              FROM symbols
              JOIN files ON files.id = symbols.file_id
              WHERE files.path = ?1 AND symbols.kind <> 'method'
@@ -262,6 +266,7 @@ impl Store {
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
             ))
         })?;
         rows.map(|row| row.map_err(StoreError::from).and_then(rows::item_from_row))

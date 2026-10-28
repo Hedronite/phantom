@@ -19,6 +19,7 @@ fn item(kind: ItemKind, name: &str, visibility: Visibility, start_line: u32) -> 
         name: name.to_owned(),
         visibility,
         start_line,
+        is_test: false,
     }
 }
 

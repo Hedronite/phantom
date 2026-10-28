@@ -24,6 +24,7 @@ fn decl(name: &str, scope: &str, inline: bool, path: Option<&str>) -> ModDecl {
         inline,
         path: path.map(str::to_owned),
         line: 1,
+        cfg_test: false,
     }
 }
 

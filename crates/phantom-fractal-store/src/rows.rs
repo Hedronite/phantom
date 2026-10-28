@@ -120,8 +120,8 @@ pub(crate) fn insert_symbols(
     };
     let mut item_statement = conn.prepare(
         "INSERT INTO symbols(
-            file_id, kind, name, qual_name, stable_key, visibility, start_line, scope
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            file_id, kind, name, qual_name, stable_key, visibility, start_line, scope, is_test
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
     )?;
     for (position, item) in extract.items.iter().enumerate() {
         let ordinal = extract.items[..position]
@@ -143,6 +143,7 @@ pub(crate) fn insert_symbols(
             visibility_to_text(&item.visibility),
             i64::from(item.start_line),
             scope.clone(),
+            i64::from(item.is_test),
         ))?;
         index.entries.push((
             None,
@@ -154,8 +155,8 @@ pub(crate) fn insert_symbols(
     let mut method_statement = conn.prepare(
         "INSERT INTO symbols(
             file_id, kind, name, qual_name, stable_key, visibility, start_line, scope,
-            owner, owner_path, trait_name, module_id
-         ) VALUES (?1, 'method', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)",
+            owner, owner_path, trait_name, is_test, module_id
+         ) VALUES (?1, 'method', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL)",
     )?;
     for (position, method) in extract.methods.iter().enumerate() {
         let ordinal = extract.methods[..position]
@@ -175,6 +176,7 @@ pub(crate) fn insert_symbols(
             &method.owner,
             &method.owner_path,
             &method.trait_name,
+            i64::from(method.is_test),
         ))?;
         index.entries.push((
             Some(method.owner.clone()),
@@ -275,6 +277,7 @@ pub(crate) fn ref_kind_text(kind: RefKind) -> &'static str {
         RefKind::Call => "call",
         RefKind::MethodCall => "method_call",
         RefKind::Macro => "macro",
+        RefKind::MacroArg => "macro_arg",
     }
 }
 
@@ -284,6 +287,7 @@ pub(crate) fn ref_kind_from_text(kind: &str) -> Result<RefKind, StoreError> {
         "call" => Ok(RefKind::Call),
         "method_call" => Ok(RefKind::MethodCall),
         "macro" => Ok(RefKind::Macro),
+        "macro_arg" => Ok(RefKind::MacroArg),
         other => Err(StoreError::UnknownKind(other.to_owned())),
     }
 }
@@ -313,9 +317,9 @@ pub(crate) fn visibility_from_text(text: &str) -> Result<Visibility, StoreError>
 
 /// Stored item from a read of four columns.
 pub(crate) fn item_from_row(
-    row: (String, String, String, Option<i64>),
+    row: (String, String, String, Option<i64>, Option<i64>),
 ) -> Result<Item, StoreError> {
-    let (kind, name, visibility, start_line) = row;
+    let (kind, name, visibility, start_line, is_test) = row;
     let start_line = start_line.ok_or(StoreError::UnreadableStamp)?;
     let start_line = u32::try_from(start_line).map_err(|_| StoreError::UnreadableStamp)?;
     Ok(Item {
@@ -323,6 +327,7 @@ pub(crate) fn item_from_row(
         name,
         visibility: visibility_from_text(&visibility)?,
         start_line,
+        is_test: is_test.unwrap_or(0) != 0,
     })
 }
 
