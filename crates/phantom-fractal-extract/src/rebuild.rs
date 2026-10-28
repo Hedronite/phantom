@@ -9,35 +9,36 @@ use phantom_fractal_lang_rust::{RustLanguage, resolve};
 use phantom_fractal_store::{Store, StoreError};
 
 use crate::deps;
+use crate::fingerprint::{Contents, ManifestRead, Stamp, read_manifests};
 use crate::graph::{self, Manifest, SourceFile};
-use crate::read::{Source, read_source};
-use crate::walk::{Candidate, Walk, walk};
+use crate::walk::{Candidate, walk};
 use crate::{EXTRACTOR_VERSION, GraphReport, IndexError, ReasonCounts};
 
 /// Builds packages, targets, and modules from the kept files, writes them,
 /// resolves the stored call references, replaces the edges, and stores the
-/// extractor version.
+/// extractor version, then the workspace fingerprint and `.rs` skip count.
 ///
 /// Module declarations are not stored, so each kept `.rs` file is read and
 /// extracted again here. A file that no longer reads as UTF-8 source
 /// counts as having no declarations.
 pub(crate) fn rebuild(
-    walk: &Walk,
+    manifests: &[ManifestRead],
+    stamp: &Stamp,
     kept: &[&Candidate],
     store: &mut Store,
     language: &RustLanguage,
 ) -> Result<GraphReport, IndexError> {
-    let manifests = manifests(walk)?;
+    let manifests = kept_manifests(manifests);
     let mut files = Vec::with_capacity(kept.len());
     for file in kept {
-        let mod_decls = match read_text(file)? {
-            Some(text) => {
+        let mod_decls = match Contents::read(file)? {
+            Contents::Text(text) => {
                 language
                     .extract(&text)
                     .map_err(StoreError::Extract)?
                     .mod_decls
             }
-            None => Vec::new(),
+            Contents::Unread(_) => Vec::new(),
         };
         files.push(SourceFile {
             path: file.path.clone(),
@@ -50,6 +51,7 @@ pub(crate) fn rebuild(
     let (edges, counts) = resolve(&input);
     store.replace_edges(&edges)?;
     store.set_extractor_version(EXTRACTOR_VERSION)?;
+    store.set_workspace_fingerprint(&stamp.fingerprint, stamp.rs_skipped)?;
     Ok(GraphReport {
         modules: graph.modules.len(),
         orphans: graph.orphans.len(),
@@ -64,7 +66,8 @@ pub(crate) fn rebuild(
 /// its counts are the ones the last rebuild found. An orphan is a stored
 /// file no module reaches.
 pub fn stored_graph(store: &Store, root: &Path) -> Result<GraphReport, IndexError> {
-    let input = resolve_input(store, &manifests(&walk(root)?)?)?;
+    let manifests = kept_manifests(&read_manifests(&walk(root)?)?);
+    let input = resolve_input(store, &manifests)?;
     let (edges, counts) = resolve(&input);
     let reached: HashSet<&str> = input
         .modules
@@ -93,28 +96,16 @@ fn resolve_input(store: &Store, manifests: &[Manifest]) -> Result<ResolveInput, 
     Ok(input)
 }
 
-/// Every walked `Cargo.toml` and its text, through the bounded read, in
-/// walk order. A skipped or non-UTF-8 manifest is left out.
-fn manifests(walk: &Walk) -> Result<Vec<Manifest>, IndexError> {
-    walk.files
+/// The manifests the bounded read kept as UTF-8 text, in walk order.
+fn kept_manifests(manifests: &[ManifestRead]) -> Vec<Manifest> {
+    manifests
         .iter()
-        .filter(|file| file.path == "Cargo.toml" || file.path.ends_with("/Cargo.toml"))
-        .filter_map(|file| {
-            read_text(file).transpose().map(|text| {
-                text.map(|text| Manifest {
-                    path: file.path.clone(),
-                    text,
-                })
-            })
+        .filter_map(|manifest| match &manifest.contents {
+            Contents::Text(text) => Some(Manifest {
+                path: manifest.path.clone(),
+                text: text.clone(),
+            }),
+            Contents::Unread(_) => None,
         })
         .collect()
-}
-
-/// The file's text through the bounded read, or none if it is skipped or
-/// not UTF-8.
-fn read_text(file: &Candidate) -> Result<Option<String>, IndexError> {
-    Ok(match read_source(&file.abs_path)? {
-        Source::Bytes { bytes, .. } => String::from_utf8(bytes).ok(),
-        Source::Skipped(_) => None,
-    })
 }

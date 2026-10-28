@@ -4,6 +4,8 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::fs;
+use std::io::ErrorKind;
 use std::path::Path;
 
 use phantom_fractal_extract::{GraphReport, IndexReport, ReasonCounts, index};
@@ -37,6 +39,23 @@ pub fn setup(fixture: &str) -> Setup {
         store,
         rust,
     }
+}
+
+/// The blake3 of the database file and of its write-ahead log, which holds
+/// every page written since the last checkpoint while the store is open.
+/// Equal digests mean the pass wrote nothing.
+pub fn db_digest(s: &Setup) -> blake3::Hash {
+    let mut hasher = blake3::Hasher::new();
+    for name in ["graph.db", "graph.db-wal"] {
+        let bytes = match fs::read(s.db_dir.path().join(name)) {
+            Ok(bytes) => bytes,
+            Err(err) if err.kind() == ErrorKind::NotFound => Vec::new(),
+            Err(err) => panic!("read {name}: {err}"),
+        };
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(&bytes);
+    }
+    hasher.finalize()
 }
 
 pub fn run(s: &mut Setup) -> IndexReport {
