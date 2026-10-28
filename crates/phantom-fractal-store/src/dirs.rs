@@ -46,8 +46,8 @@ mod checked_flags {
     /// `O_NOFOLLOW` for Linux x86_64 (`bits/fcntl-linux.h`: `0o400000`).
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     pub(crate) const O_NOFOLLOW: i32 = 0o400000;
-    /// `O_DIRECTORY` for Linux aarch64 (arm64
-    /// `<asm-generic/fcntl.h>`: `0o40000`).
+    /// `O_DIRECTORY` for Linux aarch64
+    /// (`arch/arm64/include/uapi/asm/fcntl.h`: `0o40000`).
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     pub(crate) const O_DIRECTORY: i32 = 0o40000;
     /// `O_NOFOLLOW` for Linux aarch64 (`0o100000`).
