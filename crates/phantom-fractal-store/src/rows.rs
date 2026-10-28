@@ -275,6 +275,7 @@ pub(crate) fn ref_kind_text(kind: RefKind) -> &'static str {
         RefKind::Call => "call",
         RefKind::MethodCall => "method_call",
         RefKind::Macro => "macro",
+        RefKind::MacroArg => "macro_arg",
     }
 }
 
@@ -284,6 +285,7 @@ pub(crate) fn ref_kind_from_text(kind: &str) -> Result<RefKind, StoreError> {
         "call" => Ok(RefKind::Call),
         "method_call" => Ok(RefKind::MethodCall),
         "macro" => Ok(RefKind::Macro),
+        "macro_arg" => Ok(RefKind::MacroArg),
         other => Err(StoreError::UnknownKind(other.to_owned())),
     }
 }
@@ -323,6 +325,9 @@ pub(crate) fn item_from_row(
         name,
         visibility: visibility_from_text(&visibility)?,
         start_line,
+        // Contract shim (SPEC-w5 G1a): the store writes and reads
+        // `is_test` in G1b.
+        is_test: false,
     })
 }
 

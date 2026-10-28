@@ -145,7 +145,7 @@ fn write_crate_graph_replaces_tables_and_links_ids() {
         root: "src/items.rs".to_owned(),
     }];
     store
-        .write_crate_graph(&packages, &targets, &modules)
+        .write_crate_graph(&packages, &targets, &modules, &[])
         .expect("second graph");
     assert_eq!(store.row_count("packages").expect("packages"), 2);
     assert_eq!(store.row_count("targets").expect("targets"), 1);
@@ -348,6 +348,7 @@ fn symbols_matching_takes_bare_and_qualified_names() {
                 root: "src/lib.rs".to_owned(),
             }],
             &modules,
+            &[],
         )
         .expect("graph");
 
@@ -587,7 +588,7 @@ fn write_graph(store: &mut Store, file: &str, module_input_id: i64) {
     let (package, targets, mut modules) = lib_graph(file);
     modules[0].id = module_input_id;
     store
-        .write_crate_graph(std::slice::from_ref(&package), &targets, &modules)
+        .write_crate_graph(std::slice::from_ref(&package), &targets, &modules, &[])
         .expect("graph");
 }
 

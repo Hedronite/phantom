@@ -463,6 +463,7 @@ fn write_lib_graph(store: &mut Store, file: &str) {
                 file: file.to_owned(),
                 scope: String::new(),
             }],
+            &[],
         )
         .expect("graph");
 }

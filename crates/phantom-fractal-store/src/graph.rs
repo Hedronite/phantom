@@ -7,7 +7,8 @@
 use std::collections::HashMap;
 
 use phantom_fractal_lang::{
-    CallRef, Edge, Module, Reason, ResolveInput, Symbol, SymbolKind, Target, TargetKind, UseBinding,
+    CallRef, Edge, Id, Module, Reason, ResolveInput, Symbol, SymbolKind, Target, TargetKind,
+    UseBinding,
 };
 
 use crate::StoreError;
@@ -142,11 +143,15 @@ impl crate::Store {
     /// given rows in one transaction, then points `files.module_id` and
     /// `symbols.module_id` at the new module rows — by file for files and
     /// by file plus inline scope for symbols. An orphan keeps `NULL`.
+    ///
+    /// `test_modules` is the contract shim of SPEC-w5 G1a: G1b marks the
+    /// symbols of those modules as tests.
     pub fn write_crate_graph(
         &mut self,
         packages: &[Package],
         targets: &[Target],
         modules: &[Module],
+        _test_modules: &[Id],
     ) -> Result<(), StoreError> {
         let tx = self.conn.transaction()?;
         // Module ids are referenced from files and symbols with foreign
