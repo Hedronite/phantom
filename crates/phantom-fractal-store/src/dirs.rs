@@ -23,9 +23,10 @@ pub(crate) const DIR_MODE: u32 = 0o700;
 /// header value. Linux x86_64 takes `O_DIRECTORY` `0o200000` and
 /// `O_NOFOLLOW` `0o400000` from `bits/fcntl-linux.h` (exposed by
 /// `<fcntl.h>`). Linux aarch64 takes `O_DIRECTORY` `0o40000` and
-/// `O_NOFOLLOW` `0o100000` from the arm64 wiring of
-/// `<asm-generic/fcntl.h>` — the same numbers the vendored libc crate
-/// carries in its gnu b64 aarch64 module. macOS takes
+/// `O_NOFOLLOW` `0o100000` from
+/// `arch/arm64/include/uapi/asm/fcntl.h` (the arm64 override of
+/// the asm-generic defaults) — the same numbers the vendored libc
+/// crate carries in its gnu b64 aarch64 module. macOS takes
 /// `O_DIRECTORY` `0x00100000` and `O_NOFOLLOW` `0x00000100` from
 /// `<sys/fcntl.h>`. The kernel-level check is redundant with the
 /// `dev`/`ino` compare below, which stays on every target, so other

@@ -144,14 +144,17 @@ impl crate::Store {
     /// `symbols.module_id` at the new module rows — by file for files and
     /// by file plus inline scope for symbols. An orphan keeps `NULL`.
     ///
-    /// `test_modules` is the contract shim of SPEC-w5 G1a: G1b marks the
-    /// symbols of those modules as tests.
+    /// `test_modules` carries the ids of the modules whose symbols are
+    /// tests (SPEC-w5 G1b): after the linking step, every symbol whose
+    /// module row belongs to that set gets `is_test = 1`. Nothing here
+    /// ever clears a symbol's own flag; only what the extract recorded
+    /// for the symbol itself may hold zero.
     pub fn write_crate_graph(
         &mut self,
         packages: &[Package],
         targets: &[Target],
         modules: &[Module],
-        _test_modules: &[Id],
+        test_modules: &[Id],
     ) -> Result<(), StoreError> {
         let tx = self.conn.transaction()?;
         // Module ids are referenced from files and symbols with foreign
@@ -238,6 +241,18 @@ impl crate::Store {
              )",
             [],
         )?;
+        let tested: Vec<i64> = modules
+            .iter()
+            .filter(|module| test_modules.contains(&module.id))
+            .filter_map(|module| module_ids.get(&module.id).copied())
+            .collect();
+        // Bind one update per test-module row: no id list splicing.
+        for stored_id in tested {
+            tx.execute(
+                "UPDATE symbols SET is_test = 1 WHERE module_id = ?1",
+                [stored_id],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -331,7 +346,7 @@ impl crate::Store {
                         (SELECT m.id FROM modules m WHERE m.file_id = r.file_id AND m.scope = ''),
                         r.scope, f.path, r.kind, r.text, r.receiver, r.shadowed
                  FROM refs r JOIN files f ON f.id = r.file_id
-                 WHERE r.kind IN ('call', 'method_call', 'macro') ORDER BY r.id",
+                 WHERE r.kind IN ('call', 'method_call', 'macro', 'macro_arg') ORDER BY r.id",
             )?;
             let mut rows = statement.query([])?;
             while let Some(row) = rows.next()? {
