@@ -15,6 +15,70 @@ use crate::StoreError;
 /// repo directory after a tighten.
 pub(crate) const DIR_MODE: u32 = 0o700;
 
+/// The checked-dir open flags, per target. On these three targets the
+/// kernel itself refuses symlinks and non-directories — no follow ever
+/// happens at the open (SecOps review #21 N1). The values are fixed:
+/// `O_DIRECTORY` `0o200000` and `O_NOFOLLOW` `0o400000` come from the
+/// Linux headers (`bits/fcntl-linux.h`, exposed by `<fcntl.h>`, same
+/// values on x86_64 and aarch64); `O_DIRECTORY` `0x00100000` and
+/// `O_NOFOLLOW` `0x00000100` come from macOS `<sys/fcntl.h>`. The
+/// kernel-level check is redundant with the `dev`/`ino` compare below,
+/// which stays on every target, so other unix targets keep the plain
+/// open. No `libc` call: the values are constants, not a link.
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+))]
+mod checked_flags {
+    /// `O_DIRECTORY` for the listed targets.
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(crate) const O_DIRECTORY: i32 = 0o200000;
+    /// `O_NOFOLLOW` for the listed targets.
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    pub(crate) const O_NOFOLLOW: i32 = 0o400000;
+    /// `O_DIRECTORY` for macOS.
+    #[cfg(target_os = "macos")]
+    pub(crate) const O_DIRECTORY: i32 = 0x00100000;
+    /// `O_NOFOLLOW` for macOS.
+    #[cfg(target_os = "macos")]
+    pub(crate) const O_NOFOLLOW: i32 = 0x00000100;
+}
+
+/// Opens the checked directory. On the flagged targets the open itself
+/// refuses symlinks (`O_NOFOLLOW`) and non-directories (`O_DIRECTORY`);
+/// elsewhere the plain open plus the fstat compare below keep the same
+/// refusals. The error carries the mapped path and the
+/// `io::ErrorKind` text only, never the raw OS message (SecOps review
+/// #21 N2).
+#[cfg(unix)]
+fn open_checked(dir: &Path) -> Result<std::fs::File, StoreError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+    ))]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(checked_flags::O_DIRECTORY | checked_flags::O_NOFOLLOW);
+    }
+    options.open(dir).map_err(|err| {
+        StoreError::DataDirectory(map_path(dir), format!("not openable ({})", err.kind()))
+    })
+}
+
 /// The store's directory chain when `graph.db` sits in the recognized
 /// `repos/<name>-<hash>/` layout.
 #[cfg(unix)]
@@ -105,9 +169,7 @@ pub(crate) fn tighten_directories(chain: &Chain, effective_uid: u32) -> Result<(
         }
         #[cfg(test)]
         race_window(dir);
-        let file = std::fs::File::open(dir).map_err(|err| {
-            StoreError::DataDirectory(map_path(dir), format!("not openable ({err})"))
-        })?;
+        let file = open_checked(dir)?;
         let opened = file.metadata().map_err(StoreError::Io)?;
         let same = opened.dev() == checked.dev() && opened.ino() == checked.ino();
         if !same || !opened.is_dir() || !owned_by(&opened, effective_uid) {

@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use phantom_fractal_lang_rust::RustLanguage;
 
 use super::{TempData, TempDb, assert_outside_workspace, file_mode, fixture, mkdir_explicit};
-use crate::Store;
+use crate::{Store, StoreError};
 
 #[test]
 #[cfg(unix)]
@@ -244,4 +244,81 @@ fn tighten_refuses_without_the_uid_and_narrows_with_it() {
     // The real effective uid narrows it.
     crate::dirs::tighten_directories(&chain, uid).expect("tighten");
     assert_eq!(file_mode(&repo_dir), 0o700);
+}
+
+/// On the flagged targets, a symlink swapped into the checked path fails
+/// at the open itself, before any `dev`/`ino` compare.
+#[test]
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+))]
+fn a_symlink_swap_fails_at_the_open() {
+    let data = TempData::new("w5-swap-link");
+    mkdir_explicit(&data.root, 0o755);
+    mkdir_explicit(&data.root.join("repos"), 0o755);
+    let repo_dir = data.repo_dir();
+    mkdir_explicit(&repo_dir, 0o700);
+    let target = data.root.join("w5-target");
+    mkdir_explicit(&target, 0o755);
+    let link_target = target.clone();
+    crate::dirs::swap_under_open(Some(Box::new(move |_| {
+        fs::remove_dir(&repo_dir).expect("remove repo dir");
+        std::os::unix::fs::symlink(&link_target, &repo_dir).expect("symlink");
+    })));
+    let opened = Store::open(&data.db());
+    crate::dirs::swap_under_open(None);
+    let refused = match opened {
+        Ok(_) => panic!("the swap must not pass"),
+        Err(StoreError::DataDirectory(_, _)) => opened.err().expect("error"),
+        Err(other) => panic!("expected DataDirectory, got {other:?}"),
+    };
+    if let StoreError::DataDirectory(path, detail) = refused {
+        assert_eq!(path, format!("ledger-{:08x}", std::process::id()));
+        assert!(
+            detail.starts_with("not openable ("),
+            "no raw OS text: {detail}"
+        );
+        assert!(!detail.contains("os error"), "{detail}");
+    } else {
+        panic!("expected DataDirectory, got {refused:?}");
+    }
+    assert_eq!(file_mode(&target), 0o755, "target mode unchanged");
+}
+
+#[test]
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+))]
+fn a_regular_file_swap_fails_at_the_open() {
+    let data = TempData::new("w5-swap-file");
+    mkdir_explicit(&data.root, 0o755);
+    mkdir_explicit(&data.root.join("repos"), 0o755);
+    let repo_dir = data.repo_dir();
+    mkdir_explicit(&repo_dir, 0o700);
+    crate::dirs::swap_under_open(Some(Box::new(move |_| {
+        fs::remove_dir(&repo_dir).expect("remove repo dir");
+        fs::write(&repo_dir, b"a file, not a directory").expect("write");
+    })));
+    let opened = Store::open(&data.db());
+    crate::dirs::swap_under_open(None);
+    let refused = match opened {
+        Ok(_) => panic!("a regular file must not pass"),
+        Err(StoreError::DataDirectory(_, _)) => opened.err().expect("error"),
+        Err(other) => panic!("expected DataDirectory, got {other:?}"),
+    };
+    if let StoreError::DataDirectory(path, detail) = refused {
+        assert!(detail.starts_with("not openable ("), "{detail}");
+        assert!(!detail.contains("os error"), "{detail}");
+        drop(path);
+    } else {
+        panic!("expected DataDirectory, got {refused:?}");
+    }
 }
