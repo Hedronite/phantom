@@ -1,5 +1,6 @@
 //! `--max-tokens` and `max_tokens` on `find`, `show`, `callers`,
-//! `callees`, `impact` and `rank`, and the `focus` cap (SPEC-w8 G0c).
+//! `callees`, `impact`, `rank` and `cochange`, and the `focus` cap
+//! (SPEC-w8 G0c, G3a).
 //!
 //! Every budgeted reply is checked byte for byte against a reply built
 //! here from the unbudgeted one: its entries cut out of the printed text
@@ -15,6 +16,8 @@ use std::process::{self, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use serde_json::{Value, json};
+
+mod support;
 
 const BIN: &str = env!("CARGO_BIN_EXE_phantom-fractal");
 
@@ -63,6 +66,8 @@ fn copy_tree(from: &Path, to: &Path) {
 /// An indexed tree and its data directory.
 struct World {
     tree: TempDir,
+    /// A git root, when the world is one; it is then the tree.
+    repo: Option<support::Repo>,
     data: TempDir,
 }
 
@@ -70,6 +75,7 @@ impl World {
     fn fixture(name: &str) -> Self {
         let world = Self {
             tree: TempDir::new("tree"),
+            repo: None,
             data: TempDir::new("data"),
         };
         copy_tree(&Path::new(FIXTURES).join(name), world.tree.path());
@@ -85,6 +91,7 @@ impl World {
     fn generated() -> Self {
         let world = Self {
             tree: TempDir::new("tree"),
+            repo: None,
             data: TempDir::new("data"),
         };
         let root = world.tree.path();
@@ -127,6 +134,23 @@ impl World {
         world
     }
 
+    /// A git root with the support history, indexed with its co-change.
+    fn history() -> Self {
+        let world = Self {
+            tree: TempDir::new("unused"),
+            repo: Some(support::Repo::new("budget", &support::history())),
+            data: TempDir::new("data"),
+        };
+        world.index();
+        world
+    }
+
+    fn root(&self) -> &Path {
+        self.repo
+            .as_ref()
+            .map_or_else(|| self.tree.path(), |repo| repo.root.as_path())
+    }
+
     fn index(&self) {
         let (code, line) = self.cli(&["index", "."]);
         assert_eq!(code, Some(0), "{line}");
@@ -136,7 +160,7 @@ impl World {
     fn cli(&self, args: &[&str]) -> (Option<i32>, String) {
         let output = Command::new(BIN)
             .args(args)
-            .current_dir(self.tree.path())
+            .current_dir(self.root())
             .env("PHANTOM_FRACTAL_DATA", self.data.path())
             .output()
             .expect("run cli");
@@ -163,7 +187,7 @@ impl World {
         }
         let mut child = Command::new(BIN)
             .arg("mcp")
-            .current_dir(self.tree.path())
+            .current_dir(self.root())
             .env("PHANTOM_FRACTAL_DATA", self.data.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -310,6 +334,7 @@ fn drops(op: &str, line: &str) -> Vec<(usize, usize)> {
     };
     match op {
         "find" | "callers" | "callees" | "rank" => array(data, "hits"),
+        "cochange" => array(data, "partners"),
         "impact" => {
             let mut out = Vec::new();
             if let Some((groups, _)) = member(raw, data, "groups") {
@@ -333,6 +358,9 @@ fn drops(op: &str, line: &str) -> Vec<(usize, usize)> {
             let fields = members(raw, data);
             if let Some(at) = fields.iter().position(|(key, _, _)| key == "source") {
                 out.push((fields[at - 1].2, fields[at].2));
+            }
+            if let Some((start, _)) = member(raw, data, "cochange") {
+                out.extend(array_drops(raw, start));
             }
             for side in ["callees", "callers", "members"] {
                 let (start, _) = member(raw, data, side).expect("side");
@@ -576,6 +604,40 @@ fn fixtures_fit_the_same_way() {
 }
 
 #[test]
+fn cochange_and_show_on_a_git_root_fit_the_same_way() {
+    let world = World::history();
+    let cases = [
+        case(
+            "cochange",
+            &["cochange", "src/a.rs", "--min-lift", "0"],
+            "cochange",
+            json!({ "file": "src/a.rs", "min_lift": 0 }),
+        ),
+        case(
+            "cochange",
+            &["cochange", "src/d.rs"],
+            "cochange",
+            json!({ "file": "src/d.rs" }),
+        ),
+        case(
+            "show",
+            &["show", "fa"],
+            "show_symbol",
+            json!({ "symbol": "fa" }),
+        ),
+        case(
+            "show",
+            &["show", "fa", "--source"],
+            "show_symbol",
+            json!({ "symbol": "fa", "source": true }),
+        ),
+    ];
+    let (dropped, small) = check(&world, &cases);
+    assert!(dropped >= 20, "{dropped} replies dropped entries");
+    assert!(small >= cases.len(), "{small} replies were too small");
+}
+
+#[test]
 fn a_budget_changes_nothing_else() {
     let world = World::generated();
     // A budget the whole reply fits in drops nothing, and taking `tokens`
@@ -609,7 +671,7 @@ fn max_tokens_is_1_to_100000_on_exactly_six_commands() {
             let output = Command::new(BIN)
                 .args(args)
                 .args(["--max-tokens", bad])
-                .current_dir(world.tree.path())
+                .current_dir(world.root())
                 .env("PHANTOM_FRACTAL_DATA", world.data.path())
                 .output()
                 .expect("run");

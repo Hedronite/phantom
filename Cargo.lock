@@ -1327,6 +1327,7 @@ dependencies = [
  "clap",
  "phantom-fractal-analyze",
  "phantom-fractal-extract",
+ "phantom-fractal-git",
  "phantom-fractal-lang",
  "phantom-fractal-lang-rust",
  "phantom-fractal-proto",

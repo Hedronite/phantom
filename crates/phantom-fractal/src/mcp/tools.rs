@@ -1,6 +1,6 @@
 //! The tools: their definitions, their argument checks, and the
 //! [`crate::ops`] call behind each one (SPEC-w6 G2b, SPEC-w7 G3b, SPEC-w8
-//! G0b and G0c).
+//! G0b, G0c and G3b).
 //!
 //! A tool never does an operation's work itself. It turns its arguments
 //! into the request the command line builds for the same flags, calls the
@@ -9,17 +9,19 @@
 //! argument.
 
 use phantom_fractal_analyze::ImpactOptions;
+use phantom_fractal_git::Window;
 use phantom_fractal_proto::ErrorKind;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use super::roots::Roots;
 use crate::ops::budget::{MAX_TOKENS_MAX, MAX_TOKENS_MIN};
+use crate::ops::cochange::{self as cochange, DEFAULT_MIN_LIFT, min_lift_in_range};
 use crate::ops::map::{BUDGET_MAX, BUDGET_MIN};
 use crate::ops::rank::{DEFAULT_LIMIT, FOCUS_MAX, LIMIT_MAX, LIMIT_MIN, focus_cap};
 use crate::ops::{
-    self, CallsRequest, Failure, FindRequest, ImpactRequest, IndexRequest, MapRequest, RankKind,
-    RankRequest, ShowRequest, Target,
+    self, CallsRequest, CochangeRequest, Failure, FindRequest, ImpactRequest, IndexRequest,
+    MapRequest, RankKind, RankRequest, ShowRequest, Target,
 };
 
 /// One tool call's envelope line and whether it reports a failure.
@@ -222,6 +224,40 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
             ),
             "annotations": read,
         }),
+        json!({
+            "name": "cochange",
+            "description": "List the files that tend to change with `file`, from the git \
+                history `index` read on a git root: each partner with its lift, the decayed \
+                weight of the commits they changed in together, the confidence that a change to \
+                `file` comes with one to it, and the last time they changed together. Without a \
+                scan, `scan` is null and there are no partners.",
+            "inputSchema": schema(
+                json!({
+                    "file": {
+                        "type": "string",
+                        "description": "An indexed file, relative to the repo, such as \
+                            `src/lib.rs`.",
+                    },
+                    "min_lift": {
+                        "type": "number",
+                        "minimum": 0,
+                        "default": DEFAULT_MIN_LIFT,
+                        "description": "The lowest lift listed.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": cochange::LIMIT_MIN,
+                        "maximum": cochange::LIMIT_MAX,
+                        "default": cochange::DEFAULT_LIMIT,
+                        "description": "The most partners returned.",
+                    },
+                    "repo": { "type": "string", "description": REPO },
+                    "max_tokens": max_tokens(),
+                }),
+                &["file"],
+            ),
+            "annotations": read,
+        }),
     ];
     if allow_index {
         tools.push(json!({
@@ -235,6 +271,21 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
                         "type": "string",
                         "description": "The tree to index: one of the server's roots. A relative \
                             path resolves against the server's working directory.",
+                    },
+                    "cochange_days": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": Window::MAX_DAYS,
+                        "default": Window::DEFAULT_DAYS,
+                        "description": "Days of git history before HEAD's commit the co-change \
+                            scan reads, on a git root.",
+                    },
+                    "cochange_commits": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": Window::MAX_COMMITS,
+                        "default": Window::DEFAULT_COMMITS,
+                        "description": "The most commits the co-change scan reads.",
                     },
                 }),
                 &["path"],
@@ -279,6 +330,7 @@ pub(crate) fn call(
         "impact" => run(impact_request(arguments, roots), ops::impact),
         "top_ranked" => run(rank_request(arguments, roots), ops::rank),
         "repo_map" => run(map_request(arguments, roots), ops::map),
+        "cochange" => run(cochange_request(arguments, roots), ops::cochange),
         "index_repo" if allow_index => run(index_request(arguments, roots), ops::index),
         _ => return None,
     };
@@ -403,12 +455,44 @@ fn map_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<MapReque
     })
 }
 
+fn cochange_request(
+    arguments: &Map<String, Value>,
+    roots: &Roots,
+) -> Result<CochangeRequest, Failure> {
+    let args = Args::new(
+        arguments,
+        &["file", "min_lift", "limit", "repo", "max_tokens"],
+    )?;
+    let file = args.required_string("file")?;
+    let min_lift = args.min_lift()?.unwrap_or(DEFAULT_MIN_LIFT);
+    let limit = args
+        .integer("limit", cochange::LIMIT_MIN, cochange::LIMIT_MAX)?
+        .unwrap_or(cochange::DEFAULT_LIMIT);
+    let repo = args.string("repo")?;
+    let max_tokens = args.max_tokens()?;
+    Ok(CochangeRequest {
+        file,
+        min_lift,
+        limit,
+        repo: roots.indexed(repo.as_deref())?,
+        max_tokens,
+    })
+}
+
 /// `index_repo` takes a root whether or not it has an index yet.
 fn index_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<IndexRequest, Failure> {
-    let args = Args::new(arguments, &["path"])?;
+    let args = Args::new(arguments, &["path", "cochange_days", "cochange_commits"])?;
     let path = args.required_string("path")?;
+    let days = args.integer("cochange_days", 1, u64::from(Window::MAX_DAYS))?;
+    let commits = args.integer("cochange_commits", 1, u64::from(Window::MAX_COMMITS))?;
+    // The ranges above fit in u32.
+    let window = Window {
+        days: days.map_or(Window::DEFAULT_DAYS, |days| days as u32),
+        max_commits: commits.map_or(Window::DEFAULT_COMMITS, |commits| commits as u32),
+    };
     Ok(IndexRequest {
         path: roots.root(Some(&path))?,
+        window,
     })
 }
 
@@ -514,6 +598,18 @@ impl<'a> Args<'a> {
         let focus = self.strings("focus")?;
         focus_cap(&focus)?;
         Ok(focus)
+    }
+
+    /// `min_lift`: a finite number, at least 0, as the command line checks
+    /// it.
+    fn min_lift(&self) -> Result<Option<f64>, Failure> {
+        let Some(value) = self.map.get("min_lift") else {
+            return Ok(None);
+        };
+        match value.as_f64().filter(|number| min_lift_in_range(*number)) {
+            Some(number) => Ok(Some(number)),
+            None => Err(usage("min_lift must be a number at least 0")),
+        }
     }
 
     /// `max_tokens`: an integer from [`MAX_TOKENS_MIN`] to
