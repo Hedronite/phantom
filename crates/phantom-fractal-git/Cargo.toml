@@ -1,0 +1,15 @@
+[package]
+name = "phantom-fractal-git"
+description = "Phantom: read-only git co-change mining over a root's first-parent history."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# SPEC-w8 G1a and the D2 amendment: exactly this pin and feature set. No
+# other crate depends on gix.
+gix = { version = "=0.89.0", default-features = false, features = ["sha1"] }
+phantom-fractal-store = { path = "../phantom-fractal-store", version = "0.0.0" }

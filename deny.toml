@@ -23,6 +23,20 @@ deny = [
   { name = "curl", reason = "Phantom has no HTTP client" },
   { name = "isahc", reason = "Phantom has no HTTP client" },
   { name = "hyper", reason = "Phantom has no HTTP client" },
+  { name = "openssl-sys", reason = "Phantom has no TLS" },
+  { name = "gix-credentials", reason = "Phantom never authenticates" },
+  { name = "gix-index", reason = "Phantom reads no git index" },
+  { name = "gix-worktree", reason = "Phantom never touches a work tree" },
+  { name = "gix-worktree-state", reason = "Phantom never checks out" },
+  { name = "gix-status", reason = "Phantom runs no status" },
+  { name = "gix-merge", reason = "Phantom never merges" },
+  { name = "gix-filter", reason = "Phantom runs no filter driver" },
+  { name = "gix-negotiate", reason = "Phantom never fetches" },
+]
+features = [
+  { crate = "gix", deny = ["blocking-network-client", "async-network-client", "worktree-mutation", "index", "status", "merge", "credentials", "command", "attributes", "blob-diff", "interrupt"] },
+  { crate = "gix-protocol", deny = ["blocking-client", "async-client", "handshake", "fetch"] },
+  { crate = "gix-transport", deny = ["blocking-client", "async-client", "http-client", "http-client-curl", "http-client-reqwest"] },
 ]
 
 [sources]

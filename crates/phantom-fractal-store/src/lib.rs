@@ -14,6 +14,7 @@
 //! [`Store::resolve_input`], [`Store::replace_edges`], and the caller
 //! counters) serves the resolver on top of the same rows.
 
+mod cochange;
 mod detail;
 mod dirs;
 mod graph;
@@ -30,6 +31,7 @@ use phantom_fractal_lang::{ExtractError, Item, Language};
 use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags};
 
+pub use crate::cochange::{CochangeGroup, CochangePartner, CochangeScan, FileRow, PairRow};
 pub use crate::detail::SymbolDetail;
 pub use crate::graph::{CallHit, Package, SymbolMatch};
 pub use crate::rank::{MapFile, MapRow, RankEdge, RankImportEdge, RankSymbolRow};
