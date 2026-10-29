@@ -18,6 +18,7 @@ mod detail;
 mod dirs;
 mod graph;
 mod impact;
+mod rank;
 mod rows;
 mod schema;
 
@@ -31,6 +32,7 @@ use rusqlite::{Connection, OpenFlags};
 
 pub use crate::detail::SymbolDetail;
 pub use crate::graph::{CallHit, Package, SymbolMatch};
+pub use crate::rank::{MapFile, MapRow, RankEdge, RankImportEdge, RankSymbolRow};
 
 /// Producer stamp written into `meta`.
 pub const PRODUCER: &str = "phantom-fractal";

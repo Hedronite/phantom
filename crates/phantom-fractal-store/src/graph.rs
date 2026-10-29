@@ -391,7 +391,9 @@ impl crate::Store {
     }
 
     /// Deletes every stored edge, then inserts the given set, all in one
-    /// transaction.
+    /// transaction. A graph rebuild: the stored `graph_epoch` increments
+    /// here, in the same transaction, and nothing else ever moves it —
+    /// a no-change pass calls nothing, so the epoch stands still.
     pub fn replace_edges(&mut self, edges: &[Edge]) -> Result<(), StoreError> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM edges", [])?;
@@ -409,6 +411,11 @@ impl crate::Store {
                 ),
             )?;
         }
+        tx.execute(
+            "INSERT INTO meta(key, value) VALUES ('graph_epoch', 1)
+             ON CONFLICT(key) DO UPDATE SET value = value + 1",
+            [],
+        )?;
         tx.commit()?;
         Ok(())
     }

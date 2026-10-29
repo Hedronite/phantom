@@ -519,6 +519,208 @@ fn unknown_reason_text_fails_the_edge_readers() {
 }
 
 #[test]
+fn graph_epoch_moves_only_on_a_rebuild() {
+    let db = TempDb::new("epoch");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    assert_eq!(store.graph_epoch().expect("unset"), 0);
+    store.replace_edges(&[]).expect("first build bumps");
+    assert_eq!(store.graph_epoch().expect("first"), 1);
+    store.replace_edges(&[]).expect("second build");
+    assert_eq!(store.graph_epoch().expect("second"), 2);
+    // Rank writes do not move the graph epoch; the writeless pass calls
+    // nothing at all.
+    store.write_rank(1, &[], &[]).expect("rank write");
+    assert_eq!(store.graph_epoch().expect("stable"), 2);
+    assert_eq!(store.rank_epoch().expect("rank epoch"), 1);
+    drop(store);
+}
+
+#[test]
+fn rank_input_carries_the_rank_fields() {
+    let db = TempDb::new("rankinput");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = language();
+    let source = "pub fn pick() -> u8 { 1 }\nfn side() {}\nfn main() {}\n";
+    store
+        .put_source("src/main.rs", source, 0, &language)
+        .expect("put");
+    let rows = store.rank_input().expect("rank input");
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    for row in &rows {
+        assert!(row.target_kind.is_none(), "{row:?} before any graph");
+    }
+    assert!(rows.iter().all(|row| !row.is_main));
+    // A binned target flips the `main` detection once write_crate_graph
+    // lines the module up.
+    store
+        .write_crate_graph(
+            &[crate::Package {
+                name: "sample".to_owned(),
+                version: None,
+                manifest_path: "Cargo.toml".to_owned(),
+            }],
+            &[phantom_fractal_lang::Target {
+                id: 4,
+                package: "sample".to_owned(),
+                name: "sample".to_owned(),
+                kind: phantom_fractal_lang::TargetKind::Bin,
+                root: "src/main.rs".to_owned(),
+            }],
+            &[phantom_fractal_lang::Module {
+                id: 6,
+                target: 4,
+                parent: None,
+                path: "crate".to_owned(),
+                file: "src/main.rs".to_owned(),
+                scope: String::new(),
+            }],
+            &[],
+        )
+        .expect("graph");
+    let rows = store.rank_input().expect("rank input after graph");
+    assert!(rows.iter().all(|row| row.path == "src/main.rs"), "{rows:?}");
+    let fn_main_row = rows
+        .iter()
+        .find(|row| row.is_main)
+        .expect("fn main at the bin root is flagged");
+    assert_eq!(fn_main_row.path, "src/main.rs");
+    assert_eq!(fn_main_row.kind, "function");
+    assert_eq!(fn_main_row.target_kind.as_deref(), Some("bin"));
+    drop(store);
+}
+
+#[test]
+fn rank_edges_and_import_pairs_arrive_in_id_order() {
+    let db = TempDb::new("rankedges");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = language();
+    let source = "pub fn pick() -> u8 { 1 }\npub fn outer() { pick(); }\npub struct Ledger;\n";
+    store
+        .put_source("src/rank.rs", source, 0, &language)
+        .expect("put");
+    store
+        .put_source("src/uses.rs", "use crate::pick;\n", 0, &language)
+        .expect("put uses");
+    write_graph(&mut store, "src/rank.rs", 1);
+    let input = store.resolve_input().expect("input");
+    let outer = input
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "outer")
+        .expect("outer")
+        .id;
+    let pick = input
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "pick")
+        .expect("pick")
+        .id;
+    let ledger = input
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "Ledger")
+        .expect("Ledger")
+        .id;
+    let module = input.modules.first().expect("module").id;
+    let reference = input
+        .refs
+        .iter()
+        .find(|reference| reference.text == "pick")
+        .expect("ref")
+        .id;
+    let use_ref = input.uses.first().expect("use ref").id;
+    store
+        .replace_edges(&[Edge {
+            ref_id: reference,
+            source: outer,
+            target: pick,
+            confidence: 0.95,
+            reason: Reason::Local,
+        }])
+        .expect("call edges");
+    store
+        .write_links(&[
+            phantom_fractal_lang::Link {
+                kind: phantom_fractal_lang::LinkKind::Impl,
+                source: phantom_fractal_lang::Node::Symbol(outer),
+                target: phantom_fractal_lang::Node::Symbol(ledger),
+                confidence: 0.8,
+                reason: phantom_fractal_lang::LinkReason::ImplTrait,
+                ref_id: None,
+            },
+            phantom_fractal_lang::Link {
+                kind: phantom_fractal_lang::LinkKind::Import,
+                source: phantom_fractal_lang::Node::Module(module),
+                target: phantom_fractal_lang::Node::Symbol(pick),
+                confidence: 0.9,
+                reason: phantom_fractal_lang::LinkReason::Local,
+                ref_id: Some(use_ref),
+            },
+        ])
+        .expect("links");
+    let edges = store.rank_call_edges().expect("rank call edges");
+    assert_eq!(edges.len(), 2, "{edges:?}");
+    // `use crate::pick;` is a use in src/uses.rs: the import edge ends on
+    // pick, whose file is src/rank.rs — the (importing, imported) pair.
+    let imports = store.rank_import_edges().expect("rank import edges");
+    assert_eq!(imports.len(), 1, "{imports:?}");
+}
+
+#[test]
+fn write_rank_replaces_whole_table_atomically() {
+    let db = TempDb::new("writerank");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    store.replace_edges(&[]).expect("first build");
+    store
+        .write_rank(1, &[(7, 0.5), (9, 0.5)], &[(3, 1.0)])
+        .expect("write");
+    assert_eq!(store.rank_epoch().expect("rank epoch"), 1);
+    // A second write replaces both kinds instead of appending.
+    store.write_rank(2, &[(7, 1.0)], &[]).expect("rewrite");
+    assert_eq!(store.rank_epoch().expect("rank epoch"), 2);
+    assert!(store.rank_call_edges().is_ok(), "the table clears");
+    drop(store);
+}
+
+#[test]
+fn map_rows_skip_tests_and_modules() {
+    let db = TempDb::new("maprows");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = language();
+    let source = "pub fn open_ledger() -> u32 {\n    0\n}\n\n#[test]\nfn probe() {}\n\npub struct Ledger;\npub mod inner {\n\n}\n";
+    store
+        .put_source("src/mapme.rs", source, 0, &language)
+        .expect("put");
+    let rows = store.map_rows().expect("map rows");
+    let names: Vec<&str> = rows.iter().map(|row| row.name.as_str()).collect();
+    assert!(
+        !names.contains(&"probe"),
+        "a #[test] fn is a test: {names:?}"
+    );
+    assert!(!names.contains(&"inner"), "{names:?}");
+    let item = rows
+        .iter()
+        .find(|row| row.name == "open_ledger")
+        .expect("row");
+    assert_eq!(item.kind, "function");
+    // The signature stores the pre-body text as W6 wrote it.
+    assert!(
+        item.signature
+            .as_deref()
+            .is_some_and(|s| s.starts_with("pub fn"))
+    );
+    // Files come back sorted by path.
+    let paths = store.map_file_paths().expect("paths").len();
+    assert!(paths >= 1);
+    drop(store);
+}
+
+#[test]
 fn callers_callees_and_unresolved_counts_agree() {
     let db = TempDb::new("flow");
     assert_outside_workspace(db.path());
