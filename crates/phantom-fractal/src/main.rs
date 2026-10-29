@@ -15,6 +15,7 @@
 
 #![forbid(unsafe_code)]
 
+mod mcp;
 mod ops;
 
 use std::io::Write;
@@ -118,6 +119,13 @@ enum Command {
     },
     /// Print the name, version, and commit of this binary. Needs no index.
     Version,
+    /// Serve the read operations to an MCP client: JSON-RPC on stdin and
+    /// stdout until stdin closes.
+    Mcp {
+        /// Also offer the `index_repo` tool, which writes the data directory.
+        #[arg(long)]
+        allow_index: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -165,6 +173,7 @@ fn main() -> ExitCode {
             }))
         }
         Command::Version => emit(ops::version(&VersionRequest)),
+        Command::Mcp { allow_index } => mcp::serve(allow_index),
     }
 }
 
