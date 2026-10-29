@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{FixtureRepo, TempDir};
+use common::{FixtureRepo, TempDir, without_detail};
 use phantom_fractal_extract::index;
 use phantom_fractal_lang::{Item, ItemKind, Visibility};
 use phantom_fractal_lang_rust::RustLanguage;
@@ -64,9 +64,12 @@ fn id_codec_is_not_a_key_and_its_symbol_is_stored() {
         name: "decode_id".to_owned(),
         visibility: Visibility::Public,
         start_line: 3,
+        end_line: 0,
+        signature: String::new(),
+        doc_summary: None,
         is_test: false,
     };
-    let items = s.store.read_items("src/id_codec.rs").expect("read");
+    let items = without_detail(s.store.read_items("src/id_codec.rs").expect("read"));
     assert!(items.contains(&decode_id), "{items:?}");
     assert!(s.store.match_count("decode_id").expect("match") >= 1);
 }
@@ -75,12 +78,15 @@ fn id_codec_is_not_a_key_and_its_symbol_is_stored() {
 fn stored_items_use_repo_relative_paths() {
     let mut s = setup();
     index(s.repo.root(), &mut s.store, &s.rust).expect("index");
-    let items = s.store.read_items("src/ledger.rs").expect("read");
+    let items = without_detail(s.store.read_items("src/ledger.rs").expect("read"));
     let open_ledger = Item {
         kind: ItemKind::Function,
         name: "open_ledger".to_owned(),
         visibility: Visibility::Public,
         start_line: 7,
+        end_line: 0,
+        signature: String::new(),
+        doc_summary: None,
         is_test: false,
     };
     assert!(items.contains(&open_ledger), "{items:?}");

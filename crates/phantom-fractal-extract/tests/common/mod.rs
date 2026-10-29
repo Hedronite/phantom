@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use phantom_fractal_extract::MAX_FILE_BYTES;
+use phantom_fractal_lang::Item;
 
 const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/index/repo");
 
@@ -184,4 +185,18 @@ pub fn rust_bytes(head: &[u8], len: u64) -> Vec<u8> {
         *last = b'\n';
     }
     out
+}
+
+/// `items` with the detail fields cleared, for tests of the other fields.
+/// `tests/detail.rs` checks the detail fields over `fixtures/detail`.
+pub fn without_detail(items: Vec<Item>) -> Vec<Item> {
+    items
+        .into_iter()
+        .map(|item| Item {
+            end_line: 0,
+            signature: String::new(),
+            doc_summary: None,
+            ..item
+        })
+        .collect()
 }

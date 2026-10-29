@@ -13,6 +13,7 @@
 
 mod attrs;
 mod bindings;
+mod detail;
 mod imports;
 mod macro_args;
 mod resolve;
@@ -145,11 +146,15 @@ fn record(found: Found<'_>, src: &[u8], out: &mut Extract) {
     let start_line = start_line(node);
     match (record, found.name, found.argument) {
         (Record::Item(kind), Some(name), _) => {
+            let detail = detail::detail(node, src);
             out.items.push(Item {
                 kind,
                 name: compact(name, src),
                 visibility,
                 start_line,
+                end_line: detail.end_line,
+                signature: detail.signature,
+                doc_summary: detail.doc_summary,
                 is_test: attrs::is_test(node, src),
             });
             out.item_scopes.push(scope_of(node, src));
