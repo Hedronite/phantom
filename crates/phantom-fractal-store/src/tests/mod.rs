@@ -12,6 +12,7 @@ mod detail;
 mod dirs;
 mod graph;
 mod legacy;
+mod rank;
 mod writes;
 
 struct TempDb {
