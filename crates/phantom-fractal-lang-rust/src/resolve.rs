@@ -21,7 +21,7 @@
 
 mod lookup;
 
-use phantom_fractal_lang::{Edge, Reason, RefKind, ResolveCounts, ResolveInput};
+use phantom_fractal_lang::{Edge, Id, Reason, RefKind, ResolveCounts, ResolveInput};
 
 use lookup::{Index, Placed};
 
@@ -91,6 +91,23 @@ pub fn resolve(input: &ResolveInput) -> (Vec<Edge>, ResolveCounts) {
         }
     }
     (edges, counts)
+}
+
+/// Each method in `input` with the struct or enum that owns it, as
+/// `(method, type)` in symbol order (SPEC-w6 G0b).
+///
+/// The owner match is the one `self-method` and `self-assoc` edges use: the
+/// method's impl self type resolves to exactly one struct or enum, declared
+/// in the method's own target. A method whose self type resolves to no
+/// type, to more than one, to a trait, or to a type in another target gets
+/// no pair. Like [`resolve`], this is a pure function of its input.
+pub fn method_owners(input: &ResolveInput) -> Vec<(Id, Id)> {
+    let index = Index::new(input);
+    input
+        .symbols
+        .iter()
+        .filter_map(|symbol| Some((symbol.id, index.owner_of(symbol)?)))
+        .collect()
 }
 
 /// Path segments with generic arguments removed, or none for a path that
