@@ -17,6 +17,7 @@ name = "fract"
 path = "src/main.rs"
 
 [dependencies]
+blake3 = "1"
 clap = { version = "4.6", features = ["derive"] }
 phantom-fractal-analyze = { path = "../phantom-fractal-analyze", version = "0.0.0" }
 phantom-fractal-extract = { path = "../phantom-fractal-extract", version = "0.0.0" }
