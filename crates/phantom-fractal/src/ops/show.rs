@@ -13,6 +13,7 @@ use serde::Serialize;
 
 use super::budget::{self, Shed, Tokens, drop_last};
 use super::calls::{CallOut, Direction, edges};
+use super::cochange::{DEFAULT_MIN_LIFT, PartnerOut, partners};
 use super::lookup::{Names, current_index, lookup_keyed};
 use super::source::{SourceOut, read_source};
 use super::{Failure, canonical_repo};
@@ -22,6 +23,9 @@ const MEMBER_CAP: usize = 100;
 
 /// Most callers, and most callees, one `show` returns.
 const SHOW_CALL_CAP: usize = 20;
+
+/// Most co-change partners one `show` returns.
+const SHOW_COCHANGE_CAP: u64 = 5;
 
 /// Which symbol `show` is asked about.
 pub(crate) enum Target {
@@ -43,8 +47,9 @@ pub(crate) struct ShowRequest {
     pub(crate) max_tokens: Option<u64>,
 }
 
-/// `data` of a successful `show`, with its keys in this order. `source`
-/// is present only when it was asked for.
+/// `data` of a successful `show`, with its keys in this order. `cochange`
+/// is present only when the index holds a co-change scan, and `source`
+/// only when it was asked for.
 #[derive(Clone, Serialize)]
 pub(crate) struct ShowResult {
     symbol: DetailOut,
@@ -52,18 +57,23 @@ pub(crate) struct ShowResult {
     callers: Calls,
     callees: Calls,
     macro_args: i64,
+    /// The partners of the symbol's file, as `cochange` lists them with
+    /// its default `min_lift`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cochange: Option<Vec<PartnerOut>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<SourceOut>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tokens: Option<Tokens>,
 }
 
-/// Under a budget, `source` goes first as a whole, then the callees, the
-/// callers and the members, each from the end. The symbol and the counts
-/// stay.
+/// Under a budget, `source` goes first as a whole, then the co-change
+/// partners, the callees, the callers and the members, each from the end.
+/// The symbol and the counts stay.
 impl Shed for ShowResult {
     fn sheddable(&self) -> usize {
         usize::from(self.source.is_some())
+            + self.cochange.as_ref().map_or(0, Vec::len)
             + self.callees.hits.len()
             + self.callers.hits.len()
             + self.members.hits.len()
@@ -72,6 +82,9 @@ impl Shed for ShowResult {
     fn shed(&mut self, mut count: usize) {
         if count > 0 && self.source.take().is_some() {
             count -= 1;
+        }
+        if let Some(partners) = &mut self.cochange {
+            drop_last(partners, &mut count);
         }
         drop_last(&mut self.callees.hits, &mut count);
         drop_last(&mut self.callers.hits, &mut count);
@@ -147,6 +160,15 @@ pub(crate) fn show(request: &ShowRequest) -> Result<ShowResult, Failure> {
         Some(store.unresolved_calls(id)?),
     );
     let macro_args = store.macro_args_named(&detail.name)?;
+    let cochange = match store.cochange_head()? {
+        Some(_) => Some(partners(
+            &store,
+            &detail.path,
+            DEFAULT_MIN_LIFT,
+            SHOW_COCHANGE_CAP,
+        )?),
+        None => None,
+    };
     let source = if request.source {
         let root = canonical_repo(&request.repo)?;
         Some(read_source(&store, &root, &detail)?)
@@ -165,6 +187,7 @@ pub(crate) fn show(request: &ShowRequest) -> Result<ShowResult, Failure> {
         callers,
         callees,
         macro_args,
+        cochange,
         source,
         tokens: None,
     };

@@ -95,6 +95,15 @@ impl fmt::Display for GitError {
 
 impl Error for GitError {}
 
+/// HEAD's commit oid at `root`, as the hex text a [`Scan`] stores in
+/// `last_oid`, without walking any history. `Ok(None)` for exactly the
+/// roots [`mine`] answers `None` for, through the same isolated,
+/// root-only open. `index` compares it with the stored scan's head to
+/// decide whether to mine.
+pub fn head(root: &Path) -> Result<Option<String>, GitError> {
+    Ok(history::open(root)?.map(|(_, head)| head.to_string()))
+}
+
 /// The co-change scan of `root`, counting only paths in `indexed_paths`
 /// (root-relative, `/`-separated, as the store keeps them).
 ///

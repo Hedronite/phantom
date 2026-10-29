@@ -10,9 +10,9 @@ The crates build on unix only. There is no Windows build.
 
 The `phantom-fractal` package builds two binaries from one `main.rs`: `phantom-fractal` and `fract`. Scripts should call `phantom-fractal`, since another program named `fract` may come first on `PATH`.
 
-They have ten commands:
+They have eleven commands:
 
-- `index PATH` walks the Rust files under PATH, extracts their items, `use` paths, and calls, and stores them in a SQLite database in the Phantom data directory. It then builds each package's module tree and resolves calls to edges, as [Calls](#calls) describes, adds `import` and `impl` edges, and stores the rank of the graph, as [Rank](#rank) describes. PATH itself is only read. A second run over an unchanged tree writes nothing.
+- `index PATH` walks the Rust files under PATH, extracts their items, `use` paths, and calls, and stores them in a SQLite database in the Phantom data directory. It then builds each package's module tree and resolves calls to edges, as [Calls](#calls) describes, adds `import` and `impl` edges, and stores the rank of the graph, as [Rank](#rank) describes. On a git root it also reads the history and stores which files change together, as [Co-change](#co-change) describes. PATH itself is only read. A second run over an unchanged tree and an unmoved HEAD writes nothing.
 - `find NAME` returns the indexed symbols named exactly NAME as `hits`, each with its kind, visibility, path, and line, ordered by path and then line. It returns at most 100; `truncated` is true when more matched. A name that was not indexed returns no hits.
 - `callers SYMBOL` returns the resolved calls to SYMBOL.
 - `callees SYMBOL` returns the resolved calls SYMBOL makes, and `unresolved_calls`: how many calls, method calls, and macros inside SYMBOL have no edge.
@@ -20,10 +20,11 @@ They have ten commands:
 - `show SYMBOL` or `show --id KEY` gives one symbol's detail, members, and a capped look at its callers and callees, and its source lines only when asked, as [Show](#show) describes.
 - `rank` lists the best-ranked symbols or files of the index, as [Rank](#rank) describes.
 - `map --budget N` packs a ranked map of the repo into N estimated tokens, as [Map](#map) describes.
+- `cochange FILE` lists the files that tend to change with FILE, from the history `index` read, as [Co-change](#co-change) describes.
 - `mcp` serves the same operations to an MCP client over stdin and stdout, for the trees it is started with, as [MCP](#mcp) describes.
 - `version` prints the binary's name, version, and commit, as [Version](#version) describes. It needs no index.
 
-Run `find`, `callers`, `callees`, `impact`, `show`, `rank`, and `map` from the directory you indexed, or pass `--repo PATH`. `find`, `callers`, `callees`, `impact`, `show`, and `rank` also take `--max-tokens N`, which fits the reply into N estimated tokens, as [Budgets](#budgets) describes.
+Run `find`, `callers`, `callees`, `impact`, `show`, `rank`, `map`, and `cochange` from the directory you indexed, or pass `--repo PATH`. `find`, `callers`, `callees`, `impact`, `show`, `rank`, and `cochange` also take `--max-tokens N`, which fits the reply into N estimated tokens, as [Budgets](#budgets) describes.
 
 Each command but `mcp` prints one JSON envelope: `{"ok": …, "data": …, "error": …, "schema": 1}`. An error exits with its canon code, for example 2 when the tree has no index yet and 3 when PATH does not exist. Every command also accepts `--json`, before or after the command name. It changes nothing, since the output is always the envelope.
 
@@ -36,6 +37,7 @@ fract impact util::helper --depth 2
 fract show shapes::Grid --source
 fract rank --files --limit 10
 fract map --budget 1500 --focus src/lib.rs
+fract cochange src/lib.rs --limit 5
 fract impact util::helper --max-tokens 800
 phantom-fractal version
 ```
@@ -45,7 +47,8 @@ The `index` envelope holds counts only, never a path:
 - files: `written`, `unchanged`, `not_utf8`, and `skipped`;
 - the graph: `modules`, `orphans` (`.rs` files no target reaches), and `edges`, the call edges only;
 - `edges_by_reason`: the edges for each of the seven [reasons](#how-a-call-is-placed), keyed by reason, every key present even when it is 0;
-- calls left without an edge: `unresolved`, `external`, `no_source`, `method_calls` (method calls on a receiver other than `self`), and `macros`.
+- calls left without an edge: `unresolved`, `external`, `no_source`, `method_calls` (method calls on a receiver other than `self`), and `macros`;
+- on a git root only, `cochange`: the stored scan's `head`, `commits_seen`, `skipped_bulk`, `pairs`, and `window`, as [Co-change](#co-change) describes. On any other tree the key is absent.
 
 A pass that rebuilds nothing reads the graph counts back from the stored graph.
 
@@ -128,7 +131,7 @@ Any other form gives no dependency: a `[dependencies.B]` table, a version-only l
 
 ### Nothing runs
 
-Phantom reads source text only. Macros are never expanded: they are counted by name, and a call-shaped name in a macro's tokens (`f(…)`, `a::f(…)`, or `.m(…)`, nested macros included, `macro_rules!` bodies not) is recorded as a fact with no edge. There is no type inference, so no receiver other than `self` is typed. Phantom never runs cargo, rustc, rust-analyzer, a build script, a proc macro, or any other code or command from the indexed repo.
+Phantom reads source text only. Macros are never expanded: they are counted by name, and a call-shaped name in a macro's tokens (`f(…)`, `a::f(…)`, or `.m(…)`, nested macros included, `macro_rules!` bodies not) is recorded as a fact with no edge. There is no type inference, so no receiver other than `self` is typed. Phantom never runs cargo, rustc, rust-analyzer, git, a build script, a proc macro, or any other code or command from the indexed repo.
 
 ## Impact
 
@@ -199,7 +202,7 @@ That output, from `fixtures/impact`, is cut to one hit: the depth-2 group is lef
 
 ### What impact does not do
 
-Canon §7.3 describes more than this command does. There is no impact of a diff, no file path as a target, no path between two symbols, no `--edges`, no rank, and no co-change. Only `calls` edges are walked, so receivers other than `self` and trait dispatch are not followed.
+Canon §7.3 describes more than this command does. There is no impact of a diff, no file path as a target, no path between two symbols, no `--edges`, no rank, and no co-change: history never changes what `impact` reports. Only `calls` edges are walked, so receivers other than `self` and trait dispatch are not followed.
 
 ## Show
 
@@ -242,7 +245,7 @@ $ fract show Grid::len --source
 {"ok":true,"data":{"symbol":{"name":"len","qual_name":"crate::shapes::Grid::len","kind":"method","visibility":"private","path":"src/shapes.rs","line":50,"end_line":52,"signature":"fn len(&self) -> usize","doc_summary":null,"is_test":false,"stable_key":"src/shapes.rs#Grid::len#method#0"},"members":{"hits":[],"truncated":false},"callers":{"count":0,"hits":[],"truncated":false},"callees":{"count":0,"hits":[],"truncated":false,"unresolved_calls":0},"macro_args":0,"source":{"status":"ok","start_line":50,"end_line":52,"text":"    fn len(&self) -> usize {\n        N\n    }\n"}},"error":null,"schema":1}
 ```
 
-That output is from `fixtures/detail`. `show` adds no type users, no `impl` list, and no co-change.
+That output is from `fixtures/detail`. `show` adds no type users and no `impl` list. On an index with a co-change scan, `data` also has `cochange`, after `macro_args`: up to 5 partners of the symbol's file, as [`cochange`](#cochange) lists them with its default `--min-lift` of 1.5. Without a scan there is no `cochange` key. `show` also takes `--max-tokens`, as [Budgets](#budgets) describes; under a budget the `cochange` partners are dropped after `source` and before the callees.
 
 ## Rank
 
@@ -297,7 +300,7 @@ Edges inside one file do not count.
 - `hits`: the top `--limit`, best first. Equal scores go by path, then line. A symbol hit is `{name, qual_name, kind, path, line, score}`, where `qual_name` is the name [Calls](#calls) prints; a file hit is `{path, score}`.
 - `truncated`: true when more were ranked than `hits` holds.
 
-A score says how central a node is in the resolved graph, not how important it is. Calls Phantom cannot resolve, trait dispatch, and macro bodies are not in it. There is no co-change or history term: Phantom reads no git history.
+A score says how central a node is in the resolved graph, not how important it is. Calls Phantom cannot resolve, trait dispatch, and macro bodies are not in it. There is no co-change or history term: the history `index` reads on a git root never enters the rank.
 
 ## Map
 
@@ -311,14 +314,14 @@ Each line costs `ceil(bytes / 3.5) + 1` estimated tokens, its newline not counte
 
 - **Order:** files by file rank, best first. With `--focus`, the focus files come first, then the rest by the rank personalised to them. Within a file, symbols go by symbol rank. Equal scores go by path, then line. Tests and modules are left out.
 - **Packing:** the map is a list of units in that order: a file's line with its top symbol, then each of its other symbols, then the next file's line with its top symbol, and so on. In `full` detail a symbol and its doc line are one unit, and in `files` detail each file line is one. The map takes the longest run of units from the start that fits, with room for the header and footer kept back. It stops at the first unit that does not fit and never skips past it, so a larger budget never drops a line a smaller one showed.
-- **Header:** `phantom-fractal map | budget N | used U | rank E`, where `E` is the epoch of the scores used.
-- **File line:** the path, two spaces, and the file's score to 3 significant digits, as `[r 0.203]`.
+- **Header:** `phantom-fractal map | budget N | used U | rank E`, where `E` is the epoch of the scores used. With a [co-change](#co-change) scan, `| head H` follows `phantom-fractal map`, where `H` is the first 7 hex of the scan's HEAD.
+- **File line:** the path, two spaces, and the file's score to 3 significant digits, as `[r 0.203]`. With a scan, a file whose partners include any of lift above 2 adds two spaces, `also-changes: `, and up to 3 of their basenames, joined by `, `, in the order [`cochange`](#cochange) lists them. Those bytes count in packing.
 - **Symbol line:** two spaces, the signature, two spaces, and `:` with the start line. A method's `fn name` is printed `fn Owner::name`. A signature is cut to 100 characters, the last three `...`.
 - **`full`:** adds `    /// ` and the doc summary under each documented symbol. **`files`:** file lines only.
 - **Footer:** `-- omitted: F files, S symbols (raise --budget or use --focus)`, always printed.
 - **ASCII:** every byte outside printable ASCII becomes `?`, so `naïve` prints as `na??ve`.
 
-The same index and arguments always give the same bytes. There is no git head line and no list of files that change together.
+The same index and arguments always give the same bytes. Without a co-change scan the map has no `head` and no `also-changes:`.
 
 `data` holds these keys, in this order: `text` (the map, each line ending in a newline), `used_tokens`, `budget`, `files_shown`, `files_omitted`, `symbols_shown`, `symbols_omitted`, and `rank_epoch`.
 
@@ -341,6 +344,63 @@ app/src/shapes.rs  [r 0.191]
 ```
 
 The header costs 16, each file line 9, the symbol lines 7 to 13, and the footer 19: 132 in all. Packing gets 142, 95% of 150. Keeping back the header and the footer leaves 107, the lines shown take 97, and the next one, `fn Circle::name`, costs 14, so the map stops there.
+
+## Co-change
+
+On a git root, `index` reads the repository's history and stores, for each pair of indexed files, how often they changed in the same commit. `cochange FILE` and the MCP `cochange` tool list a file's partners. `show`, the [map](#what-it-shows), and the `index` envelope report them too.
+
+### What is read
+
+- **Read-only and isolated.** Phantom opens the repository in-process, read-only, with no system, global, or environment git config. It reads objects and refs only and writes nothing in the tree or `.git`. It never runs `git`, a hook, or any other program to do so.
+- **Only a root.** The tree passed to `index` must be the top of a git work tree. A directory inside one, a tree without `.git`, a bare repository, or an unborn HEAD is not mined, and nothing is ever searched for above the tree. Without a scan, `index`, `show`, and `map` print exactly what they print without git.
+- **No people or text.** From each commit Phantom takes the committer time, the tree, and the parent ids. It reads no author, no email, and no commit message, and stores none.
+- **The window.** The walk starts at HEAD and visits every commit reachable from it through all parents, each once, newest first by committer time. It stops after visiting 5,000 commits, merges included in that count, or at the first commit older than 365 days before HEAD's committer time, whichever comes first. `index --cochange-days 1..3650` and `--cochange-commits 1..50000` change the two limits. Any other value is usage, exit 1. There is no config file.
+- **Skipped commits.** A merge commit (two or more parents) is not diffed and adds nothing, but its parents are walked. A commit that changes more than 30 indexed files is skipped as bulk and counted in `skipped_bulk`.
+- **Renames.** Each commit is compared with its one parent. A removed file and an added file are paired as a rename when their contents are at least 50% alike, the best match first. That is Phantom's own estimate, and git's rename detection can differ. Older history counts toward the current path. Only files in the index are kept.
+
+### The scores
+
+- **Decay.** A commit counts `0.5^(age / 90 days)`, its age measured back from HEAD's committer time, so a commit 90 days older than HEAD counts half.
+- **Weights.** In a kept commit with `n` indexed files, each file adds the commit's decay to its own weight, and each pair adds the decay divided by `n − 1` to its `together`.
+- **Lift and confidence.** With `N` the decayed weight of all kept commits, `lift = together × N / (weight of the file × weight of the partner)`. Above 1 means the two change together more often than chance would give. `conf` is `together / weight of the file`: of the file's weighted changes, the share that came with the partner.
+- **Kept pairs.** A pair needs at least 3 commits together and a lift above 1. Each file keeps its 20 best partners, by lift, then `together`, then path, and a pair stays when either end keeps it.
+- **What it is not.** Co-change says which files have changed together, not that one depends on the other. It does not change the [rank](#rank) or [impact](#impact).
+
+### When it is computed
+
+`index` mines only when no scan is stored, or when HEAD or the window differs from the stored scan's. Otherwise it writes nothing. A tree that is no longer a git root has its stored scan cleared on its next `index`.
+
+On a git root, `index`'s `data` ends with `cochange: {head, commits_seen, skipped_bulk, pairs, window: {days, max_commits}}`. `head` is HEAD's full hex id, `commits_seen` the commits the walk visited, and `pairs` the pairs stored.
+
+### `cochange`
+
+`cochange FILE [--min-lift X] [--limit N] [--repo PATH] [--max-tokens N]` lists FILE's partners.
+
+- **Arguments.** FILE is an indexed file, relative to the indexed tree; a leading `./` is allowed. `--min-lift` is a number of at least 0, 1.5 by default. `--limit` is 1 to 100, 20 by default.
+- **Errors.** Any other value is usage, exit 1. A FILE that is not indexed is `not_found`, exit 3, and no index is `no_index`, exit 2.
+- **It never writes.** The same index and arguments always give the same bytes.
+
+`data` holds these keys, in this order:
+
+- `file`: FILE as indexed.
+- `scan`: `{head, window: {days, max_commits}}` of the stored scan, or `null` when there is none. Then there are no partners.
+- `partners`: those with a lift of at least `--min-lift`, by lift, then `together`, both descending, then path. Each is `{path, together, lift, conf, last_time}`, where `last_time` is the last time the two changed together, in unix seconds.
+- `truncated`: true when more partners passed `--min-lift` than `partners` holds.
+
+Take a package of seven files, `src/a.rs` to `src/g.rs`, with this history:
+
+- one commit adds them all;
+- `a` then changes with `b` in 5 commits, with `c` in 4, and with `g` in 3;
+- `d` changes with `e` in 4 commits;
+- `f` changes alone in 6.
+
+The first commit is 60 days before HEAD, and the other 22 follow one a day, the last of them HEAD. After `fract index .`, `fract cochange src/a.rs` prints:
+
+```
+{"ok":true,"data":{"file":"src/a.rs","scan":{"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","window":{"days":365,"max_commits":5000}},"partners":[{"path":"src/b.rs","together":4.409608831523686,"lift":1.653768852502879,"conf":0.390804271509921,"last_time":1748531200},{"path":"src/c.rs","together":3.6674710638456927,"lift":1.6180491217030488,"conf":0.3250318593213367,"last_time":1748876800},{"path":"src/g.rs","together":2.8463629132931247,"lift":1.5602843906097092,"conf":0.2522606487972789,"last_time":1749136000}],"truncated":false},"error":null,"schema":1}
+```
+
+`a`'s partners have lifts near 1.6, so they are listed but none reaches the map's threshold of 2. `d` and `e` only ever change with each other, so the map's line for `src/d.rs` ends `  also-changes: e.rs`.
 
 ## MCP
 
@@ -376,9 +436,10 @@ The server is read-only by default. It offers these tools:
 | `impact` | `symbol`, `repo?`, `depth?` (1 to 5, default 3), `min_confidence?` (above 0 and at most 1, default 0.2), `include_tests?` (default true), `summary?` (default false), `max_tokens?` | `impact` |
 | `top_ranked` | `kind?` (`symbols` or `files`, default `symbols`), `focus?` (an array of at most 100 paths), `limit?` (1 to 100, default 20), `repo?`, `max_tokens?` | `rank` |
 | `repo_map` | `budget` (1 to 100000), `focus?` (an array of at most 100 paths), `detail?` (`files`, `symbols`, or `full`, default `symbols`), `repo?` | `map` |
-| `index_repo` | `path` | `index`, only with `--allow-index` |
+| `cochange` | `file`, `min_lift?` (at least 0, default 1.5), `limit?` (1 to 100, default 20), `repo?`, `max_tokens?` | `cochange` |
+| `index_repo` | `path`, `cochange_days?` (1 to 3650, default 365), `cochange_commits?` (1 to 50000, default 5000) | `index`, only with `--allow-index` |
 
-- **`index_repo`:** `phantom-fractal mcp --allow-index` adds it, and only then is it listed or callable. It writes the database in the data directory, as `index` does, and nothing else.
+- **`index_repo`:** `phantom-fractal mcp --allow-index` adds it, and only then is it listed or callable. It indexes only a root (see [Roots](#roots)), and writes the database in the data directory, as `index` does, and nothing else.
 - **Annotations:** the read tools are annotated `readOnlyHint: true` and `idempotentHint: true`. `index_repo` is annotated `readOnlyHint: false` and `destructiveHint: false`.
 - **Input schemas:** each tool's `inputSchema` sets `additionalProperties: false` and the ranges above. `max_tokens` is an integer from 1 to 100000, and `focus` declares `maxItems: 100`; 101 or more is a `usage` result.
 - **`repo`:** see [Roots](#roots).
@@ -391,13 +452,14 @@ The server is read-only by default. It offers these tools:
 
 ### Budgets
 
-`max_tokens` on a tool, and `--max-tokens N` on `find`, `show`, `callers`, `callees`, `impact`, and `rank`, cap the reply. `repo_map` and `map` keep their own `budget`.
+`max_tokens` on a tool, and `--max-tokens N` on `find`, `show`, `callers`, `callees`, `impact`, `rank`, and `cochange`, cap the reply. `repo_map` and `map` keep their own `budget`.
 
 - **The reply** is the envelope as one compact line, the line the command line prints and the MCP text item carries. It fits when its estimate, `ceil(bytes / 3.5) + 1` as in [The estimate](#the-estimate), is at most 95% of the budget, `floor(0.95 × N)`. The estimate is not a tokenizer, so leave room.
 - **What is dropped:** a reply that does not fit drops entries one at a time, in a fixed order, until it fits:
   - `find`, `callers`, `callees`, and `rank`: `hits`, from the end;
+  - `cochange`: `partners`, from the end;
   - `impact`: the deepest group's hits from the end, then the next group's, then `tests` from the end;
-  - `show`: `source` as a whole, then the callees' hits, the callers' hits, and the members' hits, each from the end.
+  - `show`: `source` as a whole, then the `cochange` partners, the callees' hits, the callers' hits, and the members' hits, each from the end.
 
   The target symbol, the counts, `risk`, `exact`, `reasons`, the groups themselves, and every `truncated` flag stay. `truncated` still says only whether the command's own cap cut the list.
 - **`data.tokens`:** with a budget, `data` ends with `tokens: {max, used, omitted}`. `max` is the budget, `used` is the estimate of the printed line, `tokens` included, and `omitted` counts the entries dropped. Without a budget there is no `tokens` key, and the output is byte for byte what it was.
@@ -478,6 +540,7 @@ This repository may have a Phantom index. Phantom answers questions about Rust c
 - What a change to X reaches: `impact`.
 - What matters most here: `top_ranked`, by symbols or by files, with `focus` for the files you are working in.
 - An overview that fits your context: `repo_map` with a `budget` in tokens. The budget is an estimate, so leave room.
+- What else usually changes with a file: `cochange`, on a git root that was indexed. It is history, not a dependency.
 - On `ambiguous`, pick a candidate and call `show_symbol` with its `stable_key` as `id`.
 - On `no_index`, the repo is not an indexed root of this server: ask the user to run `phantom-fractal index .`, or to start the server with `--root` for that tree.
 - Pass `max_tokens` to cap a long answer; `data.tokens.omitted` says how many entries were dropped to fit.
@@ -516,7 +579,7 @@ The envelope keys come in the order `ok`, `data`, `error`, `schema`. `schema` is
 
 ## Other
 
-`--version` prints `phantom-fractal 0.0.0`. `--help` lists the ten commands with a usage line, and so does a run with no command. `find` matches names only. There is no other command.
+`--version` prints `phantom-fractal 0.0.0`. `--help` lists the eleven commands with a usage line, and so does a run with no command. `find` matches names only. There is no other command.
 
 ## Licence
 

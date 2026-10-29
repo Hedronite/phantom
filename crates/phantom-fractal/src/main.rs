@@ -8,8 +8,10 @@
 //! `show SYMBOL` gives one symbol's detail, members, and a capped look at
 //! its edges, with its source under `--source`. `rank` lists the
 //! best-ranked symbols or files, and `map` packs a ranked repo map into a
-//! token budget. `--max-tokens` fits a read reply to a budget too.
-//! `version` says what this binary is and needs no index. Each prints the
+//! token budget. On a git root `index` also stores the co-change of the
+//! history, and `cochange FILE` lists the files that change with FILE.
+//! `--max-tokens` fits a read reply to a budget too. `version` says what
+//! this binary is and needs no index. Each prints the
 //! JSON envelope from `phantom-fractal-proto`. `mcp` serves the same
 //! operations to an MCP client over stdin and stdout, for the trees named
 //! by `--root` only. There are no other commands.
@@ -28,11 +30,12 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use phantom_fractal_analyze::ImpactOptions;
+use phantom_fractal_git::Window;
 use serde::Serialize;
 
 use crate::ops::{
-    CallsRequest, Failure, FindRequest, ImpactRequest, IndexRequest, MapRequest, RankKind,
-    RankRequest, ShowRequest, Target, VersionRequest,
+    CallsRequest, CochangeRequest, Failure, FindRequest, ImpactRequest, IndexRequest, MapRequest,
+    RankKind, RankRequest, ShowRequest, Target, VersionRequest,
 };
 
 /// Canon exit 1: usage or internal error.
@@ -60,8 +63,20 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Index the Rust files under PATH. The database is written to the data
-    /// directory, never under PATH.
-    Index { path: PathBuf },
+    /// directory, never under PATH. On a git root, also store the co-change
+    /// of its history, read without running git.
+    Index {
+        path: PathBuf,
+        /// Days of history before HEAD's commit the co-change scan reads,
+        /// 1 to 3650.
+        #[arg(long, default_value_t = Window::DEFAULT_DAYS,
+              value_parser = clap::value_parser!(u32).range(1..=i64::from(Window::MAX_DAYS)))]
+        cochange_days: u32,
+        /// Most commits the co-change scan reads, 1 to 50000.
+        #[arg(long, default_value_t = Window::DEFAULT_COMMITS,
+              value_parser = clap::value_parser!(u32).range(1..=i64::from(Window::MAX_COMMITS)))]
+        cochange_commits: u32,
+    },
     /// Find indexed symbols by name.
     Find {
         query: String,
@@ -171,6 +186,27 @@ enum Command {
         #[arg(long, value_parser = max_tokens_range())]
         max_tokens: Option<u64>,
     },
+    /// List the files that tend to change with FILE, from the co-change
+    /// `index` stored on a git root.
+    Cochange {
+        /// An indexed file, relative to the repo.
+        file: String,
+        /// Lowest lift listed, a number at least 0.
+        #[arg(long, default_value_t = ops::cochange::DEFAULT_MIN_LIFT, value_parser = min_lift)]
+        min_lift: f64,
+        /// Most partners returned, 1 to 100.
+        #[arg(long, default_value_t = ops::cochange::DEFAULT_LIMIT,
+              value_parser = clap::value_parser!(u64).range(ops::cochange::LIMIT_MIN..=ops::cochange::LIMIT_MAX))]
+        limit: u64,
+        /// Tree that was indexed. Defaults to the current directory.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Most estimated tokens the reply may cost, 1 to 100000. List
+        /// entries are dropped in a fixed order to fit, and `data.tokens`
+        /// says how many.
+        #[arg(long, value_parser = max_tokens_range())]
+        max_tokens: Option<u64>,
+    },
     /// Pack a ranked map of the repo into a budget of estimated tokens.
     Map {
         /// The most estimated tokens the map may cost, 1 to 100000.
@@ -210,7 +246,17 @@ fn main() -> ExitCode {
         Err(err) => return clap_exit(&err),
     };
     match cli.command {
-        Command::Index { path } => emit(ops::index(&IndexRequest { path })),
+        Command::Index {
+            path,
+            cochange_days,
+            cochange_commits,
+        } => emit(ops::index(&IndexRequest {
+            path,
+            window: Window {
+                days: cochange_days,
+                max_commits: cochange_commits,
+            },
+        })),
         Command::Find {
             query,
             repo,
@@ -294,6 +340,19 @@ fn main() -> ExitCode {
             repo,
             max_tokens,
         })),
+        Command::Cochange {
+            file,
+            min_lift,
+            limit,
+            repo,
+            max_tokens,
+        } => emit(ops::cochange(&CochangeRequest {
+            file,
+            min_lift,
+            limit,
+            repo,
+            max_tokens,
+        })),
         Command::Map {
             budget,
             focus,
@@ -314,6 +373,18 @@ fn main() -> ExitCode {
 /// `--max-tokens`: an integer from 1 to 100000.
 fn max_tokens_range() -> clap::builder::RangedU64ValueParser<u64> {
     clap::value_parser!(u64).range(ops::budget::MAX_TOKENS_MIN..=ops::budget::MAX_TOKENS_MAX)
+}
+
+/// `--min-lift`: a finite number, at least 0.
+fn min_lift(text: &str) -> Result<f64, String> {
+    let value: f64 = text
+        .parse()
+        .map_err(|_| format!("{text} is not a number"))?;
+    if ops::cochange::min_lift_in_range(value) {
+        Ok(value)
+    } else {
+        Err(format!("{text} is not a finite number at least 0"))
+    }
 }
 
 /// `--min-confidence`: a number above 0 and at most 1. NaN is refused.

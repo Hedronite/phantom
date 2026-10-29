@@ -60,9 +60,11 @@ pub(crate) struct History {
     pub commits: Vec<Commit>,
 }
 
-/// The window of `root`'s history, or `None` when `root` is not the top
-/// of a git work tree or HEAD is unborn.
-pub(crate) fn read(root: &Path, window: &Window) -> Result<Option<History>, GitError> {
+/// The repository at `root`, opened isolated, and its HEAD commit, or
+/// `None` when `root` is not the top of a git work tree or HEAD is
+/// unborn. [`read`] and [`crate::head`] both open through here, so they
+/// answer `None` for exactly the same roots.
+pub(crate) fn open(root: &Path) -> Result<Option<(gix::Repository, ObjectId)>, GitError> {
     // Never search upward: the root itself must hold `.git`.
     if !root.join(".git").exists() {
         return Ok(None);
@@ -84,6 +86,15 @@ pub(crate) fn read(root: &Path, window: &Window) -> Result<Option<History>, GitE
         return Ok(None);
     }
     let head = repo.head_id().map_err(GitError::new)?.detach();
+    Ok(Some((repo, head)))
+}
+
+/// The window of `root`'s history, or `None` when `root` is not the top
+/// of a git work tree or HEAD is unborn.
+pub(crate) fn read(root: &Path, window: &Window) -> Result<Option<History>, GitError> {
+    let Some((repo, head)) = open(root)? else {
+        return Ok(None);
+    };
     let head_time = repo
         .find_commit(head)
         .map_err(GitError::new)?

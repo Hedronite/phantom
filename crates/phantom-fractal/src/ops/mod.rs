@@ -9,6 +9,7 @@
 
 pub(crate) mod budget;
 pub(crate) mod calls;
+pub(crate) mod cochange;
 pub(crate) mod find;
 pub(crate) mod impact;
 pub(crate) mod index;
@@ -27,6 +28,7 @@ use phantom_fractal_store::{Store, StoreError, index_database_path};
 use serde::Serialize;
 
 pub(crate) use calls::{CallsRequest, callees, callers};
+pub(crate) use cochange::{CochangeRequest, cochange};
 pub(crate) use find::{FindRequest, find};
 pub(crate) use impact::{ImpactRequest, impact};
 pub(crate) use index::{IndexRequest, index};

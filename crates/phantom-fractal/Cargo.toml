@@ -21,6 +21,7 @@ blake3 = "1"
 clap = { version = "4.6", features = ["derive"] }
 phantom-fractal-analyze = { path = "../phantom-fractal-analyze", version = "0.0.0" }
 phantom-fractal-extract = { path = "../phantom-fractal-extract", version = "0.0.0" }
+phantom-fractal-git = { path = "../phantom-fractal-git", version = "0.0.0" }
 phantom-fractal-lang.workspace = true
 phantom-fractal-lang-rust = { path = "../phantom-fractal-lang-rust", version = "0.0.0" }
 phantom-fractal-proto = { path = "../phantom-fractal-proto", version = "0.0.0" }
