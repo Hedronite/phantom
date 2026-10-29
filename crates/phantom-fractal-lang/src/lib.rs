@@ -13,8 +13,8 @@ use std::error::Error;
 use std::fmt;
 
 pub use resolve::{
-    CallRef, Dep, Edge, Id, Module, Reason, ResolveCounts, ResolveInput, Symbol, SymbolKind,
-    Target, TargetKind, UseBinding,
+    CallRef, Dep, Edge, Graph, Id, Link, LinkKind, LinkReason, Module, Node, Reason, ResolveCounts,
+    ResolveInput, Symbol, SymbolKind, Target, TargetKind, UseBinding,
 };
 
 /// The most chars an [`Item::signature`] keeps before `…`.

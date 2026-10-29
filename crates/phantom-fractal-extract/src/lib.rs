@@ -25,7 +25,7 @@ use phantom_fractal_store::{Store, StoreError};
 use fingerprint::{Unread, read_manifests, stamp};
 
 pub use read::{Source, read_source};
-pub use rebuild::{stored_graph, stored_method_owners};
+pub use rebuild::{stored_graph, stored_links, stored_method_owners};
 pub use walk::{Candidate, MAX_FILE_BYTES, SkipReason, Skipped, Walk, is_secret, walk};
 
 /// Version of the extraction this walker writes, stored after each graph
@@ -34,8 +34,9 @@ pub use walk::{Candidate, MAX_FILE_BYTES, SkipReason, Skipped, Walk, is_secret, 
 /// 2 adds call references, methods, scopes, and edges; version 3 adds the
 /// `self-method` and `self-assoc` edges; version 4 adds `crate-path` edges;
 /// version 5 adds `macro_arg` refs and test marking; version 6 adds the
-/// end line, signature, and doc summary of items and methods.
-pub const EXTRACTOR_VERSION: u32 = 6;
+/// end line, signature, and doc summary of items and methods; version 7
+/// adds the `import` and `impl` links.
+pub const EXTRACTOR_VERSION: u32 = 7;
 
 /// What one [`index`] pass did, by repo-relative path, in walk order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

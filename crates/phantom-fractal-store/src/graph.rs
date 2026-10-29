@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use phantom_fractal_lang::{
-    CallRef, Edge, Id, Module, Reason, ResolveInput, Symbol, SymbolKind, Target, TargetKind,
+    CallRef, Edge, Id, Link, Module, Reason, ResolveInput, Symbol, SymbolKind, Target, TargetKind,
     UseBinding,
 };
 
@@ -323,13 +323,15 @@ impl crate::Store {
         {
             let mut statement = self.conn.prepare(
                 "SELECT r.text, r.alias, r.glob, r.scope, f.path,
-                        (SELECT m.id FROM modules m WHERE m.file_id = f.id AND m.scope = '')
+                        (SELECT m.id FROM modules m WHERE m.file_id = f.id AND m.scope = ''),
+                        r.id
                  FROM refs r JOIN files f ON f.id = r.file_id
                  WHERE r.kind = 'use' ORDER BY r.id",
             )?;
             let mut rows = statement.query([])?;
             while let Some(row) = rows.next()? {
                 uses.push(UseBinding {
+                    id: row.get(6)?,
                     module: row.get(5)?,
                     scope: row.get(3)?,
                     file: row.get(4)?,
@@ -393,6 +395,13 @@ impl crate::Store {
             )?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    /// G0a compile shim (SPEC-w7 G0a): takes the `import` and `impl` links
+    /// of one index pass and writes nothing yet. G0b stores them in `edges`
+    /// once every call-edge read filters `kind = 'call'`.
+    pub fn write_links(&mut self, _links: &[Link]) -> Result<(), StoreError> {
         Ok(())
     }
 
