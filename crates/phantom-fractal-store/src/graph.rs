@@ -439,12 +439,16 @@ impl crate::Store {
     /// Stores the resolved method-to-type pairs of one index pass: each
     /// pair is `(method_id, owner_id)`, the resolver's attribution of a
     /// method to its `impl` self type. One bound update per pair in one
-    /// transaction; the store never clears a `parent_id`, so a pass
-    /// without resolved pairs leaves the previous graph alone. `members`
-    /// reads it back (SPEC-w6 G0b, PM ruling: members come from the
-    /// resolver).
+    /// transaction, and clears every method row first, so a rebuild is
+    /// exact: a pass with no resolved pairs leaves the methods
+    /// unattributed. `members` reads the result back (SPEC-w6 G0b,
+    /// PM ruling: members come from the resolver).
     pub fn write_method_owners(&mut self, pairs: &[(Id, Id)]) -> Result<(), StoreError> {
         let tx = self.conn.transaction()?;
+        tx.execute(
+            "UPDATE symbols SET parent_id = NULL WHERE kind = 'method'",
+            [],
+        )?;
         for (method_id, owner_id) in pairs {
             tx.execute(
                 "UPDATE symbols SET parent_id = ?1 WHERE id = ?2",
@@ -578,15 +582,5 @@ impl crate::Store {
             [id],
             |row| row.get(0),
         )?)
-    }
-}
-
-impl crate::Store {
-    /// Stores each `(method, type)` owner pair from the resolver.
-    ///
-    /// G0 compile shim: it stores nothing yet. The store writes and reads
-    /// the pairs in G0b.
-    pub fn write_method_owners(&mut self, _owners: &[(Id, Id)]) -> Result<(), StoreError> {
-        Ok(())
     }
 }

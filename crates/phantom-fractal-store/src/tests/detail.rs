@@ -281,6 +281,15 @@ fn write_method_owners_resolves_two_same_named_types() {
         .write_method_owners(&[(method_a, thing_a), (method_b, thing_b)])
         .expect("owners");
     let members_a = store.members(thing_a).expect("members a");
+    // A pass with no resolved pairs clears the previous attribution, so
+    // a rebuild is exact.
+    store.write_method_owners(&[]).expect("clearing pass");
+    assert!(store.members(thing_a).expect("clear a").is_empty());
+    assert!(store.members(thing_b).expect("clear b").is_empty());
+    // The resolution pairs land again at the next rebuild.
+    store
+        .write_method_owners(&[(method_a, thing_a), (method_b, thing_b)])
+        .expect("owners again");
     assert_eq!(members_a.len(), 1, "{members_a:?}");
     assert_eq!(members_a[0].id, method_a);
     assert_eq!(members_a[0].name, "a");

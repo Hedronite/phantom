@@ -64,11 +64,12 @@ impl crate::Store {
         }
     }
 
-    /// For a struct, enum or trait, the methods the index pass resolved to
+    /// For a struct or enum, the methods the index pass resolved to
     /// that type: `write_method_owners` stored each resolved method's
     /// `parent_id` as the type's symbol id, and this read follows it.
-    /// Ordered by path, then line. Empty for any other kind, and for any
-    /// symbol the pass has not resolved.
+    /// Ordered by path, then line. Empty for every other kind — trait
+    /// owners get no pairs by the resolver rule, so a trait's members are
+    /// empty too — and for any symbol the pass has not resolved.
     pub fn members(&self, id: i64) -> Result<Vec<SymbolDetail>, StoreError> {
         let mut statement = self.conn.prepare(
             "SELECT m.id, m.stable_key, m.kind, m.name, m.qual_name, m.visibility,
@@ -77,7 +78,7 @@ impl crate::Store {
              JOIN symbols m ON m.parent_id = s.id AND m.kind = 'method'
              JOIN files f ON f.id = m.file_id
              WHERE s.id = ?1
-               AND s.kind IN ('struct', 'enum', 'trait')
+               AND s.kind IN ('struct', 'enum')
              ORDER BY f.path, m.start_line, m.id",
         )?;
         let mut rows = statement.query([id])?;
