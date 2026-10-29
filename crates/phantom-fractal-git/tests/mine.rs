@@ -61,7 +61,10 @@ fn counts_decay_and_lift_match_a_hand_count() {
         Some(repo.rev("main~4").as_str())
     );
     assert_eq!((scan.commits_seen, scan.skipped_bulk), (5, 0));
-    assert_eq!(scan.window_json, r#"{"days":365,"max_commits":5000}"#);
+    assert_eq!(
+        scan.window_json,
+        r#"{"days":365,"max_commits":5000,"walk":"all-parents"}"#
+    );
 
     // Decay 0.25 at 180 days, 0.5 at 90, 1 at 0.
     let files: Vec<(&str, f64, i64)> = scan
@@ -179,23 +182,136 @@ fn a_bulk_commit_is_skipped_and_counted_and_thirty_files_is_not_bulk() {
     assert!(!scan.files.iter().any(|file| file.path == "f30.rs"));
 }
 
-#[test]
-fn merges_are_skipped_and_only_the_first_parent_chain_is_walked() {
+/// A branch of three x/y commits and three main m commits, interleaved
+/// in time, then merged at HEAD: walk order merge, m4, f5, m6, f7, m8,
+/// f9, first (days back).
+fn both(n: &str) -> [Op<'_>; 2] {
+    [Op::Write("x.rs", n), Op::Write("y.rs", n)]
+}
+
+fn branches_script() -> Script {
     let mut script = Script::default();
-    let first = script.commit("main", HEAD - 2 * DAY, &[Op::Write("a.rs", "1\n")]);
-    let side = script.branch("side", first, HEAD - DAY, &[Op::Write("s.rs", "1\n")]);
-    script.commit("main", HEAD - DAY, &[Op::Write("a.rs", "2\n")]);
-    script.merge("main", side, HEAD, &[Op::Write("s.rs", "1\n")]);
-    let repo = Repo::new("merge", &script);
-    let scan = scan(&repo, &Window::default(), &["a.rs", "s.rs"]);
-    // The merge and the two main commits; the side commit is not walked.
-    assert_eq!(scan.commits_seen, 3);
+    let first = script.commit("main", HEAD - 10 * DAY, &[Op::Write("a.rs", "0\n")]);
+    script.branch("side", first, HEAD - 9 * DAY, &both("1\n"));
+    script.commit("main", HEAD - 8 * DAY, &[Op::Write("m.rs", "1\n")]);
+    script.commit("side", HEAD - 7 * DAY, &both("2\n"));
+    script.commit("main", HEAD - 6 * DAY, &[Op::Write("m.rs", "2\n")]);
+    let tip = script.commit("side", HEAD - 5 * DAY, &both("3\n"));
+    script.commit("main", HEAD - 4 * DAY, &[Op::Write("m.rs", "3\n")]);
+    script.merge("main", tip, HEAD, &both("3\n"));
+    script
+}
+
+const BRANCH_PATHS: [&str; 4] = ["a.rs", "m.rs", "x.rs", "y.rs"];
+
+#[test]
+fn every_parent_is_walked_and_a_merge_adds_no_weight() {
+    let repo = Repo::new("branches", &branches_script());
+    let scan = scan(&repo, &Window::default(), &BRANCH_PATHS);
+    // All eight commits, the merge included.
+    assert_eq!(scan.commits_seen, 8);
     assert_eq!(
         scan.oldest_oid.as_deref(),
-        Some(repo.rev("main~2").as_str())
+        Some(repo.rev("main~4").as_str())
     );
+    let branch = decay(5.0) + decay(7.0) + decay(9.0);
+    let files: Vec<(&str, f64)> = scan
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file.commits))
+        .collect();
+    assert_eq!(
+        files,
+        vec![
+            ("a.rs", decay(10.0)),
+            ("m.rs", decay(4.0) + decay(6.0) + decay(8.0)),
+            ("x.rs", branch),
+            ("y.rs", branch),
+        ]
+    );
+    // The branch commits make the pair; the merge, which also changes x
+    // and y against its first parent, adds nothing.
+    assert_eq!(scan.pairs.len(), 1);
+    let pair = &scan.pairs[0];
+    assert_eq!((pair.a.as_str(), pair.b.as_str()), ("x.rs", "y.rs"));
+    assert_eq!(pair.together, branch);
+    assert_eq!(pair.last_oid, repo.rev("side"));
+    let total =
+        decay(4.0) + decay(5.0) + decay(6.0) + decay(7.0) + decay(8.0) + decay(9.0) + decay(10.0);
+    assert!((pair.lift - total / branch).abs() < 1e-12, "{}", pair.lift);
+}
+
+#[test]
+fn max_commits_can_cut_a_branch_midway() {
+    let repo = Repo::new("branches-cut", &branches_script());
+    // merge, m4, f5, m6, f7: two of the branch's three commits.
+    let scan = scan(
+        &repo,
+        &Window {
+            days: 365,
+            max_commits: 5,
+        },
+        &BRANCH_PATHS,
+    );
+    assert_eq!(scan.commits_seen, 5);
+    assert_eq!(
+        scan.oldest_oid.as_deref(),
+        Some(repo.rev("side~1").as_str())
+    );
+    let files: Vec<(&str, f64)> = scan
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file.commits))
+        .collect();
+    assert_eq!(
+        files,
+        vec![
+            ("m.rs", decay(4.0) + decay(6.0)),
+            ("x.rs", decay(5.0) + decay(7.0)),
+            ("y.rs", decay(5.0) + decay(7.0)),
+        ]
+    );
+    // Two shared commits are too few for a pair.
+    assert!(scan.pairs.is_empty());
+    // The days cut works across branches too: 6 days keeps merge, m4,
+    // f5 and m6.
+    let scan = scan_days(&repo, 6);
+    assert_eq!(scan.commits_seen, 4);
+}
+
+#[test]
+fn commits_at_the_same_time_are_walked_by_the_smaller_oid_first() {
+    let mut script = Script::default();
+    let first = script.commit("main", HEAD - 2 * DAY, &[Op::Write("a.rs", "0\n")]);
+    let tip = script.branch("side", first, HEAD - DAY, &[Op::Write("x.rs", "1\n")]);
+    script.commit("main", HEAD - DAY, &[Op::Write("m.rs", "1\n")]);
+    script.merge("main", tip, HEAD, &[Op::Write("x.rs", "1\n")]);
+    let repo = Repo::new("ties", &script);
+    // The merge, then one of the two commits made at the same time.
+    let scan = scan(
+        &repo,
+        &Window {
+            days: 365,
+            max_commits: 2,
+        },
+        &["a.rs", "m.rs", "x.rs"],
+    );
+    let (side, main) = (repo.rev("side"), repo.rev("main~1"));
+    let first = if side < main { "x.rs" } else { "m.rs" };
     let files: Vec<&str> = scan.files.iter().map(|file| file.path.as_str()).collect();
-    assert_eq!(files, vec!["a.rs"]);
+    assert_eq!(files, vec![first]);
+    assert_eq!(scan.oldest_oid, Some(side.min(main)));
+}
+
+fn scan_days(repo: &Repo, days: u32) -> Scan {
+    scan(
+        repo,
+        &Window {
+            days,
+            max_commits: 5_000,
+        },
+        &BRANCH_PATHS,
+    )
 }
 
 #[test]
@@ -219,7 +335,7 @@ fn the_window_cuts_by_days_inclusively_and_by_count() {
         (
             2,
             1.0 + decay(10.0),
-            r#"{"days":15,"max_commits":5000}"#.to_owned()
+            r#"{"days":15,"max_commits":5000,"walk":"all-parents"}"#.to_owned()
         )
     );
     // A commit exactly `days` older than HEAD is in.
@@ -370,7 +486,7 @@ fn the_window_serializes_canonically_and_checks_its_ranges() {
     );
     assert_eq!(
         Window::default().to_json(),
-        r#"{"days":365,"max_commits":5000}"#
+        r#"{"days":365,"max_commits":5000,"walk":"all-parents"}"#
     );
     assert!(
         Window {

@@ -1,11 +1,12 @@
 //! Read-only git co-change mining (SPEC-w8 G1c, canon §7.2).
 //!
 //! [`mine`] opens a root's repository isolated (no system, global or
-//! environment config, no includes, no `git` binary), walks the
-//! first-parent chain of HEAD inside a [`Window`], diffs each commit's
-//! tree against its first parent's, follows renames to current paths,
-//! and scores every pair of indexed files that changed together. The
-//! result is the store's [`Scan`], ready for `write_cochange`.
+//! environment config, no includes, no `git` binary), walks every commit
+//! reachable from HEAD through all parents inside a [`Window`], diffs
+//! each non-merge commit's tree against its parent's, follows renames to
+//! current paths, and scores every pair of indexed files that changed
+//! together. The result is the store's [`Scan`], ready for
+//! `write_cochange`.
 //!
 //! It only reads objects and refs. It never writes to the tree or `.git`,
 //! never searches upward from the root, spawns no process, and reads no
@@ -30,9 +31,12 @@ pub use phantom_fractal_store::CochangeScan as Scan;
 pub use rename::{MIN_SIMILARITY_PERCENT, similarity};
 pub use score::{BULK_FILES, HALF_LIFE_DAYS, MIN_TOGETHER, TOP_PARTNERS, decay};
 
-/// How much history [`mine`] reads (D4): the first-parent chain of HEAD,
-/// newest first, stopping at `max_commits` commits or at the first commit
-/// older than HEAD's committer time minus `days`, whichever comes first.
+/// How much history [`mine`] reads (D4, as amended: "all commits, skip
+/// merges"): every commit reachable from HEAD through all parents, each
+/// once, newest first by committer time with ties by oid. The walk stops
+/// once it has visited `max_commits` commits, merges included, or when the
+/// newest unvisited commit is older than HEAD's committer time minus
+/// `days`, whichever comes first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Window {
     /// 1 to [`Window::MAX_DAYS`]; the caller checks the range.
@@ -53,10 +57,11 @@ impl Window {
             && (1..=Self::MAX_COMMITS).contains(&self.max_commits)
     }
 
-    /// The canonical `window_json`: `{"days":D,"max_commits":C}`.
+    /// The canonical `window_json`:
+    /// `{"days":D,"max_commits":C,"walk":"all-parents"}`.
     pub fn to_json(&self) -> String {
         format!(
-            "{{\"days\":{},\"max_commits\":{}}}",
+            "{{\"days\":{},\"max_commits\":{},\"walk\":\"all-parents\"}}",
             self.days, self.max_commits
         )
     }

@@ -1,9 +1,10 @@
 //! Rename aliases, weights, filters and the top-20 cut (D5, canon §7.2).
 //!
-//! Commits are read newest first. Each path a commit names is mapped to
-//! the file it is now through the renames seen so far, so older history
-//! counts toward the current path. Merge commits and bulk commits still
-//! move the aliases but add no weight.
+//! Commits are read in walk order, newest first. Each path a commit names
+//! is mapped to the file it is now through the renames seen so far, so
+//! older history counts toward the current path. Bulk commits still move
+//! the aliases but add no weight. Merge commits are not diffed and add no
+//! weight; the branch commits they join are walked on their own.
 //!
 //! For a kept commit with `n` indexed files, `decay = 0.5^(age_days / 90)`
 //! with `age_days` measured back from HEAD's committer time (a commit

@@ -1,4 +1,4 @@
-//! The first-parent walk and the per-commit tree diffs, through gix.
+//! The all-parents walk and the per-commit tree diffs, through gix.
 //!
 //! Every gix call Phantom makes is in this file, and each is on the G1a
 //! read-only allowlist (the G1a review, item 3):
@@ -6,12 +6,15 @@
 //! - A1 `gix::open_opts(root, Options::isolated())`
 //! - A2 `Repository::workdir`, `Repository::object_hash`
 //! - A3 `Repository::head` (`Head::is_unborn`), `Repository::head_id`
-//! - A4 `Repository::find_commit`, `Commit::time`, `Commit::parent_ids`,
+//! - A4 `Repository::find_commit`, `Commit::time`, `Commit::parent_ids`
+//!   (over all parents, per the D4/D5 amendment),
 //!   `Commit::tree_id`
 //! - A5 `Repository::find_tree`, `TreeRefIter::from_bytes`
 //! - A6 `gix::diff::tree` with `State` and `Recorder`
 //! - A7 `Repository::find_blob`
 
+use std::cmp::Reverse;
+use std::collections::{BTreeSet, BinaryHeap};
 use std::path::Path;
 
 use gix::ObjectId;
@@ -25,7 +28,7 @@ use crate::{GitError, Window};
 /// Seconds in a day.
 pub(crate) const DAY: i64 = 86_400;
 
-/// What changed in one commit against its first parent, in the commit's
+/// What changed in one non-merge commit against its parent, in the commit's
 /// own path names. Only blobs (regular or executable files) appear.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Change {
@@ -41,13 +44,14 @@ pub(crate) struct Commit {
     pub oid: String,
     /// Committer time, unix seconds.
     pub time: i64,
-    /// More than one parent. Its changes still move rename aliases, but
-    /// it adds no weight.
+    /// More than one parent: not diffed, so `changes` is empty, and it
+    /// adds no weight.
     pub merge: bool,
     pub changes: Vec<Change>,
 }
 
-/// The window's commits, newest first.
+/// The window's commits in walk order: newest first by committer time,
+/// ties by oid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct History {
     pub head: String,
@@ -80,7 +84,6 @@ pub(crate) fn read(root: &Path, window: &Window) -> Result<Option<History>, GitE
         return Ok(None);
     }
     let head = repo.head_id().map_err(GitError::new)?.detach();
-    let kind = repo.object_hash();
     let head_time = repo
         .find_commit(head)
         .map_err(GitError::new)?
@@ -89,57 +92,48 @@ pub(crate) fn read(root: &Path, window: &Window) -> Result<Option<History>, GitE
         .seconds;
     let floor = head_time.saturating_sub(i64::from(window.days) * DAY);
 
+    // The walk (the D4/D5 amendment): every commit reachable from HEAD
+    // through all parents, each once, newest first by committer time, ties
+    // by the smaller oid.
+    let mut queue: BinaryHeap<(i64, Reverse<ObjectId>)> = BinaryHeap::new();
+    let mut queued: BTreeSet<ObjectId> = BTreeSet::new();
+    queue.push((head_time, Reverse(head)));
+    queued.insert(head);
     let mut state = State::default();
     let mut commits = Vec::new();
-    let mut next = Some(head);
-    while let Some(id) = next {
-        if commits.len() >= window.max_commits as usize {
+    while let Some((time, Reverse(id))) = queue.pop() {
+        if commits.len() >= window.max_commits as usize || time < floor {
             break;
         }
         let commit = repo.find_commit(id).map_err(GitError::new)?;
-        let time = commit.time().map_err(GitError::new)?.seconds;
-        if time < floor {
-            break;
-        }
         let parents: Vec<ObjectId> = commit.parent_ids().map(|id| id.detach()).collect();
-        next = parents.first().copied();
-        let tree = repo
-            .find_tree(commit.tree_id().map_err(GitError::new)?)
-            .map_err(GitError::new)?;
-        let base = match parents.first() {
+        for parent in &parents {
+            // A parent missing from the object store (a shallow boundary)
+            // is not walked.
+            if queued.insert(*parent)
+                && let Ok(found) = repo.find_commit(*parent)
+            {
+                queue.push((
+                    found.time().map_err(GitError::new)?.seconds,
+                    Reverse(*parent),
+                ));
+            }
+        }
+        let merge = parents.len() > 1;
+        let changes = match parents.first() {
+            // A merge is not diffed; its parents are walked instead.
+            _ if merge => Vec::new(),
             Some(parent) => match repo.find_commit(*parent) {
-                Ok(parent) => Some(
-                    repo.find_tree(parent.tree_id().map_err(GitError::new)?)
-                        .map_err(GitError::new)?,
-                ),
-                // A shallow boundary: the parent is not in the object
-                // store. The commit is seen, but its diff is unknown.
-                Err(_) => {
-                    commits.push(Commit {
-                        oid: id.to_string(),
-                        time,
-                        merge: parents.len() > 1,
-                        changes: Vec::new(),
-                    });
-                    break;
-                }
+                Ok(parent) => diff(&repo, &mut state, &commit, Some(&parent))?,
+                // The parent is not in the object store: seen, not diffed.
+                Err(_) => Vec::new(),
             },
-            None => None,
+            None => diff(&repo, &mut state, &commit, None)?,
         };
-        let lhs = TreeRefIter::from_bytes(base.as_ref().map_or(&[][..], |t| &t.data), kind);
-        let rhs = TreeRefIter::from_bytes(&tree.data, kind);
-        let mut recorder = Recorder::default();
-        gix::diff::tree(lhs, rhs, &mut state, &repo.objects, &mut recorder)
-            .map_err(GitError::new)?;
-        let changes = changes(recorder.records, |oid| {
-            repo.find_blob(*oid)
-                .ok()
-                .map(|mut blob| std::mem::take(&mut blob.data))
-        });
         commits.push(Commit {
             oid: id.to_string(),
             time,
-            merge: parents.len() > 1,
+            merge,
             changes,
         });
     }
@@ -147,6 +141,36 @@ pub(crate) fn read(root: &Path, window: &Window) -> Result<Option<History>, GitE
         head: head.to_string(),
         head_time,
         commits,
+    }))
+}
+
+/// The changes of `commit` against `parent`, or against the empty tree
+/// for a root commit.
+fn diff(
+    repo: &gix::Repository,
+    state: &mut State,
+    commit: &gix::Commit<'_>,
+    parent: Option<&gix::Commit<'_>>,
+) -> Result<Vec<Change>, GitError> {
+    let kind = repo.object_hash();
+    let tree = repo
+        .find_tree(commit.tree_id().map_err(GitError::new)?)
+        .map_err(GitError::new)?;
+    let base = match parent {
+        Some(parent) => Some(
+            repo.find_tree(parent.tree_id().map_err(GitError::new)?)
+                .map_err(GitError::new)?,
+        ),
+        None => None,
+    };
+    let lhs = TreeRefIter::from_bytes(base.as_ref().map_or(&[][..], |t| &t.data), kind);
+    let rhs = TreeRefIter::from_bytes(&tree.data, kind);
+    let mut recorder = Recorder::default();
+    gix::diff::tree(lhs, rhs, state, &repo.objects, &mut recorder).map_err(GitError::new)?;
+    Ok(changes(recorder.records, |oid| {
+        repo.find_blob(*oid)
+            .ok()
+            .map(|mut blob| std::mem::take(&mut blob.data))
     }))
 }
 
