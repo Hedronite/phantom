@@ -1,5 +1,5 @@
 //! The tools: their definitions, their argument checks, and the
-//! [`crate::ops`] call behind each one (SPEC-w6 G2b).
+//! [`crate::ops`] call behind each one (SPEC-w6 G2b, SPEC-w7 G3b).
 //!
 //! A tool never does an operation's work itself. It turns its arguments
 //! into the request the command line builds for the same flags, calls the
@@ -12,8 +12,11 @@ use phantom_fractal_proto::ErrorKind;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
+use crate::ops::map::{BUDGET_MAX, BUDGET_MIN};
+use crate::ops::rank::{DEFAULT_LIMIT, LIMIT_MAX, LIMIT_MIN};
 use crate::ops::{
-    self, CallsRequest, Failure, FindRequest, ImpactRequest, IndexRequest, ShowRequest, Target,
+    self, CallsRequest, Failure, FindRequest, ImpactRequest, IndexRequest, MapRequest, RankKind,
+    RankRequest, ShowRequest, Target,
 };
 
 /// One tool call's envelope line and whether it reports a failure.
@@ -30,6 +33,8 @@ const REPO: &str = "The indexed tree. Defaults to the server's working directory
 
 const SYMBOL: &str = "A bare name such as `parse`, or a qualified one such as `config::parse` or \
     `Config::load`.";
+
+const FOCUS: &str = "Indexed files, each relative to the repo, such as `src/lib.rs`.";
 
 /// The tool definitions `tools/list` returns. `index_repo` is listed only
 /// when `allow_index` is set.
@@ -139,6 +144,68 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
             ),
             "annotations": read,
         }),
+        json!({
+            "name": "top_ranked",
+            "description": "List the best-ranked symbols or files of the index, by PageRank over \
+                its calls, trait impls and imports, with each score. With `focus`, the rank is \
+                personalised to those files.",
+            "inputSchema": schema(
+                json!({
+                    "kind": {
+                        "type": "string",
+                        "enum": ["symbols", "files"],
+                        "default": "symbols",
+                        "description": "Rank symbols or files.",
+                    },
+                    "focus": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": FOCUS,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": LIMIT_MIN,
+                        "maximum": LIMIT_MAX,
+                        "default": DEFAULT_LIMIT,
+                        "description": "The most hits returned.",
+                    },
+                    "repo": { "type": "string", "description": REPO },
+                }),
+                &[],
+            ),
+            "annotations": read,
+        }),
+        json!({
+            "name": "repo_map",
+            "description": "A ranked map of the repo: files best first, each with its \
+                best-ranked symbols' signatures and lines, packed so its estimated tokens never \
+                exceed `budget`. With `focus`, those files come first.",
+            "inputSchema": schema(
+                json!({
+                    "budget": {
+                        "type": "integer",
+                        "minimum": BUDGET_MIN,
+                        "maximum": BUDGET_MAX,
+                        "description": "The most estimated tokens the map may cost.",
+                    },
+                    "focus": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": FOCUS,
+                    },
+                    "detail": {
+                        "type": "string",
+                        "enum": ["files", "symbols", "full"],
+                        "default": "symbols",
+                        "description": "File lines only, file and symbol lines, or symbol \
+                            lines with doc lines.",
+                    },
+                    "repo": { "type": "string", "description": REPO },
+                }),
+                &["budget"],
+            ),
+            "annotations": read,
+        }),
     ];
     if allow_index {
         tools.push(json!({
@@ -184,6 +251,8 @@ pub(crate) fn call(
         "callers" => calls(arguments, ops::callers),
         "callees" => calls(arguments, ops::callees),
         "impact" => impact(arguments),
+        "top_ranked" => run(rank_request(arguments), ops::rank),
+        "repo_map" => run(map_request(arguments), ops::map),
         "index_repo" if allow_index => index_repo(arguments),
         _ => return None,
     };
@@ -265,6 +334,42 @@ fn impact_request(arguments: &Map<String, Value>) -> Result<ImpactRequest, Failu
     })
 }
 
+fn rank_request(arguments: &Map<String, Value>) -> Result<RankRequest, Failure> {
+    let args = Args::new(arguments, &["kind", "focus", "limit", "repo"])?;
+    let kind = match args.string("kind")? {
+        None => RankKind::Symbols,
+        Some(text) => {
+            RankKind::parse(&text).ok_or_else(|| usage("kind must be symbols or files"))?
+        }
+    };
+    Ok(RankRequest {
+        kind,
+        focus: args.strings("focus")?,
+        limit: args
+            .integer("limit", LIMIT_MIN, LIMIT_MAX)?
+            .unwrap_or(DEFAULT_LIMIT),
+        repo: args.repo()?,
+    })
+}
+
+fn map_request(arguments: &Map<String, Value>) -> Result<MapRequest, Failure> {
+    let args = Args::new(arguments, &["budget", "focus", "detail", "repo"])?;
+    let detail = match args.string("detail")? {
+        None => Default::default(),
+        Some(text) => {
+            ops::map::detail(&text).ok_or_else(|| usage("detail must be files, symbols or full"))?
+        }
+    };
+    Ok(MapRequest {
+        budget: args
+            .integer("budget", BUDGET_MIN, BUDGET_MAX)?
+            .ok_or_else(|| usage("budget is required"))?,
+        focus: args.strings("focus")?,
+        detail,
+        repo: args.repo()?,
+    })
+}
+
 fn index_repo(arguments: &Map<String, Value>) -> Result<Outcome, ()> {
     run(index_request(arguments), ops::index)
 }
@@ -333,6 +438,42 @@ impl<'a> Args<'a> {
             None => Ok(None),
             Some(Value::Bool(value)) => Ok(Some(*value)),
             Some(_) => Err(usage(&format!("{name} must be true or false"))),
+        }
+    }
+
+    /// An array of strings, or empty when absent.
+    fn strings(&self, name: &str) -> Result<Vec<String>, Failure> {
+        let Some(value) = self.map.get(name) else {
+            return Ok(Vec::new());
+        };
+        value
+            .as_array()
+            .and_then(|items| {
+                items
+                    .iter()
+                    .map(|item| item.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .ok_or_else(|| usage(&format!("{name} must be an array of strings")))
+    }
+
+    /// An integer from `min` to `max`. A number with no fraction, such as
+    /// `2.0`, is an integer.
+    fn integer(&self, name: &str, min: u64, max: u64) -> Result<Option<u64>, Failure> {
+        let Some(value) = self.map.get(name) else {
+            return Ok(None);
+        };
+        let number = value.as_u64().or_else(|| {
+            value
+                .as_f64()
+                .filter(|n| n.fract() == 0.0 && *n >= 0.0)
+                .map(|n| n as u64)
+        });
+        match number {
+            Some(number) if (min..=max).contains(&number) => Ok(Some(number)),
+            _ => Err(usage(&format!(
+                "{name} must be an integer from {min} to {max}"
+            ))),
         }
     }
 
