@@ -1,0 +1,9 @@
+phantom-fractal map | budget 150 | used 97 | rank 1
+app/src/traits.rs  [r 0.203]
+kit/src/lib.rs  [r 0.197]
+app/src/shapes.rs  [r 0.191]
+kit/src/geo.rs  [r 0.150]
+app/src/dup.rs  [r 0.136]
+app/src/uses.rs  [r 0.122]
+app/src/lib.rs  [r 0.00]
+-- omitted: 0 files, 27 symbols (raise --budget or use --focus)

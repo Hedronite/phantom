@@ -1,21 +1,24 @@
 //! Impact analysis over a stored call graph (SPEC-w5 G2): what breaks if
-//! a symbol changes, and the PageRank of every symbol and file
-//! (SPEC-w7 G1b).
+//! a symbol changes, the PageRank of every symbol and file
+//! (SPEC-w7 G1b), and the budgeted repo map built on it (SPEC-w7 G2).
 //!
 //! [`impact`] walks incoming `calls` edges breadth-first from a target,
 //! groups what it reaches by depth with a path confidence, lists tests
 //! apart, says why the answer may be incomplete, and gives a risk level.
 //! It reads through [`ImpactSource`], so tests can run it on constructed
 //! graphs, and it never writes. [`rank`] and [`personalised`] read
-//! through [`RankSource`] the same way.
+//! through [`RankSource`] the same way, and [`render`] through
+//! [`MapSource`].
 #![forbid(unsafe_code)]
 
+mod map;
 mod rank;
 mod risk;
 mod walk;
 
 use phantom_fractal_store::{CallHit, Store, StoreError, SymbolFacts};
 
+pub use map::{Detail, Map, MapError, MapRequest, MapSource, packing_budget, render};
 pub use rank::{
     Converged, EdgeKind, IMPL_WEIGHT, IMPORT_WEIGHT, Iteration, PRIOR_BOOST, RankEdge, RankNode,
     RankSource, Ranks, TEST_FACTOR, pagerank, personalised, rank,
