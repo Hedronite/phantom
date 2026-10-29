@@ -1,0 +1,5 @@
+phantom-fractal map | head 6251a75 | budget 80 | used 67 | rank 1
+src/a.rs  [r 0.0833]
+  pub fn a_entry() -> u32  :2
+    /// The a module's entry.
+-- omitted: 12 files, 11 symbols (raise --budget or use --focus)

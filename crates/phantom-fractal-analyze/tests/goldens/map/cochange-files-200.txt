@@ -1,0 +1,14 @@
+phantom-fractal map | head 6251a75 | budget 200 | used 188 | rank 1
+src/a.rs  [r 0.0833]
+src/b.rs  [r 0.0833]
+src/c.rs  [r 0.0833]  also-changes: d.rs
+src/d.rs  [r 0.0833]  also-changes: c.rs
+src/e.rs  [r 0.0833]  also-changes: f.rs
+src/f.rs  [r 0.0833]  also-changes: e.rs
+src/hub.rs  [r 0.0833]  also-changes: p1.rs, p2.rs, p3.rs
+src/noise.rs  [r 0.0833]
+src/p1.rs  [r 0.0833]  also-changes: hub.rs
+src/p2.rs  [r 0.0833]  also-changes: hub.rs
+src/p3.rs  [r 0.0833]  also-changes: hub.rs
+src/p4.rs  [r 0.0833]  also-changes: hub.rs
+-- omitted: 1 files, 12 symbols (raise --budget or use --focus)

@@ -1,13 +1,24 @@
-//! The map's lines (SPEC-w7 G2, canon §8.4).
+//! The map's lines (SPEC-w7 G2, SPEC-w8 G2, canon §8.4).
 //!
 //! Every line is ASCII: a byte outside printable ASCII becomes `?`.
 
 /// The longest symbol signature kept, `...` included.
 pub(crate) const SIGNATURE_CHARS: usize = 100;
 
-/// `phantom-fractal map | budget B | used U | rank E`.
-pub(crate) fn header(budget: u64, used: u64, epoch: u64) -> String {
-    format!("phantom-fractal map | budget {budget} | used {used} | rank {epoch}")
+/// The hex digits of HEAD the header shows.
+pub(crate) const HEAD_HEX: usize = 7;
+
+/// `phantom-fractal map | budget B | used U | rank E`, with
+/// `| head <7 hex>` after `phantom-fractal map` when a co-change scan
+/// exists.
+pub(crate) fn header(budget: u64, used: u64, epoch: u64, head: Option<&str>) -> String {
+    match head {
+        Some(head) => format!(
+            "phantom-fractal map | head {} | budget {budget} | used {used} | rank {epoch}",
+            ascii(head.get(..HEAD_HEX).unwrap_or(head))
+        ),
+        None => format!("phantom-fractal map | budget {budget} | used {used} | rank {epoch}"),
+    }
 }
 
 /// `-- omitted: F files, S symbols (raise --budget or use --focus)`.
@@ -15,9 +26,16 @@ pub(crate) fn footer(files: u64, symbols: u64) -> String {
     format!("-- omitted: {files} files, {symbols} symbols (raise --budget or use --focus)")
 }
 
-/// `<path>  [r <rank>]`, the rank to three significant digits.
-pub(crate) fn file_line(path: &str, rank: f64) -> String {
-    format!("{}  [r {}]", ascii(path), significant(rank))
+/// `<path>  [r <rank>]`, the rank to three significant digits, then
+/// `  also-changes: ` and the partner names joined by `, ` when there are
+/// any.
+pub(crate) fn file_line(path: &str, rank: f64, also_changes: &[String]) -> String {
+    let line = format!("{}  [r {}]", ascii(path), significant(rank));
+    if also_changes.is_empty() {
+        return line;
+    }
+    let partners: Vec<String> = also_changes.iter().map(|name| ascii(name)).collect();
+    format!("{line}  also-changes: {}", partners.join(", "))
 }
 
 /// Two spaces, the signature, two spaces, `:<line>`. A method's `fn name`
@@ -187,6 +205,14 @@ mod tests {
         assert_eq!(ascii("é\tx…"), "???x???");
         // `ö` and `ß` are two bytes each.
         assert_eq!(doc_line("Größe"), "    /// Gr????e");
-        assert_eq!(file_line("src/naïve.rs", 0.25), "src/na??ve.rs  [r 0.250]");
+        assert_eq!(
+            file_line("src/naïve.rs", 0.25, &[]),
+            "src/na??ve.rs  [r 0.250]"
+        );
+        let also = ["b.rs".to_owned(), "größe.rs".to_owned()];
+        assert_eq!(
+            file_line("a.rs", 0.5, &also),
+            "a.rs  [r 0.500]  also-changes: b.rs, gr????e.rs"
+        );
     }
 }

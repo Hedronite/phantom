@@ -1,0 +1,39 @@
+phantom-fractal map | head 6251a75 | budget 600 | used 437 | rank 1
+src/a.rs  [r 0.0833]
+  pub fn a_entry() -> u32  :2
+    /// The a module's entry.
+src/b.rs  [r 0.0833]
+  pub fn b_entry() -> u32  :2
+    /// The b module's entry.
+src/c.rs  [r 0.0833]  also-changes: d.rs
+  pub fn c_entry() -> u32  :2
+    /// The c module's entry.
+src/d.rs  [r 0.0833]  also-changes: c.rs
+  pub fn d_entry() -> u32  :2
+    /// The d module's entry.
+src/e.rs  [r 0.0833]  also-changes: f.rs
+  pub fn e_entry() -> u32  :2
+    /// The e module's entry.
+src/f.rs  [r 0.0833]  also-changes: e.rs
+  pub fn f_entry() -> u32  :2
+    /// The f module's entry.
+src/hub.rs  [r 0.0833]  also-changes: p1.rs, p2.rs, p3.rs
+  pub fn hub_entry() -> u32  :2
+    /// The hub module's entry.
+src/noise.rs  [r 0.0833]
+  pub fn noise_entry() -> u32  :2
+    /// The noise module's entry.
+src/p1.rs  [r 0.0833]  also-changes: hub.rs
+  pub fn p1_entry() -> u32  :2
+    /// The p1 module's entry.
+src/p2.rs  [r 0.0833]  also-changes: hub.rs
+  pub fn p2_entry() -> u32  :2
+    /// The p2 module's entry.
+src/p3.rs  [r 0.0833]  also-changes: hub.rs
+  pub fn p3_entry() -> u32  :2
+    /// The p3 module's entry.
+src/p4.rs  [r 0.0833]  also-changes: hub.rs
+  pub fn p4_entry() -> u32  :2
+    /// The p4 module's entry.
+src/lib.rs  [r 0.00]
+-- omitted: 0 files, 0 symbols (raise --budget or use --focus)

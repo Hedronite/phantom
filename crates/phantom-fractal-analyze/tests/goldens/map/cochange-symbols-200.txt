@@ -1,0 +1,14 @@
+phantom-fractal map | head 6251a75 | budget 200 | used 166 | rank 1
+src/a.rs  [r 0.0833]
+  pub fn a_entry() -> u32  :2
+src/b.rs  [r 0.0833]
+  pub fn b_entry() -> u32  :2
+src/c.rs  [r 0.0833]  also-changes: d.rs
+  pub fn c_entry() -> u32  :2
+src/d.rs  [r 0.0833]  also-changes: c.rs
+  pub fn d_entry() -> u32  :2
+src/e.rs  [r 0.0833]  also-changes: f.rs
+  pub fn e_entry() -> u32  :2
+src/f.rs  [r 0.0833]  also-changes: e.rs
+  pub fn f_entry() -> u32  :2
+-- omitted: 7 files, 6 symbols (raise --budget or use --focus)

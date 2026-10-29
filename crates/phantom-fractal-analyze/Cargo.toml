@@ -13,4 +13,5 @@ phantom-fractal-store = { path = "../phantom-fractal-store", version = "0.0.0" }
 
 [dev-dependencies]
 phantom-fractal-extract = { path = "../phantom-fractal-extract", version = "0.0.0" }
+phantom-fractal-git = { path = "../phantom-fractal-git", version = "0.0.0" }
 phantom-fractal-lang-rust = { path = "../phantom-fractal-lang-rust", version = "0.0.0" }

@@ -1340,6 +1340,7 @@ name = "phantom-fractal-analyze"
 version = "0.0.0"
 dependencies = [
  "phantom-fractal-extract",
+ "phantom-fractal-git",
  "phantom-fractal-lang-rust",
  "phantom-fractal-store",
 ]

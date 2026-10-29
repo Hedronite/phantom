@@ -9,12 +9,19 @@
 //! `i`, so the cases split into [`SHARDS`] tests that run in parallel.
 //! `PHANTOM_MAP_SEED` and `PHANTOM_MAP_CASES` rerun with another seed or
 //! count.
+//!
+//! SPEC-w8 G2: about half the cases also get a co-change scan, a random
+//! HEAD and random partner sets with lifts around the `also-changes:`
+//! cut, drawn from a second generator so every case without a scan is
+//! the W7 case unchanged.
 
 use phantom_fractal_analyze::{
     Detail, EdgeKind, Map, MapError, MapRequest, MapSource, RankEdge, RankNode, RankSource,
     packing_budget, render,
 };
-use phantom_fractal_store::{MapFile, MapRow, StoreError};
+use std::collections::BTreeMap;
+
+use phantom_fractal_store::{CochangeGroup, CochangePartner, MapFile, MapRow, StoreError};
 
 const SEED: u64 = 0x5eed_0007_0000_0002;
 const CASES: u64 = 10_000;
@@ -84,6 +91,10 @@ struct Case {
     graph_epoch: u64,
     rank_epoch: u64,
     stored: Vec<(String, i64, f64)>,
+    /// The scan HEAD, or none without a scan.
+    head: Option<String>,
+    /// Each path's partners in the store's order.
+    partners: BTreeMap<String, Vec<CochangePartner>>,
 }
 
 impl RankSource for Case {
@@ -114,6 +125,74 @@ impl MapSource for Case {
     fn stored_rank(&self) -> Result<Vec<(String, i64, f64)>, StoreError> {
         Ok(self.stored.clone())
     }
+    fn scan_head(&self) -> Result<Option<String>, StoreError> {
+        Ok(self.head.clone())
+    }
+    fn partners(
+        &self,
+        paths: &[String],
+        min_lift: f64,
+        per_file: u32,
+    ) -> Result<Vec<CochangeGroup>, StoreError> {
+        let mut seen = std::collections::BTreeSet::new();
+        Ok(paths
+            .iter()
+            .filter(|path| seen.insert(path.as_str()))
+            .map(|path| CochangeGroup {
+                path: path.clone(),
+                partners: self
+                    .partners
+                    .get(path)
+                    .into_iter()
+                    .flatten()
+                    .filter(|partner| partner.lift >= min_lift)
+                    .take(per_file as usize)
+                    .cloned()
+                    .collect(),
+            })
+            .collect())
+    }
+}
+
+/// Lifts around the `also-changes:` cut of 2.
+const LIFTS: [f64; 6] = [1.0, 1.5, 2.0, 2.0000001, 3.5, 40.0];
+
+/// Gives about half the cases a scan: a HEAD of 40 hex digits and up to 6
+/// partners per file, some of them gone from the files table, sorted as
+/// the store sorts them.
+fn add_scan(rng: &mut Rng, case: &mut Case) {
+    if !rng.chance(50) {
+        return;
+    }
+    case.head = Some(
+        (0..40)
+            .map(|_| char::from(b"0123456789abcdef"[rng.range(0, 15) as usize]))
+            .collect(),
+    );
+    let paths: Vec<String> = case.files.iter().map(|file| file.path.clone()).collect();
+    for path in &paths {
+        let mut partners: Vec<CochangePartner> = (0..rng.range(0, 6))
+            .map(|_| CochangePartner {
+                path: (paths.len() > 1 && !rng.chance(10))
+                    .then(|| paths[rng.range(0, paths.len() as u64 - 1) as usize].clone())
+                    .filter(|other| other != path),
+                together: rng.range(1, 9) as f64 / 2.0,
+                n_of: 9.0,
+                n_other: 9.0,
+                lift: LIFTS[rng.range(0, LIFTS.len() as u64 - 1) as usize],
+                conf_of: 0.5,
+                conf_to: 0.5,
+                last_time: 0,
+            })
+            .collect();
+        partners.sort_by(|a, b| {
+            b.lift
+                .total_cmp(&a.lift)
+                .then(b.together.total_cmp(&a.together))
+                .then(a.path.cmp(&b.path))
+        });
+        case.partners.insert(path.clone(), partners);
+    }
 }
 
 const KINDS: [&str; 5] = ["function", "struct", "enum", "trait", "method"];
@@ -128,6 +207,8 @@ fn generate(rng: &mut Rng) -> Case {
         graph_epoch: rng.range(1, 5),
         rank_epoch: 0,
         stored: Vec::new(),
+        head: None,
+        partners: BTreeMap::new(),
     };
     let mut next_id = rng.range(1, 50) as i64;
     let file_count = rng.range(0, 12);
@@ -288,13 +369,20 @@ fn shard(shard: u64) {
         .and_then(|text| text.parse().ok())
         .unwrap_or(CASES);
     let (mut rendered, mut too_small, mut partial, mut ran) = (0, 0, 0, 0);
+    let (mut headed, mut also) = (0, 0);
     for number in (shard..cases).step_by(SHARDS as usize) {
         ran += 1;
         let mut rng = Rng(seed ^ number.wrapping_mul(0xa076_1d64_78bd_642f));
-        let case = generate(&mut rng);
+        let mut case = generate(&mut rng);
         let small = request(&mut rng, &case);
         let mut large = small.clone();
         large.budget = rng.range(small.budget, MAX_BUDGET);
+        // The scan comes from its own generator, so the draws above are
+        // the W7 case's.
+        add_scan(
+            &mut Rng(seed ^ number.wrapping_mul(0xe703_7ed1_a0b4_28db) ^ 0xc0c4),
+            &mut case,
+        );
         let Some(map) = check(&case, &small, number) else {
             too_small += 1;
             check(&case, &large, number);
@@ -303,6 +391,18 @@ fn shard(shard: u64) {
         rendered += 1;
         if map.files_omitted + map.symbols_omitted > 0 {
             partial += 1;
+        }
+        let header = map.text.lines().next().unwrap_or_default();
+        assert_eq!(
+            header.starts_with("phantom-fractal map | head "),
+            case.head.is_some(),
+            "case {number}: {header}"
+        );
+        if case.head.is_some() {
+            headed += 1;
+        }
+        if map.text.contains("  also-changes: ") {
+            also += 1;
         }
         let bigger = check(&case, &large, number)
             .unwrap_or_else(|| panic!("case {number}: a larger budget is too small"));
@@ -317,6 +417,7 @@ fn shard(shard: u64) {
     // The generator reaches every outcome.
     assert!(rendered > ran / 2, "{rendered} of {ran}");
     assert!(too_small > 0 && partial > 0, "{too_small} {partial}");
+    assert!(headed > 0 && also > 0, "{headed} {also}");
 }
 
 #[test]
@@ -403,6 +504,8 @@ fn empty_case() -> Case {
         graph_epoch: 1,
         rank_epoch: 0,
         stored: Vec::new(),
+        head: None,
+        partners: BTreeMap::new(),
     }
 }
 
