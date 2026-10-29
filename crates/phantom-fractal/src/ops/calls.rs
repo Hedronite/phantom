@@ -6,6 +6,7 @@ use phantom_fractal_store::{CallHit, Store};
 use serde::Serialize;
 
 use super::Failure;
+use super::budget::{self, Shed, Tokens, drop_last};
 use super::lookup::{Names, SymbolOut, current_index, kind_text, lookup, symbol_out};
 
 /// Most hits one `callers` or `callees` returns.
@@ -17,6 +18,8 @@ pub(crate) struct CallsRequest {
     pub(crate) symbol: String,
     /// The indexed tree.
     pub(crate) repo: PathBuf,
+    /// The most estimated tokens the reply may cost.
+    pub(crate) max_tokens: Option<u64>,
 }
 
 /// Which side of the queried symbol's edges to return.
@@ -29,7 +32,7 @@ pub(crate) enum Direction {
 }
 
 /// `data` of a successful `callers` or `callees`.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct CallResult {
     symbol: SymbolOut,
     hits: Vec<CallOut>,
@@ -38,13 +41,29 @@ pub(crate) struct CallResult {
     /// `callees` only.
     #[serde(skip_serializing_if = "Option::is_none")]
     unresolved_calls: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tokens: Option<Tokens>,
+}
+
+impl Shed for CallResult {
+    fn sheddable(&self) -> usize {
+        self.hits.len()
+    }
+
+    fn shed(&mut self, mut count: usize) {
+        drop_last(&mut self.hits, &mut count);
+    }
+
+    fn set_tokens(&mut self, tokens: Tokens) {
+        self.tokens = Some(tokens);
+    }
 }
 
 /// One edge. `name` and `kind` describe the other symbol, and
 /// `symbol_path` is the file it is declared in. `path` and `line` are the
 /// call site: the caller's file for `callers`, the queried symbol's file
 /// for `callees`.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct CallOut {
     name: String,
     kind: &'static str,
@@ -56,18 +75,21 @@ pub(crate) struct CallOut {
 }
 
 /// The symbols whose calls resolve to the one `request.symbol` names,
-/// sorted by path and then line, at most [`CALL_CAP`] of them.
+/// sorted by path and then line, at most [`CALL_CAP`] of them, fitted to
+/// `request.max_tokens`.
 pub(crate) fn callers(request: &CallsRequest) -> Result<CallResult, Failure> {
     calls(Direction::Callers, request)
 }
 
 /// The symbols the calls of the one `request.symbol` names resolve to,
-/// sorted by path and then line, at most [`CALL_CAP`] of them.
+/// sorted by path and then line, at most [`CALL_CAP`] of them, fitted to
+/// `request.max_tokens`.
 pub(crate) fn callees(request: &CallsRequest) -> Result<CallResult, Failure> {
     calls(Direction::Callees, request)
 }
 
 fn calls(direction: Direction, request: &CallsRequest) -> Result<CallResult, Failure> {
+    budget::check(request.max_tokens)?;
     let (store, names) = current_index(&request.repo)?;
     let symbol = lookup(&store, &names, &request.symbol)?;
     let mut hits = edges(&store, &names, direction, symbol.id, &symbol.file)?;
@@ -77,12 +99,14 @@ fn calls(direction: Direction, request: &CallsRequest) -> Result<CallResult, Fai
     };
     let truncated = hits.len() > CALL_CAP;
     hits.truncate(CALL_CAP);
-    Ok(CallResult {
+    let result = CallResult {
         symbol: symbol_out(&names, symbol),
         hits,
         truncated,
         unresolved_calls,
-    })
+        tokens: None,
+    };
+    budget::fit(result, request.max_tokens)
 }
 
 /// Every stored edge on one side of symbol `id`, declared in `file`, with

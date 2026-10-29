@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use phantom_fractal_analyze::{Detail, Map, MapError, MapRequest, packing_budget, rank, render};
+use phantom_fractal_analyze::{
+    Detail, Map, MapError, MapRequest, estimate_tokens, packing_budget, rank, render,
+};
 use phantom_fractal_extract::index;
 use phantom_fractal_lang_rust::RustLanguage;
 use phantom_fractal_store::Store;
@@ -87,6 +89,7 @@ fn estimate(line: &str) -> u64 {
 fn assert_accounted(map: &Map, budget: u64) {
     let used: u64 = map.text.lines().map(estimate).sum();
     assert_eq!(map.used_tokens, used, "{}", map.text);
+    assert_eq!(estimate_tokens(&map.text), used);
     assert!(used <= packing_budget(budget), "{used} over {budget}");
     assert!(map.text.is_ascii());
     assert!(map.text.ends_with('\n'));

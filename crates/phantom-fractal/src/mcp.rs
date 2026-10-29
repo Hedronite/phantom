@@ -10,20 +10,30 @@
 //! functions as the command line, and each result carries the envelope the
 //! command line prints. It starts no process, opens no socket, and writes
 //! nothing outside the data directory, which only `index_repo` writes, and
-//! only under `--allow-index`.
+//! only under `--allow-index`. A tool reaches only the trees in
+//! [`roots::Roots`].
 
 mod frame;
+mod roots;
 mod rpc;
 mod tools;
 
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-/// Serves stdin until EOF. `allow_index` offers the `index_repo` tool.
-pub(crate) fn serve(allow_index: bool) -> ExitCode {
+/// Serves stdin until EOF. `allow_index` offers the `index_repo` tool, and
+/// `roots` are the trees the tools may use: the working directory when
+/// empty. A root that is not a directory stops the server before it reads
+/// a line.
+pub(crate) fn serve(allow_index: bool, roots: &[PathBuf]) -> ExitCode {
+    let roots = match roots::Roots::new(roots) {
+        Ok(roots) => roots,
+        Err(message) => return fatal(&message),
+    };
     let mut input = io::stdin().lock();
     let mut output = io::stdout().lock();
-    let mut server = rpc::Server::new(allow_index);
+    let mut server = rpc::Server::new(allow_index, roots);
     loop {
         let line = match frame::read_line(&mut input, frame::MAX_LINE) {
             Ok(frame::Line::Eof) => return ExitCode::SUCCESS,

@@ -3,9 +3,11 @@
 //! `fixtures/detail` and `fixtures/graph` (SPEC-w6 G2b, G2c; SPEC-w7 G3b).
 //!
 //! Each case runs the command line and the server from the same working
-//! directory against the same data directory. The text item must be the
-//! command line's stdout line byte for byte, and `structuredContent` must
-//! parse equal to it.
+//! directory against the same data directory, the server with each
+//! fixture as a `--root`. The text item must be the command line's stdout
+//! line byte for byte, and `structuredContent` must parse equal to it. A
+//! `repo` that is not an indexed root is the server's own uniform failure
+//! (SPEC-w8 G0b), so those cases are in `mcp_roots.rs`.
 
 use std::fs;
 use std::io::Write;
@@ -81,6 +83,20 @@ impl World {
             assert!(line.starts_with("{\"ok\":true"), "{line}");
         }
         world
+    }
+
+    /// `--root` for each indexed fixture.
+    fn roots(&self) -> Vec<String> {
+        ["impact", "detail", "graph"]
+            .iter()
+            .flat_map(|name| {
+                let root = self.cwd.path().join(name);
+                [
+                    "--root".to_owned(),
+                    root.to_str().expect("utf-8").to_owned(),
+                ]
+            })
+            .collect()
     }
 
     /// The command line's stdout line, newline removed.
@@ -176,14 +192,18 @@ fn case(tool: &'static str, arguments: Value, cli: &[&str]) -> Case {
     }
 }
 
-/// Runs every case through both, from `cwd`, and compares. Returns each
-/// envelope's error kind, or `ok`, so a test also pins which cases succeed.
+/// Runs every case through both, from `cwd`, the server with `extra` and
+/// every fixture as a root, and compares. Returns each envelope's error
+/// kind, or `ok`, so a test also pins which cases succeed.
 fn assert_parity(world: &World, cwd: &Path, extra: &[&str], cases: &[Case]) -> Vec<String> {
     let calls: Vec<(&str, Value)> = cases
         .iter()
         .map(|case| (case.tool, case.arguments.clone()))
         .collect();
-    let got = world.mcp(extra, cwd, &calls);
+    let roots = world.roots();
+    let mut args: Vec<&str> = roots.iter().map(String::as_str).collect();
+    args.extend(extra);
+    let got = world.mcp(&args, cwd, &calls);
     let mut kinds = Vec::new();
     for (case, (text, structured, is_error)) in cases.iter().zip(got) {
         let args: Vec<&str> = case.cli.iter().map(String::as_str).collect();
@@ -327,16 +347,6 @@ fn every_read_tool_matches_the_cli_on_fixtures_impact() {
             json!({ "symbol": "absent", "repo": "impact" }),
             &["impact", "absent", "--repo", "impact"],
         ),
-        case(
-            "find_symbols",
-            json!({ "query": "root_fn", "repo": "missing" }),
-            &["find", "root_fn", "--repo", "missing"],
-        ),
-        case(
-            "find_symbols",
-            json!({ "query": "root_fn" }),
-            &["find", "root_fn"],
-        ),
     ];
     let kinds = assert_parity(&world, world.cwd.path(), &[], &cases);
     let kinds = kinds.iter().map(String::as_str).collect::<Vec<_>>();
@@ -359,8 +369,6 @@ fn every_read_tool_matches_the_cli_on_fixtures_impact() {
         "ok",
         "ok",
         "not_found",
-        "not_found",
-        "no_index",
     ];
     assert_eq!(kinds, want);
 }
@@ -417,8 +425,7 @@ fn every_read_tool_matches_the_cli_on_fixtures_detail() {
 #[test]
 fn repo_defaults_to_the_server_directory_and_a_relative_repo_resolves_against_it() {
     let world = World::new();
-    // From a directory inside the indexed tree, `..` names the tree, and no
-    // `repo` names the server's own directory, which has no index.
+    // From a directory inside an indexed root, `..` names the root.
     let inside = world.cwd.path().join("impact/engine");
     let cases = [
         case(
@@ -431,14 +438,10 @@ fn repo_defaults_to_the_server_directory_and_a_relative_repo_resolves_against_it
             json!({ "symbol": "root_fn", "repo": "../." }),
             &["callers", "root_fn", "--repo", "../."],
         ),
-        case(
-            "find_symbols",
-            json!({ "query": "root_fn" }),
-            &["find", "root_fn"],
-        ),
     ];
     let kinds = assert_parity(&world, &inside, &[], &cases);
-    assert_eq!(kinds, ["ok", "ok", "no_index"]);
+    assert_eq!(kinds, ["ok", "ok"]);
+    // From a root, no `repo` names it.
     let root = world.cwd.path().join("impact");
     let cases = [
         case(
@@ -459,6 +462,7 @@ fn repo_defaults_to_the_server_directory_and_a_relative_repo_resolves_against_it
     ];
     let kinds = assert_parity(&world, &root, &[], &cases);
     assert_eq!(kinds, ["ok", "ok", "ok"]);
+    // With no `--root`, the server's directory is the one root.
     let found = world.mcp(
         &[],
         &root,
@@ -491,7 +495,7 @@ fn index_repo_matches_the_cli_index() {
         data: TempDir::new("mcp-data"),
     };
     let got = mcp_data.mcp(
-        &["--allow-index"],
+        &["--allow-index", "--root", "detail"],
         fresh.path(),
         &[
             ("index_repo", json!({ "path": "detail" })),
@@ -503,7 +507,12 @@ fn index_repo_matches_the_cli_index() {
     // The second pass writes nothing, as the command line's does.
     let cli_second = mcp_data.cli(&["index", "detail"], fresh.path());
     assert_eq!(got[1].0, cli_second);
-    assert_eq!(got[2].0, mcp_data.cli(&["index", "absent"], fresh.path()));
+    // A path that is not a root is the uniform failure, not the command
+    // line's.
+    assert_eq!(
+        got[2].1["error"],
+        json!({ "kind": "no_index", "message": "repo is not an indexed root of this server", "exit": 2 })
+    );
     assert!(got[2].2);
 }
 
@@ -606,11 +615,6 @@ fn top_ranked_and_repo_map_match_the_cli_and_write_nothing() {
                 "full", "--repo", "graph",
             ],
         ),
-        case(
-            "repo_map",
-            json!({ "budget": 500 }),
-            &["map", "--budget", "500"],
-        ),
     ]);
     let before = database_bytes(world.data.path());
     assert!(before.len() >= 3, "one database per fixture");
@@ -620,7 +624,7 @@ fn top_ranked_and_repo_map_match_the_cli_and_write_nothing() {
         want.extend(["ok", "ok", "ok", "not_found", "usage", "ok", "not_found"]);
         want.extend(["ok"; 9]);
     }
-    want.extend(["ok", "ok", "no_index"]);
+    want.extend(["ok", "ok"]);
     assert_eq!(kinds, want);
     assert_eq!(database_bytes(world.data.path()), before);
 }

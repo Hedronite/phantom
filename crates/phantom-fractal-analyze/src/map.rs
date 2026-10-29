@@ -2,8 +2,9 @@
 //!
 //! [`render`] packs files and symbols, best ranked first, into a text whose
 //! estimated tokens never exceed the budget. Each line costs
-//! `ceil(bytes / 3.5) + 1`, and packing uses `floor(0.95 × budget)` with
-//! room for the header and the footer reserved up front.
+//! [`estimate_tokens`] of it, `ceil(bytes / 3.5) + 1`, so `used_tokens` is
+//! `estimate_tokens` of the whole text. Packing uses `floor(0.95 × budget)`
+//! with room for the header and the footer reserved up front.
 //!
 //! The candidates form one fixed sequence of units in canon order: a
 //! file's header with its top symbol, then each of its other symbols, then
@@ -28,6 +29,7 @@ use std::fmt;
 
 use phantom_fractal_store::{MapFile, MapRow, StoreError};
 
+use crate::estimate_tokens;
 use crate::rank::{RankSource, Ranks, personalised, rank};
 
 /// What [`render`] reads beyond the rank inputs.
@@ -177,8 +179,8 @@ pub fn render(source: &impl MapSource, request: &MapRequest) -> Result<Map, MapE
         .map(|(_, symbols)| symbols.len() as u64)
         .sum::<u64>();
     let packing = packing_budget(request.budget);
-    let reserved = format::cost(&format::header(request.budget, request.budget, ranks.epoch))
-        + format::cost(&format::footer(total_files, total_symbols));
+    let reserved = estimate_tokens(&format::header(request.budget, request.budget, ranks.epoch))
+        + estimate_tokens(&format::footer(total_files, total_symbols));
     if reserved > packing {
         return Err(MapError::BudgetTooSmall {
             budget: request.budget,
@@ -229,12 +231,13 @@ pub fn render(source: &impl MapSource, request: &MapRequest) -> Result<Map, MapE
     let files_omitted = total_files - files_shown;
     let symbols_omitted = total_symbols - symbols_shown;
     let footer = format::footer(files_omitted, symbols_omitted);
-    let rest = body.iter().map(|line| format::cost(line)).sum::<u64>() + format::cost(&footer);
+    let rest =
+        body.iter().map(|line| estimate_tokens(line)).sum::<u64>() + estimate_tokens(&footer);
     // The header states the total it is part of, so its own cost depends
     // on the digits it prints; this rises to the one fixed point.
-    let mut used = rest + format::cost(&format::header(request.budget, 0, ranks.epoch));
+    let mut used = rest + estimate_tokens(&format::header(request.budget, 0, ranks.epoch));
     loop {
-        let next = rest + format::cost(&format::header(request.budget, used, ranks.epoch));
+        let next = rest + estimate_tokens(&format::header(request.budget, used, ranks.epoch));
         if next == used {
             break;
         }
@@ -261,7 +264,7 @@ pub fn render(source: &impl MapSource, request: &MapRequest) -> Result<Map, MapE
 /// Appends `unit` to `body` when its lines fit in `room`, and takes their
 /// cost from it. False, with nothing changed, when they do not.
 fn take(room: &mut u64, body: &mut Vec<String>, unit: Vec<String>) -> bool {
-    let cost: u64 = unit.iter().map(|line| format::cost(line)).sum();
+    let cost: u64 = unit.iter().map(|line| estimate_tokens(line)).sum();
     if cost > *room {
         return false;
     }

@@ -8,9 +8,11 @@
 //! `show SYMBOL` gives one symbol's detail, members, and a capped look at
 //! its edges, with its source under `--source`. `rank` lists the
 //! best-ranked symbols or files, and `map` packs a ranked repo map into a
-//! token budget. `version` says what this binary is and needs no index. Each prints the JSON envelope from
-//! `phantom-fractal-proto`. `mcp` serves the same operations to an MCP
-//! client over stdin and stdout. There are no other commands.
+//! token budget. `--max-tokens` fits a read reply to a budget too.
+//! `version` says what this binary is and needs no index. Each prints the
+//! JSON envelope from `phantom-fractal-proto`. `mcp` serves the same
+//! operations to an MCP client over stdin and stdout, for the trees named
+//! by `--root` only. There are no other commands.
 //!
 //! This file only parses the arguments, calls one operation from `ops`,
 //! and prints its envelope.
@@ -66,6 +68,11 @@ enum Command {
         /// Tree that was indexed. Defaults to the current directory.
         #[arg(long, default_value = ".")]
         repo: PathBuf,
+        /// Most estimated tokens the reply may cost, 1 to 100000. List
+        /// entries are dropped in a fixed order to fit, and `data.tokens`
+        /// says how many.
+        #[arg(long, value_parser = max_tokens_range())]
+        max_tokens: Option<u64>,
     },
     /// List the resolved calls to one symbol, by bare or qualified name.
     Callers {
@@ -73,6 +80,11 @@ enum Command {
         /// Tree that was indexed. Defaults to the current directory.
         #[arg(long, default_value = ".")]
         repo: PathBuf,
+        /// Most estimated tokens the reply may cost, 1 to 100000. List
+        /// entries are dropped in a fixed order to fit, and `data.tokens`
+        /// says how many.
+        #[arg(long, value_parser = max_tokens_range())]
+        max_tokens: Option<u64>,
     },
     /// List the resolved calls one symbol makes, by bare or qualified name.
     Callees {
@@ -80,6 +92,11 @@ enum Command {
         /// Tree that was indexed. Defaults to the current directory.
         #[arg(long, default_value = ".")]
         repo: PathBuf,
+        /// Most estimated tokens the reply may cost, 1 to 100000. List
+        /// entries are dropped in a fixed order to fit, and `data.tokens`
+        /// says how many.
+        #[arg(long, value_parser = max_tokens_range())]
+        max_tokens: Option<u64>,
     },
     /// Walk the calls into one symbol backwards: what a change to it reaches.
     Impact {
@@ -101,6 +118,11 @@ enum Command {
         /// Counts, reasons, and risk only, without the hits.
         #[arg(long)]
         summary: bool,
+        /// Most estimated tokens the reply may cost, 1 to 100000. List
+        /// entries are dropped in a fixed order to fit, and `data.tokens`
+        /// says how many.
+        #[arg(long, value_parser = max_tokens_range())]
+        max_tokens: Option<u64>,
     },
     /// Show one symbol's detail, members, callers, and callees, by name or
     /// by stable key.
@@ -118,6 +140,11 @@ enum Command {
         /// Also return the symbol's source lines.
         #[arg(long)]
         source: bool,
+        /// Most estimated tokens the reply may cost, 1 to 100000. List
+        /// entries are dropped in a fixed order to fit, and `data.tokens`
+        /// says how many.
+        #[arg(long, value_parser = max_tokens_range())]
+        max_tokens: Option<u64>,
     },
     /// List the best-ranked symbols, or files, of the index.
     Rank {
@@ -128,7 +155,7 @@ enum Command {
         #[arg(long)]
         symbols: bool,
         /// An indexed file, relative to the repo, to personalise the rank
-        /// to. Repeatable.
+        /// to. Repeatable, at most 100 times.
         #[arg(long = "focus", value_name = "PATH")]
         focus: Vec<String>,
         /// Most hits returned, 1 to 100.
@@ -138,6 +165,11 @@ enum Command {
         /// Tree that was indexed. Defaults to the current directory.
         #[arg(long, default_value = ".")]
         repo: PathBuf,
+        /// Most estimated tokens the reply may cost, 1 to 100000. List
+        /// entries are dropped in a fixed order to fit, and `data.tokens`
+        /// says how many.
+        #[arg(long, value_parser = max_tokens_range())]
+        max_tokens: Option<u64>,
     },
     /// Pack a ranked map of the repo into a budget of estimated tokens.
     Map {
@@ -145,7 +177,8 @@ enum Command {
         #[arg(long,
               value_parser = clap::value_parser!(u64).range(ops::map::BUDGET_MIN..=ops::map::BUDGET_MAX))]
         budget: u64,
-        /// An indexed file, relative to the repo, to put first. Repeatable.
+        /// An indexed file, relative to the repo, to put first. Repeatable,
+        /// at most 100 times.
         #[arg(long = "focus", value_name = "PATH")]
         focus: Vec<String>,
         /// How much of each file to print.
@@ -164,6 +197,10 @@ enum Command {
         /// Also offer the `index_repo` tool, which writes the data directory.
         #[arg(long)]
         allow_index: bool,
+        /// A tree the tools may read, and `index_repo` may index.
+        /// Repeatable. Defaults to the current directory.
+        #[arg(long = "root", value_name = "PATH")]
+        root: Vec<PathBuf>,
     },
 }
 
@@ -174,9 +211,33 @@ fn main() -> ExitCode {
     };
     match cli.command {
         Command::Index { path } => emit(ops::index(&IndexRequest { path })),
-        Command::Find { query, repo } => emit(ops::find(&FindRequest { query, repo })),
-        Command::Callers { symbol, repo } => emit(ops::callers(&CallsRequest { symbol, repo })),
-        Command::Callees { symbol, repo } => emit(ops::callees(&CallsRequest { symbol, repo })),
+        Command::Find {
+            query,
+            repo,
+            max_tokens,
+        } => emit(ops::find(&FindRequest {
+            query,
+            repo,
+            max_tokens,
+        })),
+        Command::Callers {
+            symbol,
+            repo,
+            max_tokens,
+        } => emit(ops::callers(&CallsRequest {
+            symbol,
+            repo,
+            max_tokens,
+        })),
+        Command::Callees {
+            symbol,
+            repo,
+            max_tokens,
+        } => emit(ops::callees(&CallsRequest {
+            symbol,
+            repo,
+            max_tokens,
+        })),
         Command::Impact {
             symbol,
             repo,
@@ -184,6 +245,7 @@ fn main() -> ExitCode {
             min_confidence,
             no_tests,
             summary,
+            max_tokens,
         } => emit(ops::impact(&ImpactRequest {
             symbol,
             repo,
@@ -193,12 +255,14 @@ fn main() -> ExitCode {
                 include_tests: !no_tests,
             },
             summary,
+            max_tokens,
         })),
         Command::Show {
             symbol,
             id,
             repo,
             source,
+            max_tokens,
         } => {
             // clap admits exactly one of SYMBOL and --id.
             let target = match id {
@@ -209,6 +273,7 @@ fn main() -> ExitCode {
                 target,
                 repo,
                 source,
+                max_tokens,
             }))
         }
         Command::Rank {
@@ -217,6 +282,7 @@ fn main() -> ExitCode {
             focus,
             limit,
             repo,
+            max_tokens,
         } => emit(ops::rank(&RankRequest {
             kind: if files {
                 RankKind::Files
@@ -226,6 +292,7 @@ fn main() -> ExitCode {
             focus,
             limit,
             repo,
+            max_tokens,
         })),
         Command::Map {
             budget,
@@ -240,8 +307,13 @@ fn main() -> ExitCode {
             repo,
         })),
         Command::Version => emit(ops::version(&VersionRequest)),
-        Command::Mcp { allow_index } => mcp::serve(allow_index),
+        Command::Mcp { allow_index, root } => mcp::serve(allow_index, &root),
     }
+}
+
+/// `--max-tokens`: an integer from 1 to 100000.
+fn max_tokens_range() -> clap::builder::RangedU64ValueParser<u64> {
+    clap::value_parser!(u64).range(ops::budget::MAX_TOKENS_MIN..=ops::budget::MAX_TOKENS_MAX)
 }
 
 /// `--min-confidence`: a number above 0 and at most 1. NaN is refused.

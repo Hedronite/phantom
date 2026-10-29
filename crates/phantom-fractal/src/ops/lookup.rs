@@ -20,7 +20,7 @@ use super::{Failure, open_index};
 const CANDIDATE_CAP: usize = 10;
 
 /// One symbol, by qualified name. `path` is relative to the indexed tree.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct SymbolOut {
     name: String,
     kind: String,

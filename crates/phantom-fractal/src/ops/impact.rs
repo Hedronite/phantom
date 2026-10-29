@@ -4,6 +4,7 @@
 //! completeness reasons, and the risk level come from
 //! `phantom-fractal-analyze`. Every path is relative to the indexed tree.
 
+use std::cmp::Reverse;
 use std::path::PathBuf;
 
 use phantom_fractal_analyze::{Counts, Group, Hit, ImpactOptions, ReasonCount};
@@ -11,6 +12,7 @@ use phantom_fractal_proto::ErrorKind;
 use serde::Serialize;
 
 use super::Failure;
+use super::budget::{self, Shed, Tokens, drop_last};
 use super::lookup::{Names, SymbolOut, current_index, lookup, symbol_out};
 
 /// What `impact` is asked for.
@@ -24,11 +26,13 @@ pub(crate) struct ImpactRequest {
     pub(crate) options: ImpactOptions,
     /// Drop `groups` and `tests` from the answer.
     pub(crate) summary: bool,
+    /// The most estimated tokens the reply may cost.
+    pub(crate) max_tokens: Option<u64>,
 }
 
 /// `data` of a successful `impact`. `groups` and `tests` are absent under
 /// `--summary`, and `tests` is absent under `--no-tests`.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct ImpactResult {
     symbol: SymbolOut,
     risk: &'static str,
@@ -40,16 +44,48 @@ pub(crate) struct ImpactResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     tests: Option<Vec<TestOut>>,
     options: OptionsOut,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tokens: Option<Tokens>,
+}
+
+/// Under a budget, the deepest group's hits go first, from the end, then
+/// the next group's, then the tests from the end. Groups, counts, reasons
+/// and risk stay.
+impl Shed for ImpactResult {
+    fn sheddable(&self) -> usize {
+        let hits: usize = self
+            .groups
+            .iter()
+            .flatten()
+            .map(|group| group.hits.len())
+            .sum();
+        hits + self.tests.as_ref().map_or(0, Vec::len)
+    }
+
+    fn shed(&mut self, mut count: usize) {
+        let mut groups: Vec<&mut GroupOut> = self.groups.iter_mut().flatten().collect();
+        groups.sort_by_key(|group| Reverse(group.depth));
+        for group in groups {
+            drop_last(&mut group.hits, &mut count);
+        }
+        if let Some(tests) = &mut self.tests {
+            drop_last(tests, &mut count);
+        }
+    }
+
+    fn set_tokens(&mut self, tokens: Tokens) {
+        self.tokens = Some(tokens);
+    }
 }
 
 /// One completeness reason. `count` is null where it cannot be counted.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct ReasonOut {
     reason: &'static str,
     count: Option<u64>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct CountsOut {
     direct: u64,
     total: u64,
@@ -60,7 +96,7 @@ struct CountsOut {
 
 /// The non-test hits of one depth: `total` of them, of which `hits` holds
 /// at most 100, with `truncated` set when there were more.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct GroupOut {
     depth: u8,
     total: usize,
@@ -71,7 +107,7 @@ struct GroupOut {
 /// One reached symbol. `name`, `kind`, `path`, and `line` describe it;
 /// `reason` and the site are the edge it was best reached by, and
 /// `confidence` is the product along that path.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct HitOut {
     name: String,
     kind: String,
@@ -84,14 +120,14 @@ struct HitOut {
 }
 
 /// A reached test: the hit shape plus its depth.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct TestOut {
     depth: u8,
     #[serde(flatten)]
     hit: HitOut,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct OptionsOut {
     depth: u8,
     min_confidence: f64,
@@ -99,7 +135,7 @@ struct OptionsOut {
 }
 
 /// The impact of the one symbol `request.symbol` names in the index of
-/// `request.repo`.
+/// `request.repo`, fitted to `request.max_tokens`.
 pub(crate) fn impact(request: &ImpactRequest) -> Result<ImpactResult, Failure> {
     if !request.options.in_range() {
         return Err(Failure::new(
@@ -107,6 +143,7 @@ pub(crate) fn impact(request: &ImpactRequest) -> Result<ImpactResult, Failure> {
             "depth must be 1 to 5 and min_confidence above 0 and at most 1",
         ));
     }
+    budget::check(request.max_tokens)?;
     let (store, names) = current_index(&request.repo)?;
     let found = lookup(&store, &names, &request.symbol)?;
     let options = request.options;
@@ -131,7 +168,7 @@ pub(crate) fn impact(request: &ImpactRequest) -> Result<ImpactResult, Failure> {
         });
         (Some(groups), tests)
     };
-    Ok(ImpactResult {
+    let result = ImpactResult {
         symbol: symbol_out(&names, found),
         risk: answer.risk.as_str(),
         exact: answer.exact,
@@ -144,7 +181,9 @@ pub(crate) fn impact(request: &ImpactRequest) -> Result<ImpactResult, Failure> {
             min_confidence: options.min_confidence,
             include_tests: options.include_tests,
         },
-    })
+        tokens: None,
+    };
+    budget::fit(result, request.max_tokens)
 }
 
 fn reason_out(reason: ReasonCount) -> ReasonOut {

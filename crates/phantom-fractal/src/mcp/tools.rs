@@ -1,19 +1,22 @@
 //! The tools: their definitions, their argument checks, and the
-//! [`crate::ops`] call behind each one (SPEC-w6 G2b, SPEC-w7 G3b).
+//! [`crate::ops`] call behind each one (SPEC-w6 G2b, SPEC-w7 G3b, SPEC-w8
+//! G0b and G0c).
 //!
 //! A tool never does an operation's work itself. It turns its arguments
 //! into the request the command line builds for the same flags, calls the
-//! operation, and returns the envelope the command line prints.
-
-use std::path::PathBuf;
+//! operation, and returns the envelope the command line prints. Its
+//! `repo` is checked against the [`Roots`] last, after every other
+//! argument.
 
 use phantom_fractal_analyze::ImpactOptions;
 use phantom_fractal_proto::ErrorKind;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
+use super::roots::Roots;
+use crate::ops::budget::{MAX_TOKENS_MAX, MAX_TOKENS_MIN};
 use crate::ops::map::{BUDGET_MAX, BUDGET_MIN};
-use crate::ops::rank::{DEFAULT_LIMIT, LIMIT_MAX, LIMIT_MIN};
+use crate::ops::rank::{DEFAULT_LIMIT, FOCUS_MAX, LIMIT_MAX, LIMIT_MIN, focus_cap};
 use crate::ops::{
     self, CallsRequest, Failure, FindRequest, ImpactRequest, IndexRequest, MapRequest, RankKind,
     RankRequest, ShowRequest, Target,
@@ -28,13 +31,18 @@ pub(crate) struct Outcome {
     pub(crate) is_error: bool,
 }
 
-const REPO: &str = "The indexed tree. Defaults to the server's working directory; a relative \
-    path resolves against it.";
+const REPO: &str = "The indexed tree: one of the server's roots. Defaults to the only root, or \
+    else to the server's working directory when it is a root; a relative path resolves against \
+    the working directory.";
 
 const SYMBOL: &str = "A bare name such as `parse`, or a qualified one such as `config::parse` or \
     `Config::load`.";
 
 const FOCUS: &str = "Indexed files, each relative to the repo, such as `src/lib.rs`.";
+
+const MAX_TOKENS: &str = "The most estimated tokens the reply may cost. List entries are \
+    dropped, in a fixed order, until the reply fits, and `data.tokens` gives the budget, the \
+    estimate and the count dropped.";
 
 /// The tool definitions `tools/list` returns. `index_repo` is listed only
 /// when `allow_index` is set.
@@ -50,6 +58,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
                 json!({
                     "query": { "type": "string", "description": "The exact symbol name." },
                     "repo": { "type": "string", "description": REPO },
+                    "max_tokens": max_tokens(),
                 }),
                 &["query"],
             ),
@@ -75,6 +84,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
                         "default": false,
                         "description": "Also return the symbol's source lines.",
                     },
+                    "max_tokens": max_tokens(),
                 }),
                 &[],
             ),
@@ -88,6 +98,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
                 json!({
                     "symbol": { "type": "string", "description": SYMBOL },
                     "repo": { "type": "string", "description": REPO },
+                    "max_tokens": max_tokens(),
                 }),
                 &["symbol"],
             ),
@@ -101,6 +112,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
                 json!({
                     "symbol": { "type": "string", "description": SYMBOL },
                     "repo": { "type": "string", "description": REPO },
+                    "max_tokens": max_tokens(),
                 }),
                 &["symbol"],
             ),
@@ -139,6 +151,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
                         "default": false,
                         "description": "Counts, reasons and risk only, without the hits.",
                     },
+                    "max_tokens": max_tokens(),
                 }),
                 &["symbol"],
             ),
@@ -160,6 +173,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
                     "focus": {
                         "type": "array",
                         "items": { "type": "string" },
+                        "maxItems": FOCUS_MAX,
                         "description": FOCUS,
                     },
                     "limit": {
@@ -170,6 +184,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
                         "description": "The most hits returned.",
                     },
                     "repo": { "type": "string", "description": REPO },
+                    "max_tokens": max_tokens(),
                 }),
                 &[],
             ),
@@ -191,6 +206,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
                     "focus": {
                         "type": "array",
                         "items": { "type": "string" },
+                        "maxItems": FOCUS_MAX,
                         "description": FOCUS,
                     },
                     "detail": {
@@ -217,8 +233,8 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
                 json!({
                     "path": {
                         "type": "string",
-                        "description": "The tree to index. A relative path resolves against the \
-                            server's working directory.",
+                        "description": "The tree to index: one of the server's roots. A relative \
+                            path resolves against the server's working directory.",
                     },
                 }),
                 &["path"],
@@ -227,6 +243,15 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
         }));
     }
     tools
+}
+
+fn max_tokens() -> Value {
+    json!({
+        "type": "integer",
+        "minimum": MAX_TOKENS_MIN,
+        "maximum": MAX_TOKENS_MAX,
+        "description": MAX_TOKENS,
+    })
 }
 
 fn schema(properties: Value, required: &[&str]) -> Value {
@@ -244,71 +269,65 @@ pub(crate) fn call(
     name: &str,
     arguments: &Map<String, Value>,
     allow_index: bool,
+    roots: &Roots,
 ) -> Option<Result<Outcome, ()>> {
     let outcome = match name {
-        "find_symbols" => find_symbols(arguments),
-        "show_symbol" => show_symbol(arguments),
-        "callers" => calls(arguments, ops::callers),
-        "callees" => calls(arguments, ops::callees),
-        "impact" => impact(arguments),
-        "top_ranked" => run(rank_request(arguments), ops::rank),
-        "repo_map" => run(map_request(arguments), ops::map),
-        "index_repo" if allow_index => index_repo(arguments),
+        "find_symbols" => run(find_request(arguments, roots), ops::find),
+        "show_symbol" => run(show_request(arguments, roots), ops::show),
+        "callers" => run(calls_request(arguments, roots), ops::callers),
+        "callees" => run(calls_request(arguments, roots), ops::callees),
+        "impact" => run(impact_request(arguments, roots), ops::impact),
+        "top_ranked" => run(rank_request(arguments, roots), ops::rank),
+        "repo_map" => run(map_request(arguments, roots), ops::map),
+        "index_repo" if allow_index => run(index_request(arguments, roots), ops::index),
         _ => return None,
     };
     Some(outcome)
 }
 
-fn find_symbols(arguments: &Map<String, Value>) -> Result<Outcome, ()> {
-    run(find_request(arguments), ops::find)
-}
-
-fn find_request(arguments: &Map<String, Value>) -> Result<FindRequest, Failure> {
-    let args = Args::new(arguments, &["query", "repo"])?;
+fn find_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<FindRequest, Failure> {
+    let args = Args::new(arguments, &["query", "repo", "max_tokens"])?;
+    let query = args.required_string("query")?;
+    let repo = args.string("repo")?;
+    let max_tokens = args.max_tokens()?;
     Ok(FindRequest {
-        query: args.required_string("query")?,
-        repo: args.repo()?,
+        query,
+        repo: roots.indexed(repo.as_deref())?,
+        max_tokens,
     })
 }
 
-fn show_symbol(arguments: &Map<String, Value>) -> Result<Outcome, ()> {
-    run(show_request(arguments), ops::show)
-}
-
-fn show_request(arguments: &Map<String, Value>) -> Result<ShowRequest, Failure> {
-    let args = Args::new(arguments, &["symbol", "id", "repo", "source"])?;
+fn show_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<ShowRequest, Failure> {
+    let args = Args::new(arguments, &["symbol", "id", "repo", "source", "max_tokens"])?;
     let target = match (args.string("symbol")?, args.string("id")?) {
         (Some(symbol), None) => Target::Name(symbol),
         (None, Some(key)) => Target::Id(key),
         _ => return Err(usage("give exactly one of symbol and id")),
     };
+    let repo = args.string("repo")?;
+    let source = args.boolean("source")?.unwrap_or(false);
+    let max_tokens = args.max_tokens()?;
     Ok(ShowRequest {
         target,
-        repo: args.repo()?,
-        source: args.boolean("source")?.unwrap_or(false),
+        repo: roots.indexed(repo.as_deref())?,
+        source,
+        max_tokens,
     })
 }
 
-fn calls<T: Serialize>(
-    arguments: &Map<String, Value>,
-    op: fn(&CallsRequest) -> Result<T, Failure>,
-) -> Result<Outcome, ()> {
-    run(calls_request(arguments), op)
-}
-
-fn calls_request(arguments: &Map<String, Value>) -> Result<CallsRequest, Failure> {
-    let args = Args::new(arguments, &["symbol", "repo"])?;
+fn calls_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<CallsRequest, Failure> {
+    let args = Args::new(arguments, &["symbol", "repo", "max_tokens"])?;
+    let symbol = args.required_string("symbol")?;
+    let repo = args.string("repo")?;
+    let max_tokens = args.max_tokens()?;
     Ok(CallsRequest {
-        symbol: args.required_string("symbol")?,
-        repo: args.repo()?,
+        symbol,
+        repo: roots.indexed(repo.as_deref())?,
+        max_tokens,
     })
 }
 
-fn impact(arguments: &Map<String, Value>) -> Result<Outcome, ()> {
-    run(impact_request(arguments), ops::impact)
-}
-
-fn impact_request(arguments: &Map<String, Value>) -> Result<ImpactRequest, Failure> {
+fn impact_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<ImpactRequest, Failure> {
     let args = Args::new(
         arguments,
         &[
@@ -318,6 +337,7 @@ fn impact_request(arguments: &Map<String, Value>) -> Result<ImpactRequest, Failu
             "min_confidence",
             "include_tests",
             "summary",
+            "max_tokens",
         ],
     )?;
     let defaults = ImpactOptions::default();
@@ -326,33 +346,43 @@ fn impact_request(arguments: &Map<String, Value>) -> Result<ImpactRequest, Failu
         min_confidence: args.min_confidence()?.unwrap_or(defaults.min_confidence),
         include_tests: args.boolean("include_tests")?.unwrap_or(true),
     };
+    let symbol = args.required_string("symbol")?;
+    let repo = args.string("repo")?;
+    let summary = args.boolean("summary")?.unwrap_or(false);
+    let max_tokens = args.max_tokens()?;
     Ok(ImpactRequest {
-        symbol: args.required_string("symbol")?,
-        repo: args.repo()?,
+        symbol,
+        repo: roots.indexed(repo.as_deref())?,
         options,
-        summary: args.boolean("summary")?.unwrap_or(false),
+        summary,
+        max_tokens,
     })
 }
 
-fn rank_request(arguments: &Map<String, Value>) -> Result<RankRequest, Failure> {
-    let args = Args::new(arguments, &["kind", "focus", "limit", "repo"])?;
+fn rank_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<RankRequest, Failure> {
+    let args = Args::new(arguments, &["kind", "focus", "limit", "repo", "max_tokens"])?;
     let kind = match args.string("kind")? {
         None => RankKind::Symbols,
         Some(text) => {
             RankKind::parse(&text).ok_or_else(|| usage("kind must be symbols or files"))?
         }
     };
+    let focus = args.focus()?;
+    let limit = args
+        .integer("limit", LIMIT_MIN, LIMIT_MAX)?
+        .unwrap_or(DEFAULT_LIMIT);
+    let repo = args.string("repo")?;
+    let max_tokens = args.max_tokens()?;
     Ok(RankRequest {
         kind,
-        focus: args.strings("focus")?,
-        limit: args
-            .integer("limit", LIMIT_MIN, LIMIT_MAX)?
-            .unwrap_or(DEFAULT_LIMIT),
-        repo: args.repo()?,
+        focus,
+        limit,
+        repo: roots.indexed(repo.as_deref())?,
+        max_tokens,
     })
 }
 
-fn map_request(arguments: &Map<String, Value>) -> Result<MapRequest, Failure> {
+fn map_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<MapRequest, Failure> {
     let args = Args::new(arguments, &["budget", "focus", "detail", "repo"])?;
     let detail = match args.string("detail")? {
         None => Default::default(),
@@ -360,24 +390,25 @@ fn map_request(arguments: &Map<String, Value>) -> Result<MapRequest, Failure> {
             ops::map::detail(&text).ok_or_else(|| usage("detail must be files, symbols or full"))?
         }
     };
+    let budget = args
+        .integer("budget", BUDGET_MIN, BUDGET_MAX)?
+        .ok_or_else(|| usage("budget is required"))?;
+    let focus = args.focus()?;
+    let repo = args.string("repo")?;
     Ok(MapRequest {
-        budget: args
-            .integer("budget", BUDGET_MIN, BUDGET_MAX)?
-            .ok_or_else(|| usage("budget is required"))?,
-        focus: args.strings("focus")?,
+        budget,
+        focus,
         detail,
-        repo: args.repo()?,
+        repo: roots.indexed(repo.as_deref())?,
     })
 }
 
-fn index_repo(arguments: &Map<String, Value>) -> Result<Outcome, ()> {
-    run(index_request(arguments), ops::index)
-}
-
-fn index_request(arguments: &Map<String, Value>) -> Result<IndexRequest, Failure> {
+/// `index_repo` takes a root whether or not it has an index yet.
+fn index_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<IndexRequest, Failure> {
     let args = Args::new(arguments, &["path"])?;
+    let path = args.required_string("path")?;
     Ok(IndexRequest {
-        path: PathBuf::from(args.required_string("path")?),
+        path: roots.root(Some(&path))?,
     })
 }
 
@@ -477,11 +508,18 @@ impl<'a> Args<'a> {
         }
     }
 
-    /// `repo`, or the working directory, as the command line defaults it.
-    fn repo(&self) -> Result<PathBuf, Failure> {
-        Ok(PathBuf::from(
-            self.string("repo")?.unwrap_or_else(|| ".".to_owned()),
-        ))
+    /// `focus`: an array of at most [`FOCUS_MAX`] strings, or empty when
+    /// absent.
+    fn focus(&self) -> Result<Vec<String>, Failure> {
+        let focus = self.strings("focus")?;
+        focus_cap(&focus)?;
+        Ok(focus)
+    }
+
+    /// `max_tokens`: an integer from [`MAX_TOKENS_MIN`] to
+    /// [`MAX_TOKENS_MAX`].
+    fn max_tokens(&self) -> Result<Option<u64>, Failure> {
+        self.integer("max_tokens", MAX_TOKENS_MIN, MAX_TOKENS_MAX)
     }
 
     /// `depth`: an integer from 1 to [`ImpactOptions::MAX_DEPTH`]. A number

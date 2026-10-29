@@ -11,6 +11,7 @@ use phantom_fractal_proto::ErrorKind;
 use phantom_fractal_store::SymbolDetail;
 use serde::Serialize;
 
+use super::budget::{self, Shed, Tokens, drop_last};
 use super::calls::{CallOut, Direction, edges};
 use super::lookup::{Names, current_index, lookup_keyed};
 use super::source::{SourceOut, read_source};
@@ -38,11 +39,13 @@ pub(crate) struct ShowRequest {
     /// Read the symbol's lines from its file. Without it no source text
     /// is read or returned.
     pub(crate) source: bool,
+    /// The most estimated tokens the reply may cost.
+    pub(crate) max_tokens: Option<u64>,
 }
 
 /// `data` of a successful `show`, with its keys in this order. `source`
 /// is present only when it was asked for.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct ShowResult {
     symbol: DetailOut,
     members: Members,
@@ -51,11 +54,38 @@ pub(crate) struct ShowResult {
     macro_args: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<SourceOut>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tokens: Option<Tokens>,
+}
+
+/// Under a budget, `source` goes first as a whole, then the callees, the
+/// callers and the members, each from the end. The symbol and the counts
+/// stay.
+impl Shed for ShowResult {
+    fn sheddable(&self) -> usize {
+        usize::from(self.source.is_some())
+            + self.callees.hits.len()
+            + self.callers.hits.len()
+            + self.members.hits.len()
+    }
+
+    fn shed(&mut self, mut count: usize) {
+        if count > 0 && self.source.take().is_some() {
+            count -= 1;
+        }
+        drop_last(&mut self.callees.hits, &mut count);
+        drop_last(&mut self.callers.hits, &mut count);
+        drop_last(&mut self.members.hits, &mut count);
+    }
+
+    fn set_tokens(&mut self, tokens: Tokens) {
+        self.tokens = Some(tokens);
+    }
 }
 
 /// One symbol's detail. `name` is the bare name and `qual_name` the name
 /// `callers` prints for it; `path` is relative to the indexed tree.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct DetailOut {
     name: String,
     qual_name: String,
@@ -72,7 +102,7 @@ struct DetailOut {
 
 /// The methods attributed to a struct, enum, or trait: at most
 /// [`MEMBER_CAP`], with `truncated` set when there were more.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct Members {
     hits: Vec<DetailOut>,
     truncated: bool,
@@ -80,7 +110,7 @@ struct Members {
 
 /// One side of the symbol's edges: `count` of them, of which `hits` holds
 /// the first [`SHOW_CALL_CAP`] in the `callers` or `callees` order.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct Calls {
     count: usize,
     hits: Vec<CallOut>,
@@ -92,8 +122,9 @@ struct Calls {
 }
 
 /// The detail of the one symbol `request.target` names in the index of
-/// `request.repo`.
+/// `request.repo`, fitted to `request.max_tokens`.
 pub(crate) fn show(request: &ShowRequest) -> Result<ShowResult, Failure> {
+    budget::check(request.max_tokens)?;
     let (store, names) = current_index(&request.repo)?;
     let id = match &request.target {
         Target::Name(query) => lookup_keyed(&store, &names, query)?.id,
@@ -122,7 +153,7 @@ pub(crate) fn show(request: &ShowRequest) -> Result<ShowResult, Failure> {
     } else {
         None
     };
-    Ok(ShowResult {
+    let result = ShowResult {
         symbol: detail_out(&names, detail),
         members: Members {
             hits: members
@@ -135,7 +166,9 @@ pub(crate) fn show(request: &ShowRequest) -> Result<ShowResult, Failure> {
         callees,
         macro_args,
         source,
-    })
+        tokens: None,
+    };
+    budget::fit(result, request.max_tokens)
 }
 
 fn calls(mut hits: Vec<CallOut>, unresolved_calls: Option<i64>) -> Calls {
