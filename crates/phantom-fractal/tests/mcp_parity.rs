@@ -1,6 +1,6 @@
 //! Every tool's `structuredContent` against the command line's envelope
-//! for the same operation and arguments, on `fixtures/impact` and
-//! `fixtures/detail` (SPEC-w6 G2b, G2c).
+//! for the same operation and arguments, on `fixtures/impact`,
+//! `fixtures/detail` and `fixtures/graph` (SPEC-w6 G2b, G2c; SPEC-w7 G3b).
 //!
 //! Each case runs the command line and the server from the same working
 //! directory against the same data directory. The text item must be the
@@ -59,8 +59,8 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-/// A working directory holding copies of both fixtures, and a data
-/// directory with both indexed.
+/// A working directory holding copies of the fixtures, and a data
+/// directory with each indexed.
 struct World {
     cwd: TempDir,
     data: TempDir,
@@ -72,7 +72,7 @@ impl World {
             cwd: TempDir::new("cwd"),
             data: TempDir::new("data"),
         };
-        for name in ["impact", "detail"] {
+        for name in ["impact", "detail", "graph"] {
             copy_tree(
                 &Path::new(FIXTURES).join(name),
                 &world.cwd.path().join(name),
@@ -505,4 +505,122 @@ fn index_repo_matches_the_cli_index() {
     assert_eq!(got[1].0, cli_second);
     assert_eq!(got[2].0, mcp_data.cli(&["index", "absent"], fresh.path()));
     assert!(got[2].2);
+}
+
+/// The bytes of every `graph.db` and `graph.db-wal` under `dir`, sorted by
+/// path. The shared-memory file is left out: readers may touch it.
+fn database_bytes(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in fs::read_dir(&dir).expect("read dir") {
+            let path = entry.expect("entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.ends_with("graph.db") || path.ends_with("graph.db-wal") {
+                let bytes = fs::read(&path).expect("read database");
+                out.push((path, bytes));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn top_ranked_and_repo_map_match_the_cli_and_write_nothing() {
+    let world = World::new();
+    let mut cases = Vec::new();
+    for repo in ["impact", "graph"] {
+        cases.extend([
+            case(
+                "top_ranked",
+                json!({ "repo": repo }),
+                &["rank", "--repo", repo],
+            ),
+            case(
+                "top_ranked",
+                json!({ "kind": "symbols", "limit": 3, "repo": repo }),
+                &["rank", "--symbols", "--limit", "3", "--repo", repo],
+            ),
+            case(
+                "top_ranked",
+                json!({ "kind": "files", "limit": 100, "repo": repo }),
+                &["rank", "--files", "--limit", "100", "--repo", repo],
+            ),
+            case(
+                "top_ranked",
+                json!({ "focus": ["nope.rs"], "repo": repo }),
+                &["rank", "--focus", "nope.rs", "--repo", repo],
+            ),
+            case(
+                "repo_map",
+                json!({ "budget": 1, "repo": repo }),
+                &["map", "--budget", "1", "--repo", repo],
+            ),
+            case(
+                "repo_map",
+                json!({ "budget": 500, "repo": repo }),
+                &["map", "--budget", "500", "--repo", repo],
+            ),
+            case(
+                "repo_map",
+                json!({ "budget": 100_000, "focus": ["nope.rs"], "repo": repo }),
+                &[
+                    "map", "--budget", "100000", "--focus", "nope.rs", "--repo", repo,
+                ],
+            ),
+        ]);
+        for budget in [60, 150, 500] {
+            for detail in ["files", "symbols", "full"] {
+                cases.push(case(
+                    "repo_map",
+                    json!({ "budget": budget, "detail": detail, "repo": repo }),
+                    &[
+                        "map",
+                        "--budget",
+                        &budget.to_string(),
+                        "--detail",
+                        detail,
+                        "--repo",
+                        repo,
+                    ],
+                ));
+            }
+        }
+    }
+    let focus = ["app/src/uses.rs", "./kit/src/lib.rs"];
+    cases.extend([
+        case(
+            "top_ranked",
+            json!({ "kind": "files", "focus": focus, "repo": "graph" }),
+            &[
+                "rank", "--files", "--focus", focus[0], "--focus", focus[1], "--repo", "graph",
+            ],
+        ),
+        case(
+            "repo_map",
+            json!({ "budget": 150, "focus": focus, "detail": "full", "repo": "graph" }),
+            &[
+                "map", "--budget", "150", "--focus", focus[0], "--focus", focus[1], "--detail",
+                "full", "--repo", "graph",
+            ],
+        ),
+        case(
+            "repo_map",
+            json!({ "budget": 500 }),
+            &["map", "--budget", "500"],
+        ),
+    ]);
+    let before = database_bytes(world.data.path());
+    assert!(before.len() >= 3, "one database per fixture");
+    let kinds = assert_parity(&world, world.cwd.path(), &[], &cases);
+    let mut want = Vec::new();
+    for _ in 0..2 {
+        want.extend(["ok", "ok", "ok", "not_found", "usage", "ok", "not_found"]);
+        want.extend(["ok"; 9]);
+    }
+    want.extend(["ok", "ok", "no_index"]);
+    assert_eq!(kinds, want);
+    assert_eq!(database_bytes(world.data.path()), before);
 }

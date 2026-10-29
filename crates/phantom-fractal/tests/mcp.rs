@@ -360,7 +360,9 @@ fn tools_list_matches_the_spec_table() {
             "show_symbol",
             "callers",
             "callees",
-            "impact"
+            "impact",
+            "top_ranked",
+            "repo_map"
         ]
     );
     let all = tools(&["--allow-index"]);
@@ -372,10 +374,12 @@ fn tools_list_matches_the_spec_table() {
             "callers",
             "callees",
             "impact",
+            "top_ranked",
+            "repo_map",
             "index_repo"
         ]
     );
-    assert_eq!(all[..5], read[..]);
+    assert_eq!(all[..7], read[..]);
     let properties = |tool: &Value| -> Vec<String> {
         let mut keys: Vec<String> = tool["inputSchema"]["properties"]
             .as_object()
@@ -386,7 +390,7 @@ fn tools_list_matches_the_spec_table() {
         keys.sort();
         keys
     };
-    let want: [(&str, &[&str], &[&str]); 6] = [
+    let want: [(&str, &[&str], &[&str]); 8] = [
         ("find_symbols", &["query", "repo"], &["query"]),
         ("show_symbol", &["id", "repo", "source", "symbol"], &[]),
         ("callers", &["repo", "symbol"], &["symbol"]),
@@ -402,6 +406,12 @@ fn tools_list_matches_the_spec_table() {
                 "symbol",
             ],
             &["symbol"],
+        ),
+        ("top_ranked", &["focus", "kind", "limit", "repo"], &[]),
+        (
+            "repo_map",
+            &["budget", "detail", "focus", "repo"],
+            &["budget"],
         ),
         ("index_repo", &["path"], &["path"]),
     ];
@@ -449,6 +459,29 @@ fn tools_list_matches_the_spec_table() {
         all[1]["inputSchema"]["properties"]["source"]["default"],
         false
     );
+    let ranked = &all[5]["inputSchema"]["properties"];
+    assert_eq!(
+        ranked["limit"],
+        json!({
+            "type": "integer", "minimum": 1, "maximum": 100, "default": 20,
+            "description": ranked["limit"]["description"],
+        })
+    );
+    assert_eq!(ranked["kind"]["enum"], json!(["symbols", "files"]));
+    assert_eq!(ranked["kind"]["default"], "symbols");
+    assert_eq!(ranked["focus"]["type"], "array");
+    assert_eq!(ranked["focus"]["items"], json!({ "type": "string" }));
+    let map = &all[6]["inputSchema"]["properties"];
+    assert_eq!(
+        map["budget"],
+        json!({
+            "type": "integer", "minimum": 1, "maximum": 100_000,
+            "description": map["budget"]["description"],
+        })
+    );
+    assert_eq!(map["detail"]["enum"], json!(["files", "symbols", "full"]));
+    assert_eq!(map["detail"]["default"], "symbols");
+    assert_eq!(map["focus"], ranked["focus"]);
 }
 
 /// The `structuredContent` of one tool result, checked against its text
@@ -533,6 +566,102 @@ fn unknown_tools_and_bad_arguments() {
         let envelope = envelope(reply);
         assert_eq!(
             *envelope,
+            json!({
+                "ok": false,
+                "data": null,
+                "error": { "kind": "usage", "message": message, "exit": 1 },
+                "schema": 1,
+            }),
+            "{reply}"
+        );
+    }
+}
+
+#[test]
+fn top_ranked_and_repo_map_refuse_bad_arguments() {
+    let cases = [
+        (
+            "top_ranked",
+            json!({ "kind": "both" }),
+            "kind must be symbols or files",
+        ),
+        ("top_ranked", json!({ "kind": 1 }), "kind must be a string"),
+        (
+            "top_ranked",
+            json!({ "limit": 0 }),
+            "limit must be an integer from 1 to 100",
+        ),
+        (
+            "top_ranked",
+            json!({ "limit": 101 }),
+            "limit must be an integer from 1 to 100",
+        ),
+        (
+            "top_ranked",
+            json!({ "limit": 2.5 }),
+            "limit must be an integer from 1 to 100",
+        ),
+        (
+            "top_ranked",
+            json!({ "limit": -1 }),
+            "limit must be an integer from 1 to 100",
+        ),
+        (
+            "top_ranked",
+            json!({ "focus": "src/lib.rs" }),
+            "focus must be an array of strings",
+        ),
+        (
+            "top_ranked",
+            json!({ "focus": [1] }),
+            "focus must be an array of strings",
+        ),
+        (
+            "top_ranked",
+            json!({ "symbol": "a" }),
+            "unknown argument; this tool takes kind, focus, limit, repo",
+        ),
+        ("repo_map", json!({}), "budget is required"),
+        (
+            "repo_map",
+            json!({ "budget": 0 }),
+            "budget must be an integer from 1 to 100000",
+        ),
+        (
+            "repo_map",
+            json!({ "budget": 100_001 }),
+            "budget must be an integer from 1 to 100000",
+        ),
+        (
+            "repo_map",
+            json!({ "budget": "500" }),
+            "budget must be an integer from 1 to 100000",
+        ),
+        (
+            "repo_map",
+            json!({ "budget": 500, "detail": "all" }),
+            "detail must be files, symbols or full",
+        ),
+        (
+            "repo_map",
+            json!({ "budget": 500, "focus": [null] }),
+            "focus must be an array of strings",
+        ),
+        (
+            "repo_map",
+            json!({ "budget": 500, "max_tokens": 5 }),
+            "unknown argument; this tool takes budget, focus, detail, repo",
+        ),
+    ];
+    let mut messages = vec![initialize(1, "2025-11-25")];
+    for (id, (tool, arguments, _)) in (2..).zip(&cases) {
+        messages.push(call(id, tool, arguments.clone()));
+    }
+    let replies = session(&[], &transcript(&messages));
+    assert_eq!(replies.len(), 1 + cases.len());
+    for (reply, (_, _, message)) in replies[1..].iter().zip(cases) {
+        assert_eq!(
+            *envelope(reply),
             json!({
                 "ok": false,
                 "data": null,

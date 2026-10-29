@@ -12,6 +12,8 @@ pub(crate) mod find;
 pub(crate) mod impact;
 pub(crate) mod index;
 pub(crate) mod lookup;
+pub(crate) mod map;
+pub(crate) mod rank;
 pub(crate) mod show;
 mod source;
 pub(crate) mod version;
@@ -27,6 +29,8 @@ pub(crate) use calls::{CallsRequest, callees, callers};
 pub(crate) use find::{FindRequest, find};
 pub(crate) use impact::{ImpactRequest, impact};
 pub(crate) use index::{IndexRequest, index};
+pub(crate) use map::{MapRequest, map};
+pub(crate) use rank::{RankKind, RankRequest, rank};
 pub(crate) use show::{ShowRequest, Target, show};
 pub(crate) use version::{VersionRequest, version};
 
