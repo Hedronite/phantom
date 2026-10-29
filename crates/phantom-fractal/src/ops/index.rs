@@ -1,4 +1,5 @@
-//! `index`: store the Rust files under a tree and resolve their calls.
+//! `index`: store the Rust files under a tree, resolve their calls, and
+//! store the rank of the graph they make.
 
 use std::path::{Path, PathBuf};
 
@@ -117,7 +118,20 @@ pub(crate) fn index(request: &IndexRequest) -> Result<IndexSummary, Failure> {
         Some(graph) => graph,
         None => stored_graph(&store, &root)?,
     };
+    store_rank(&mut store)?;
     Ok(IndexSummary::new(&report, &graph))
+}
+
+/// Computes the rank and stores it, only when the stored rank is not the
+/// current graph's. A pass that rebuilt nothing leaves the epochs equal
+/// and writes nothing.
+fn store_rank(store: &mut Store) -> Result<(), Failure> {
+    if store.rank_epoch()? == store.graph_epoch()? {
+        return Ok(());
+    }
+    let ranks = phantom_fractal_analyze::rank(&*store)?;
+    store.write_rank(ranks.epoch, &ranks.symbols, &ranks.files)?;
+    Ok(())
 }
 
 /// The graph counts of an index pass that rebuilt nothing, read from the

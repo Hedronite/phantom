@@ -89,9 +89,17 @@ impl Names {
 }
 
 /// The store for the tree at `repo` and its symbol names. It is `NoIndex`
-/// unless the index was written by this extractor version, as well as in
-/// every case [`open_index`] refuses.
+/// in every case [`current_store`] refuses.
 pub(crate) fn current_index(repo: &Path) -> Result<(Store, Names), Failure> {
+    let store = current_store(repo)?;
+    let names = Names::new(store.resolve_input()?);
+    Ok((store, names))
+}
+
+/// The store for the tree at `repo`. It is `NoIndex` unless the index was
+/// written by this extractor version, as well as in every case
+/// [`open_index`] refuses.
+pub(crate) fn current_store(repo: &Path) -> Result<Store, Failure> {
     let store = open_index(repo)?;
     if store.extractor_version()? != Some(EXTRACTOR_VERSION) {
         return Err(Failure::new(
@@ -99,8 +107,7 @@ pub(crate) fn current_index(repo: &Path) -> Result<(Store, Names), Failure> {
             "the index has no call edges; run index again",
         ));
     }
-    let names = Names::new(store.resolve_input()?);
-    Ok((store, names))
+    Ok(store)
 }
 
 /// The one stored symbol `query` names. None is `NotFound`; more than one

@@ -6,8 +6,9 @@
 //! return the stored call edges of one symbol, at most 100. `impact SYMBOL`
 //! walks those edges backwards to say what a change to the symbol reaches.
 //! `show SYMBOL` gives one symbol's detail, members, and a capped look at
-//! its edges, with its source under `--source`. `version` says what this
-//! binary is and needs no index. Each prints the JSON envelope from
+//! its edges, with its source under `--source`. `rank` lists the
+//! best-ranked symbols or files, and `map` packs a ranked repo map into a
+//! token budget. `version` says what this binary is and needs no index. Each prints the JSON envelope from
 //! `phantom-fractal-proto`. `mcp` serves the same operations to an MCP
 //! client over stdin and stdout. There are no other commands.
 //!
@@ -28,8 +29,8 @@ use phantom_fractal_analyze::ImpactOptions;
 use serde::Serialize;
 
 use crate::ops::{
-    CallsRequest, Failure, FindRequest, ImpactRequest, IndexRequest, ShowRequest, Target,
-    VersionRequest,
+    CallsRequest, Failure, FindRequest, ImpactRequest, IndexRequest, MapRequest, RankKind,
+    RankRequest, ShowRequest, Target, VersionRequest,
 };
 
 /// Canon exit 1: usage or internal error.
@@ -118,6 +119,43 @@ enum Command {
         #[arg(long)]
         source: bool,
     },
+    /// List the best-ranked symbols, or files, of the index.
+    Rank {
+        /// Rank files instead of symbols.
+        #[arg(long, conflicts_with = "symbols")]
+        files: bool,
+        /// Rank symbols, the default.
+        #[arg(long)]
+        symbols: bool,
+        /// An indexed file, relative to the repo, to personalise the rank
+        /// to. Repeatable.
+        #[arg(long = "focus", value_name = "PATH")]
+        focus: Vec<String>,
+        /// Most hits returned, 1 to 100.
+        #[arg(long, default_value_t = ops::rank::DEFAULT_LIMIT,
+              value_parser = clap::value_parser!(u64).range(ops::rank::LIMIT_MIN..=ops::rank::LIMIT_MAX))]
+        limit: u64,
+        /// Tree that was indexed. Defaults to the current directory.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
+    /// Pack a ranked map of the repo into a budget of estimated tokens.
+    Map {
+        /// The most estimated tokens the map may cost, 1 to 100000.
+        #[arg(long,
+              value_parser = clap::value_parser!(u64).range(ops::map::BUDGET_MIN..=ops::map::BUDGET_MAX))]
+        budget: u64,
+        /// An indexed file, relative to the repo, to put first. Repeatable.
+        #[arg(long = "focus", value_name = "PATH")]
+        focus: Vec<String>,
+        /// How much of each file to print.
+        #[arg(long, default_value = "symbols",
+              value_parser = ["files", "symbols", "full"])]
+        detail: String,
+        /// Tree that was indexed. Defaults to the current directory.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
     /// Print the name, version, and commit of this binary. Needs no index.
     Version,
     /// Serve the read operations to an MCP client: JSON-RPC on stdin and
@@ -173,6 +211,34 @@ fn main() -> ExitCode {
                 source,
             }))
         }
+        Command::Rank {
+            files,
+            symbols: _,
+            focus,
+            limit,
+            repo,
+        } => emit(ops::rank(&RankRequest {
+            kind: if files {
+                RankKind::Files
+            } else {
+                RankKind::Symbols
+            },
+            focus,
+            limit,
+            repo,
+        })),
+        Command::Map {
+            budget,
+            focus,
+            detail,
+            repo,
+        } => emit(ops::map(&MapRequest {
+            budget,
+            focus,
+            // clap admits only the three names.
+            detail: ops::map::detail(&detail).unwrap_or_default(),
+            repo,
+        })),
         Command::Version => emit(ops::version(&VersionRequest)),
         Command::Mcp { allow_index } => mcp::serve(allow_index),
     }
