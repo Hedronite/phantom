@@ -1,0 +1,4 @@
+phantom-fractal map | budget 60 | used 51 | rank 1
+app/src/traits.rs  [r 0.203]
+  pub trait Named  :1
+-- omitted: 6 files, 26 symbols (raise --budget or use --focus)

@@ -1,0 +1,14 @@
+phantom-fractal map | budget 150 | used 142 | rank 1
+app/src/traits.rs  [r 0.203]
+  pub trait Named  :1
+kit/src/lib.rs  [r 0.197]
+  pub trait Shape  :6
+    /// Something with an area.
+  pub fn scale(x: f64) -> f64  :11
+app/src/shapes.rs  [r 0.191]
+  pub fn Circle::new(r: f64) -> Self  :20
+  pub struct Circle  :4
+  pub struct Square  :8
+  pub enum Tile  :12
+  pub struct Wrapper<T>  :17
+-- omitted: 4 files, 19 symbols (raise --budget or use --focus)
