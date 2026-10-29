@@ -4,6 +4,8 @@
 
 use serde::Serialize;
 
+use super::Failure;
+
 /// The commit `build.rs` found, or empty when it found none.
 const GIT_SHA: &str = env!("PHANTOM_FRACTAL_BUILD_GIT_SHA");
 
@@ -20,12 +22,16 @@ pub(crate) struct VersionInfo {
     store_schema: i64,
 }
 
-pub(crate) fn version() -> VersionInfo {
-    VersionInfo {
+/// What `version` is asked for: nothing.
+pub(crate) struct VersionRequest;
+
+/// What this binary is. It never fails.
+pub(crate) fn version(_request: &VersionRequest) -> Result<VersionInfo, Failure> {
+    Ok(VersionInfo {
         name: "phantom-fractal",
         version: env!("CARGO_PKG_VERSION"),
         git_sha: (!GIT_SHA.is_empty()).then_some(GIT_SHA),
         extractor_version: phantom_fractal_extract::EXTRACTOR_VERSION,
         store_schema: phantom_fractal_store::SCHEMA_VERSION,
-    }
+    })
 }

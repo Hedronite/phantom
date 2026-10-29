@@ -4,16 +4,23 @@
 //! completeness reasons, and the risk level come from
 //! `phantom-fractal-analyze`. Every path is relative to the indexed tree.
 
-use std::path::Path;
+use std::path::PathBuf;
 
 use phantom_fractal_analyze::{Counts, Group, Hit, ImpactOptions, ReasonCount};
+use phantom_fractal_proto::ErrorKind;
 use serde::Serialize;
 
-use crate::Failure;
-use crate::calls::{Names, SymbolOut, current_index, lookup, symbol_out};
+use super::Failure;
+use super::lookup::{Names, SymbolOut, current_index, lookup, symbol_out};
 
-/// What `impact` was asked for, past the symbol and the repo.
-pub(crate) struct Request {
+/// What `impact` is asked for.
+pub(crate) struct ImpactRequest {
+    /// A bare, in-file, or module-qualified name.
+    pub(crate) symbol: String,
+    /// The indexed tree.
+    pub(crate) repo: PathBuf,
+    /// The walk's depth, confidence floor, and whether tests count. Out
+    /// of range is `Usage`.
     pub(crate) options: ImpactOptions,
     /// Drop `groups` and `tests` from the answer.
     pub(crate) summary: bool,
@@ -91,10 +98,17 @@ struct OptionsOut {
     include_tests: bool,
 }
 
-/// The impact of the one symbol `query` names in the index of `repo`.
-pub(crate) fn impact(query: &str, repo: &Path, request: &Request) -> Result<ImpactResult, Failure> {
-    let (store, names) = current_index(repo)?;
-    let found = lookup(&store, &names, query)?;
+/// The impact of the one symbol `request.symbol` names in the index of
+/// `request.repo`.
+pub(crate) fn impact(request: &ImpactRequest) -> Result<ImpactResult, Failure> {
+    if !request.options.in_range() {
+        return Err(Failure::new(
+            ErrorKind::Usage,
+            "depth must be 1 to 5 and min_confidence above 0 and at most 1",
+        ));
+    }
+    let (store, names) = current_index(&request.repo)?;
+    let found = lookup(&store, &names, &request.symbol)?;
     let options = request.options;
     let answer = phantom_fractal_analyze::impact(&store, found.id, &options)?;
     let (groups, tests) = if request.summary {
