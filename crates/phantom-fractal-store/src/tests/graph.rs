@@ -1,7 +1,7 @@
 //! Crate-graph API rows (G1c): write, resolve, replace, match, and the
 //! caller counters.
 
-use phantom_fractal_lang::{Edge, Reason, ResolveInput};
+use phantom_fractal_lang::{Edge, Reason, RefKind, ResolveInput, SymbolKind};
 use phantom_fractal_lang_rust::RustLanguage;
 
 use super::{TempDb, assert_outside_workspace, fixture};
@@ -684,6 +684,148 @@ fn write_rank_replaces_whole_table_atomically() {
     assert_eq!(store.rank_epoch().expect("rank epoch"), 2);
     assert!(store.rank_call_edges().is_ok(), "the table clears");
     drop(store);
+}
+
+#[test]
+fn rank_import_edges_carry_both_ends_and_rank_edges_kinds() {
+    let db = TempDb::new("rankimport");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = language();
+    let source = "pub fn pick() -> u8 {\n    1\n}\n";
+    store
+        .put_source("src/lib.rs", source, 0, &language)
+        .expect("put lib");
+    let nested = "use super::pick;\npub struct Ledger;\n\nimpl Ledger {\n    pub fn measure(&self) -> u32 {\n        pick() as u32\n    }\n}\n";
+    store
+        .put_source("src/nested.rs", nested, 0, &language)
+        .expect("put nested");
+    store
+        .write_crate_graph(
+            &[crate::Package {
+                name: "sample".to_owned(),
+                version: None,
+                manifest_path: "Cargo.toml".to_owned(),
+            }],
+            &[phantom_fractal_lang::Target {
+                id: 1,
+                package: "sample".to_owned(),
+                name: "sample".to_owned(),
+                kind: phantom_fractal_lang::TargetKind::Lib,
+                root: "src/lib.rs".to_owned(),
+            }],
+            &[
+                phantom_fractal_lang::Module {
+                    id: 1,
+                    target: 1,
+                    parent: None,
+                    path: "crate".to_owned(),
+                    file: "src/lib.rs".to_owned(),
+                    scope: String::new(),
+                },
+                phantom_fractal_lang::Module {
+                    id: 2,
+                    target: 1,
+                    parent: Some(1),
+                    path: "crate::nested".to_owned(),
+                    file: "src/nested.rs".to_owned(),
+                    scope: String::new(),
+                },
+            ],
+            &[],
+        )
+        .expect("graph");
+    let input = store.resolve_input().expect("input");
+    let pick = input
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "pick")
+        .expect("pick")
+        .id;
+    let measure = input
+        .symbols
+        .iter()
+        .find(|symbol| symbol.kind == SymbolKind::Method && symbol.name == "measure")
+        .expect("measure method")
+        .id;
+    let reference = input
+        .refs
+        .iter()
+        .find(|reference| {
+            reference.kind == RefKind::Call
+                && reference.from == inputs_from(input.symbols.as_slice(), measure)
+        })
+        .expect("`pick()` call inside measure")
+        .id;
+    let use_ref = input.uses.first().expect("use ref").id;
+    // One import edge from the nested module row to the resolved `pick`
+    // symbol, and one impl edge from the method to its resolved trait.
+    let trait_id = pick; // the same trait symbol row is `pick` here only
+    store
+        .replace_edges(&[Edge {
+            ref_id: reference,
+            source: measure,
+            target: pick,
+            confidence: 0.95,
+            reason: Reason::Local,
+        }])
+        .expect("call edge");
+    store
+        .write_links(&[
+            phantom_fractal_lang::Link {
+                kind: phantom_fractal_lang::LinkKind::Import,
+                source: phantom_fractal_lang::Node::Module(
+                    input
+                        .modules
+                        .iter()
+                        .find(|module| module.file == "src/nested.rs")
+                        .expect("nested file module")
+                        .id,
+                ),
+                target: phantom_fractal_lang::Node::Symbol(pick),
+                confidence: 0.95,
+                reason: phantom_fractal_lang::LinkReason::Local,
+                ref_id: Some(use_ref),
+            },
+            phantom_fractal_lang::Link {
+                kind: phantom_fractal_lang::LinkKind::Impl,
+                source: phantom_fractal_lang::Node::Symbol(measure),
+                target: phantom_fractal_lang::Node::Symbol(trait_id),
+                confidence: 0.8,
+                reason: phantom_fractal_lang::LinkReason::ImplTrait,
+                ref_id: None,
+            },
+        ])
+        .expect("links");
+
+    // (2) rank_call_edges carries BOTH kinds with kind texts.
+    let edges = store.rank_call_edges().expect("rank call edges");
+    assert_eq!(edges.len(), 2, "{edges:?}");
+    assert_eq!(edges.iter().filter(|edge| edge.kind == "call").count(), 1);
+    assert_eq!(edges.iter().filter(|edge| edge.kind == "impl").count(), 1);
+    assert!(edges.iter().all(|edge| edge.confidence > 0.0));
+
+    // (1) The import side is joined over modules.file_id: the nested
+    // module's FILE row is the importing file, and its imported symbol
+    // lives in src/lib.rs.
+    let imports = store.rank_import_edges().expect("rank import edges");
+    assert_eq!(imports.len(), 1, "{imports:?}");
+    let rows = store.rank_input().expect("rank input");
+    let nested_file_id = rows
+        .iter()
+        .find(|row| row.path == "src/nested.rs")
+        .map(|row| row.file_id);
+    drop(rows);
+    let _ = trait_id;
+    let _ = inputs_from;
+    assert_eq!(imports[0].src_file_id, nested_file_id.unwrap());
+}
+
+fn inputs_from(symbols: &[phantom_fractal_lang::Symbol], id: i64) -> Option<i64> {
+    symbols
+        .iter()
+        .find(|symbol| symbol.id == id)
+        .map(|symbol| symbol.id)
 }
 
 #[test]

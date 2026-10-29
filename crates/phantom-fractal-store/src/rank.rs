@@ -28,11 +28,15 @@ pub struct RankSymbolRow {
     pub is_main: bool,
 }
 
-/// One call or `impl` out-edge of a symbol.
+/// One `call` or `impl` out-edge of a symbol. The rank weights `call`
+/// by its confidence and `impl` by its own rule, so the kind text ships
+/// with the row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RankEdge {
     pub src_id: Id,
     pub dst_id: Id,
+    /// `call` or `impl`, as stored in `edges.kind`.
+    pub kind: String,
     pub confidence: f64,
 }
 
@@ -123,12 +127,11 @@ impl crate::Store {
         Ok(out)
     }
 
-    /// Every `call` and `impl` out-edge with its confidence, filtered by
-    /// kind and with the symbol kinds at the ends; a pair that the rank
-    /// weights over no confidence is not stored here.
+    /// Every `call` and `impl` out-edge with its kind text and
+    /// confidence, ordered by id.
     pub fn rank_call_edges(&self) -> Result<Vec<RankEdge>, StoreError> {
         let mut statement = self.conn.prepare(
-            "SELECT e.src_id, e.dst_id, e.confidence
+            "SELECT e.src_id, e.dst_id, e.kind, e.confidence
              FROM edges e
              WHERE e.kind IN ('call', 'impl')
              ORDER BY e.id",
@@ -139,26 +142,39 @@ impl crate::Store {
             out.push(RankEdge {
                 src_id: row.get(0)?,
                 dst_id: row.get(1)?,
-                confidence: row.get(2)?,
+                kind: row.get(2)?,
+                confidence: row.get(3)?,
             });
         }
         Ok(out)
     }
 
-    /// Every file-level `import` edge ('importing file, imported symbol
-    /// file'): use refs whose import edge carries a module source and a
-    /// symbol target.
+    /// Every file-level `import` edge as `(importing file, imported
+    /// target's file)`: the source id is a modules row id, joined over
+    /// `modules.file_id`; the target may be a symbol (its file) or a
+    /// module (its file), and both ends reach the files table.
     pub fn rank_import_edges(&self) -> Result<Vec<RankImportEdge>, StoreError> {
         let mut statement = self.conn.prepare(
             "SELECT sf.id, df.id
              FROM edges e
-             JOIN files sf ON sf.id = e.src_id
+             JOIN modules m ON m.id = e.src_id
+             JOIN files sf ON sf.id = m.file_id
+             JOIN modules tm ON tm.id = e.dst_id
+             JOIN files df ON df.id = tm.file_id
+             WHERE e.kind = 'import'
+               AND e.src_kind = 'module'
+               AND e.dst_kind = 'module'
+             UNION ALL
+             SELECT sf.id, df.id
+             FROM edges e
+             JOIN modules m ON m.id = e.src_id
+             JOIN files sf ON sf.id = m.file_id
              JOIN symbols s ON s.id = e.dst_id
              JOIN files df ON df.id = s.file_id
              WHERE e.kind = 'import'
                AND e.src_kind = 'module'
                AND e.dst_kind = 'symbol'
-             ORDER BY e.id",
+             ORDER BY 1, 2",
         )?;
         let mut rows = statement.query([])?;
         let mut out = Vec::new();
