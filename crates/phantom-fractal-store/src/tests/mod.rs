@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod detail;
 mod dirs;
 mod graph;
 mod legacy;

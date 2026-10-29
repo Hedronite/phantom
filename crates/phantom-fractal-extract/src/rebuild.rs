@@ -4,8 +4,8 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use phantom_fractal_lang::{Language, ResolveInput};
-use phantom_fractal_lang_rust::{RustLanguage, resolve};
+use phantom_fractal_lang::{Id, Language, ResolveInput};
+use phantom_fractal_lang_rust::{RustLanguage, method_owners, resolve};
 use phantom_fractal_store::{Store, StoreError};
 
 use crate::deps;
@@ -15,8 +15,9 @@ use crate::walk::{Candidate, walk};
 use crate::{EXTRACTOR_VERSION, GraphReport, IndexError, ReasonCounts};
 
 /// Builds packages, targets, and modules from the kept files, writes them,
-/// resolves the stored call references, replaces the edges, and stores the
-/// extractor version, then the workspace fingerprint and `.rs` skip count.
+/// resolves the stored call references, replaces the edges, writes each
+/// method's owning type, and stores the extractor version, then the
+/// workspace fingerprint and `.rs` skip count.
 ///
 /// Module declarations are not stored, so each kept `.rs` file is read and
 /// extracted again here. A file that no longer reads as UTF-8 source
@@ -55,6 +56,7 @@ pub(crate) fn rebuild(
     let input = resolve_input(store, &manifests)?;
     let (edges, counts) = resolve(&input);
     store.replace_edges(&edges)?;
+    store.write_method_owners(&method_owners(&input))?;
     store.set_extractor_version(EXTRACTOR_VERSION)?;
     store.set_workspace_fingerprint(&stamp.fingerprint, stamp.rs_skipped)?;
     Ok(GraphReport {
@@ -90,6 +92,14 @@ pub fn stored_graph(store: &Store, root: &Path) -> Result<GraphReport, IndexErro
         counts,
         edges_by_reason: ReasonCounts::of(&edges),
     })
+}
+
+/// The `(method, type)` owner pairs of the tree at `root` as last indexed
+/// into `store`, read without writing: the pairs [`rebuild`] passes to
+/// `write_method_owners`, from the same resolver input.
+pub fn stored_method_owners(store: &Store, root: &Path) -> Result<Vec<(Id, Id)>, IndexError> {
+    let manifests = kept_manifests(&read_manifests(&walk(root)?)?);
+    Ok(method_owners(&resolve_input(store, &manifests)?))
 }
 
 /// What the resolver reads: the store's rows, and the `deps` the walked

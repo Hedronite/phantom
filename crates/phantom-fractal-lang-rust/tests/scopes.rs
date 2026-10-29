@@ -104,8 +104,25 @@ fn method(
         visibility,
         scope: scope.to_owned(),
         start_line,
+        end_line: 0,
+        signature: String::new(),
+        doc_summary: None,
         is_test: false,
     }
+}
+
+/// `methods` with the detail fields cleared. `tests/detail.rs` in the
+/// extract crate checks them over `fixtures/detail`.
+fn without_detail(methods: Vec<Method>) -> Vec<Method> {
+    methods
+        .into_iter()
+        .map(|method| Method {
+            end_line: 0,
+            signature: String::new(),
+            doc_summary: None,
+            ..method
+        })
+        .collect()
 }
 
 #[test]
@@ -131,7 +148,7 @@ fn methods_carry_owner_trait_and_scope() {
             37,
         ),
     ];
-    assert_eq!(extract(SCOPES).methods, expected);
+    assert_eq!(without_detail(extract(SCOPES).methods), expected);
 }
 
 #[test]

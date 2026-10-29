@@ -7,7 +7,9 @@ use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::process::Command;
 
-use common::{BIG_HEAD, EDGE_HEAD, FixtureRepo, HARD_OUT_TEXT, TempDir, rust_bytes, write};
+use common::{
+    BIG_HEAD, EDGE_HEAD, FixtureRepo, HARD_OUT_TEXT, TempDir, rust_bytes, without_detail, write,
+};
 use phantom_fractal_extract::{
     IndexReport, MAX_FILE_BYTES, SkipReason, Skipped, Source, index, read_source,
 };
@@ -158,9 +160,12 @@ fn index_stores_the_cap_file_and_no_prefix_of_a_longer_one() {
         name: "edge_symbol".to_owned(),
         visibility: Visibility::Public,
         start_line: 1,
+        end_line: 0,
+        signature: String::new(),
+        doc_summary: None,
         is_test: false,
     };
-    let items = store.read_items("edge.rs").expect("read");
+    let items = without_detail(store.read_items("edge.rs").expect("read"));
     assert!(items.contains(&edge_symbol), "{items:?}");
     assert!(store.match_count("edge_symbol").expect("match") >= 1);
     assert!(store.read_items("big.rs").expect("read").is_empty());

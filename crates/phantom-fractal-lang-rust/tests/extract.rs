@@ -19,8 +19,25 @@ fn item(kind: ItemKind, name: &str, visibility: Visibility, start_line: u32) -> 
         name: name.to_owned(),
         visibility,
         start_line,
+        end_line: 0,
+        signature: String::new(),
+        doc_summary: None,
         is_test: false,
     }
+}
+
+/// `items` with the detail fields cleared. `tests/detail.rs` in the extract
+/// crate checks them over `fixtures/detail`.
+fn without_detail(items: Vec<Item>) -> Vec<Item> {
+    items
+        .into_iter()
+        .map(|item| Item {
+            end_line: 0,
+            signature: String::new(),
+            doc_summary: None,
+            ..item
+        })
+        .collect()
 }
 
 fn import(
@@ -62,7 +79,7 @@ fn items_fixture_gives_kind_name_visibility_and_line() {
         item(Function, "inner_helper", restricted("pub(self)"), 51),
     ];
     let got = extract(ITEMS);
-    assert_eq!(got.items, expected);
+    assert_eq!(without_detail(got.items.clone()), expected);
     assert!(got.imports.is_empty());
 }
 
@@ -94,7 +111,7 @@ fn imports_fixture_gives_modules_as_items() {
         item(Module, "cache", Crate, 6),
         item(Function, "scoped", Private, 22),
     ];
-    assert_eq!(extract(IMPORTS).items, expected);
+    assert_eq!(without_detail(extract(IMPORTS).items), expected);
 }
 
 #[test]

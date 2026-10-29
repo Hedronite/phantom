@@ -17,6 +17,12 @@ pub use resolve::{
     Target, TargetKind, UseBinding,
 };
 
+/// The most chars an [`Item::signature`] keeps before `…`.
+pub const SIGNATURE_CHARS: usize = 256;
+
+/// The most chars an [`Item::doc_summary`] keeps before `…`.
+pub const DOC_SUMMARY_CHARS: usize = 160;
+
 /// A language Phantom can extract.
 pub trait Language {
     /// Short lowercase name, such as `rust`.
@@ -137,6 +143,12 @@ pub struct Method {
     pub scope: String,
     /// 1-based line of the `fn`'s first token, after any attributes.
     pub start_line: u32,
+    /// See [`Item::end_line`].
+    pub end_line: u32,
+    /// See [`Item::signature`].
+    pub signature: String,
+    /// See [`Item::doc_summary`].
+    pub doc_summary: Option<String>,
     /// See [`Item::is_test`].
     pub is_test: bool,
 }
@@ -165,6 +177,24 @@ pub struct Item {
     pub visibility: Visibility,
     /// 1-based line of the item's first token, after any attributes.
     pub start_line: u32,
+    /// 1-based line of the item's last byte, body included.
+    pub end_line: u32,
+    /// The item's text from its first token after attributes up to, not
+    /// including, its body: the block, field list (tuple fields included),
+    /// variant list, or declaration list. Without a body it runs up to the
+    /// closing `;`, which is left out. Whitespace runs collapse to one
+    /// space, control characters are removed, and the text is cut at
+    /// [`SIGNATURE_CHARS`] chars with `…` appended when cut.
+    pub signature: String,
+    /// The first sentence of the first paragraph of the outer doc comments
+    /// directly above the item: `///` lines and `/** */` blocks, with
+    /// attributes and ordinary comments allowed in between. A sentence ends
+    /// at the first `.` followed by whitespace or the paragraph's end.
+    /// Whitespace collapses, control characters are removed, and the text
+    /// is cut at [`DOC_SUMMARY_CHARS`] chars with `…` appended when cut.
+    /// `None` without an outer doc comment, or when its first paragraph is
+    /// empty. `//!`, `/*! */` and `#[doc = ..]` never count.
+    pub doc_summary: Option<String>,
     /// True when the item has `#[test]` or another attribute whose path
     /// ends in `test`, such as `#[tokio::test]`; or has `#[cfg(test)]`
     /// exactly, whitespace removed; or sits inside an inline `mod` that

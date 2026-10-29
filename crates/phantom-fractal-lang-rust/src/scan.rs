@@ -13,7 +13,7 @@ use phantom_fractal_lang::{Caller, Extract, Method, ModDecl, RefKind, Reference,
 use tree_sitter::Node;
 
 use crate::macro_args::call_shapes;
-use crate::{at_module_scope, attrs, bindings, compact, start_line, visibility};
+use crate::{at_module_scope, attrs, bindings, compact, detail, start_line, visibility};
 
 /// What a node inherits from its ancestors.
 struct Context {
@@ -276,6 +276,7 @@ fn method(function: Node<'_>, src: &[u8], scope: &str) -> Option<Method> {
         .children(&mut cursor)
         .find(|child| child.kind() == "visibility_modifier")
         .map_or(Visibility::Private, |modifier| visibility(modifier, src));
+    let detail = detail::detail(function, src);
     Some(Method {
         owner: owner_name(self_type, src),
         owner_path: compact(self_type, src),
@@ -286,6 +287,9 @@ fn method(function: Node<'_>, src: &[u8], scope: &str) -> Option<Method> {
         visibility,
         scope: scope.to_owned(),
         start_line: start_line(function),
+        end_line: detail.end_line,
+        signature: detail.signature,
+        doc_summary: detail.doc_summary,
         is_test: attrs::is_test(function, src),
     })
 }
