@@ -14,6 +14,7 @@
 //! [`Store::resolve_input`], [`Store::replace_edges`], and the caller
 //! counters) serves the resolver on top of the same rows.
 
+mod detail;
 mod dirs;
 mod graph;
 mod impact;
@@ -28,6 +29,7 @@ use phantom_fractal_lang::{ExtractError, Item, Language};
 use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags};
 
+pub use crate::detail::SymbolDetail;
 pub use crate::graph::{CallHit, Package, SymbolMatch};
 
 /// Producer stamp written into `meta`.
@@ -254,7 +256,7 @@ impl Store {
     pub fn read_items(&self, path: &str) -> Result<Vec<Item>, StoreError> {
         let mut statement = self.conn.prepare(
             "SELECT symbols.kind, symbols.name, symbols.visibility, symbols.start_line,
-                    symbols.is_test
+                    symbols.end_line, symbols.signature, symbols.doc_summary, symbols.is_test
              FROM symbols
              JOIN files ON files.id = symbols.file_id
              WHERE files.path = ?1 AND symbols.kind <> 'method'
@@ -267,6 +269,9 @@ impl Store {
                 row.get::<_, String>(2)?,
                 row.get::<_, Option<i64>>(3)?,
                 row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<i64>>(7)?,
             ))
         })?;
         rows.map(|row| row.map_err(StoreError::from).and_then(rows::item_from_row))

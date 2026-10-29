@@ -120,8 +120,9 @@ pub(crate) fn insert_symbols(
     };
     let mut item_statement = conn.prepare(
         "INSERT INTO symbols(
-            file_id, kind, name, qual_name, stable_key, visibility, start_line, scope, is_test
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            file_id, kind, name, qual_name, stable_key, visibility, start_line, end_line,
+            signature, doc_summary, scope, is_test
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
     )?;
     for (position, item) in extract.items.iter().enumerate() {
         let ordinal = extract.items[..position]
@@ -142,6 +143,9 @@ pub(crate) fn insert_symbols(
             stable_key,
             visibility_to_text(&item.visibility),
             i64::from(item.start_line),
+            i64::from(item.end_line),
+            &item.signature,
+            &item.doc_summary,
             scope.clone(),
             i64::from(item.is_test),
         ))?;
@@ -154,9 +158,9 @@ pub(crate) fn insert_symbols(
     }
     let mut method_statement = conn.prepare(
         "INSERT INTO symbols(
-            file_id, kind, name, qual_name, stable_key, visibility, start_line, scope,
-            owner, owner_path, trait_name, is_test, module_id
-         ) VALUES (?1, 'method', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL)",
+            file_id, kind, name, qual_name, stable_key, visibility, start_line, end_line,
+            signature, doc_summary, scope, owner, owner_path, trait_name, is_test, module_id
+         ) VALUES (?1, 'method', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, NULL)",
     )?;
     for (position, method) in extract.methods.iter().enumerate() {
         let ordinal = extract.methods[..position]
@@ -172,6 +176,9 @@ pub(crate) fn insert_symbols(
             stable_key,
             visibility_to_text(&method.visibility),
             i64::from(method.start_line),
+            i64::from(method.end_line),
+            &method.signature,
+            &method.doc_summary,
             method.scope.clone(),
             &method.owner,
             &method.owner_path,
@@ -315,22 +322,33 @@ pub(crate) fn visibility_from_text(text: &str) -> Result<Visibility, StoreError>
     }
 }
 
-/// Stored item from a read of four columns.
-pub(crate) fn item_from_row(
-    row: (String, String, String, Option<i64>, Option<i64>),
-) -> Result<Item, StoreError> {
-    let (kind, name, visibility, start_line, is_test) = row;
+/// The columns `read_items` hands to [`item_from_row`].
+type ItemColumns = (
+    String,
+    String,
+    String,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+);
+
+/// Stored item from a read of the detail columns.
+pub(crate) fn item_from_row(row: ItemColumns) -> Result<Item, StoreError> {
+    let (kind, name, visibility, start_line, end_line, signature, doc_summary, is_test) = row;
     let start_line = start_line.ok_or(StoreError::UnreadableStamp)?;
     let start_line = u32::try_from(start_line).map_err(|_| StoreError::UnreadableStamp)?;
+    let end_line = end_line.ok_or(StoreError::UnreadableStamp)?;
+    let end_line = u32::try_from(end_line).map_err(|_| StoreError::UnreadableStamp)?;
     Ok(Item {
         kind: item_kind_from_text(&kind)?,
         name,
         visibility: visibility_from_text(&visibility)?,
         start_line,
-        // G0a compile shim: the stored detail columns are read in G0b.
-        end_line: start_line,
-        signature: String::new(),
-        doc_summary: None,
+        end_line,
+        signature: signature.ok_or(StoreError::UnreadableStamp)?,
+        doc_summary,
         is_test: is_test.unwrap_or(0) != 0,
     })
 }
