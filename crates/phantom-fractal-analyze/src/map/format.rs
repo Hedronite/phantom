@@ -1,15 +1,9 @@
-//! The map's lines and the token estimator (SPEC-w7 G2, canon §8.3, §8.4).
+//! The map's lines (SPEC-w7 G2, canon §8.4).
 //!
 //! Every line is ASCII: a byte outside printable ASCII becomes `?`.
 
 /// The longest symbol signature kept, `...` included.
 pub(crate) const SIGNATURE_CHARS: usize = 100;
-
-/// The estimated tokens of one line: `ceil(bytes / 3.5) + 1`, with the
-/// newline not counted.
-pub(crate) fn cost(line: &str) -> u64 {
-    (2 * line.len() as u64).div_ceil(7) + 1
-}
 
 /// `phantom-fractal map | budget B | used U | rank E`.
 pub(crate) fn header(budget: u64, used: u64, epoch: u64) -> String {
@@ -141,22 +135,6 @@ pub(crate) fn significant(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_estimator_is_ceil_bytes_over_three_and_a_half_plus_one() {
-        for (bytes, want) in [
-            (0, 1),
-            (1, 2),
-            (3, 2),
-            (4, 3),
-            (7, 3),
-            (8, 4),
-            (35, 11),
-            (36, 12),
-        ] {
-            assert_eq!(cost(&"x".repeat(bytes)), want, "{bytes}");
-        }
-    }
 
     #[test]
     fn three_significant_digits() {

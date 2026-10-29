@@ -1,6 +1,8 @@
 //! Impact analysis over a stored call graph (SPEC-w5 G2): what breaks if
 //! a symbol changes, the PageRank of every symbol and file
-//! (SPEC-w7 G1b), and the budgeted repo map built on it (SPEC-w7 G2).
+//! (SPEC-w7 G1b), the budgeted repo map built on it (SPEC-w7 G2), and
+//! the token estimator the map and every budgeted reply share
+//! (SPEC-w8 G0a).
 //!
 //! [`impact`] walks incoming `calls` edges breadth-first from a target,
 //! groups what it reaches by depth with a path confidence, lists tests
@@ -11,6 +13,7 @@
 //! [`MapSource`].
 #![forbid(unsafe_code)]
 
+mod estimate;
 mod map;
 mod rank;
 mod risk;
@@ -18,6 +21,7 @@ mod walk;
 
 use phantom_fractal_store::{CallHit, Store, StoreError, SymbolFacts};
 
+pub use estimate::estimate_tokens;
 pub use map::{Detail, Map, MapError, MapRequest, MapSource, packing_budget, render};
 pub use rank::{
     Converged, EdgeKind, IMPL_WEIGHT, IMPORT_WEIGHT, Iteration, PRIOR_BOOST, RankEdge, RankNode,
