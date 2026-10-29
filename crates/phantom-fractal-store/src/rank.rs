@@ -225,6 +225,22 @@ impl crate::Store {
         Ok(())
     }
 
+    /// The whole stored rank table as `(node_kind, node_id, score)`,
+    /// ordered by node kind then node id.
+    pub fn stored_rank(&self) -> Result<Vec<(String, i64, f64)>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT r.node_kind, r.node_id, r.score
+             FROM rank r
+             ORDER BY r.node_kind, r.node_id",
+        )?;
+        let mut rows = statement.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push((row.get(0)?, row.get(1)?, row.get(2)?));
+        }
+        Ok(out)
+    }
+
     /// Every file (id and repo-relative path), plus every non-test,
     /// non-module symbol for the [`crate::Store::map_rows`] callers.
     pub fn files(&self) -> Result<Vec<MapFile>, StoreError> {

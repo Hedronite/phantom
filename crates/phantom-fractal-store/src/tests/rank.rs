@@ -53,6 +53,32 @@ fn write_graph(store: &mut Store, file: &str, module_input_id: i64) {
 }
 
 #[test]
+fn stored_rank_round_trips_and_reads_empty() {
+    let db = TempDb::new("storedrank");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    assert!(store.stored_rank().expect("empty table").is_empty());
+    store.replace_edges(&[]).expect("first build");
+    store
+        .write_rank(3, &[(9, 0.25), (4, 0.75)], &[(6, 1.0)])
+        .expect("write");
+    let rows = store.stored_rank().expect("stored");
+    // Ordered by node_kind (file before symbol), then node id.
+    assert_eq!(
+        rows,
+        vec![
+            ("file".to_owned(), 6, 1.0),
+            ("symbol".to_owned(), 4, 0.75),
+            ("symbol".to_owned(), 9, 0.25)
+        ]
+    );
+    // A write that replaces the table updates the read too.
+    store.write_rank(4, &[], &[]).expect("clear");
+    assert!(store.stored_rank().expect("cleared").is_empty());
+    drop(store);
+}
+
+#[test]
 fn graph_epoch_moves_only_on_a_rebuild() {
     let db = TempDb::new("epoch");
     assert_outside_workspace(db.path());
