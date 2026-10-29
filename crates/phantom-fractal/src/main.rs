@@ -8,7 +8,8 @@
 //! `show SYMBOL` gives one symbol's detail, members, and a capped look at
 //! its edges, with its source under `--source`. `version` says what this
 //! binary is and needs no index. Each prints the JSON envelope from
-//! `phantom-fractal-proto`. There are no other commands.
+//! `phantom-fractal-proto`. `mcp` serves the same operations to an MCP
+//! client over stdin and stdout. There are no other commands.
 //!
 //! This file only parses the arguments, calls one operation from `ops`,
 //! and prints its envelope.
