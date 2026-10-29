@@ -167,7 +167,7 @@ fn members_match_the_w4_owner_rule() {
     super::assert_outside_workspace(db.path());
     let mut store = Store::open(db.path()).expect("open");
     let language = RustLanguage::new().expect("grammar");
-    let source = "pub struct Ledger {\\n    entries: u32,\\n}\\n\\nimpl Ledger {\\n    pub fn open(&self) -> u32 {\\n        0\\n    }\\n\\n    pub fn drain(&self) {}\\n}\\n\\nimpl Measure for Ledger {\\n    fn measure(&self) -> u32 {\\n        1\\n    }\\n}\\n\\npub enum Shape {\\n    Point,\\n}\\n\\npub fn freefn() {}\\n";
+    let source = "pub struct Ledger {\n    entries: u32,\n}\n\nimpl Ledger {\n    pub fn open(&self) -> u32 {\n        0\n    }\n\n    pub fn drain(&self) {}\n}\n\nimpl Measure for Ledger {\n    fn measure(&self) -> u32 {\n        1\n    }\n}\n\npub enum Shape {\n    Point,\n}\n\npub fn freefn() {}\n";
     store
         .put_source("src/ledger.rs", source, 0, &language)
         .expect("put");
@@ -175,6 +175,27 @@ fn members_match_the_w4_owner_rule() {
         .symbol_by_stable_key("src/ledger.rs#Ledger#struct#0")
         .expect("key query")
         .expect("ledger row");
+    // The resolver pairs each ledger method with the type; without the
+    // write, members read back empty under the parent_id rule.
+    let method_open = store
+        .symbol_by_stable_key("src/ledger.rs#Ledger::open#method#0")
+        .expect("key query")
+        .expect("method open");
+    let method_drain = store
+        .symbol_by_stable_key("src/ledger.rs#Ledger::drain#method#0")
+        .expect("key query")
+        .expect("method drain");
+    let method_measure = store
+        .symbol_by_stable_key("src/ledger.rs#Ledger::measure#method#0")
+        .expect("key query")
+        .expect("method measure");
+    store
+        .write_method_owners(&[
+            (method_open, ledger),
+            (method_drain, ledger),
+            (method_measure, ledger),
+        ])
+        .expect("owners");
     let members = store.members(ledger).expect("members");
     assert_eq!(members.len(), 3, "inherent and trait impls both count");
     assert_eq!(members[0].name, "open");
@@ -205,7 +226,8 @@ fn members_is_empty_for_non_member_kinds() {
     super::assert_outside_workspace(db.path());
     let mut store = Store::open(db.path()).expect("open");
     let language = RustLanguage::new().expect("grammar");
-    let source = "pub fn freefn() {}\\npub struct Ledger;\\nimpl Ledger {\\n    pub fn open(&self) {}\\n}\\n";
+    let source =
+        "pub fn freefn() {}\npub struct Ledger;\nimpl Ledger {\n    pub fn open(&self) {}\n}\n";
     store
         .put_source("src/plain.rs", source, 0, &language)
         .expect("put");
@@ -219,6 +241,56 @@ fn members_is_empty_for_non_member_kinds() {
     assert!(store.members(free_id).expect("members").is_empty());
     let detail = store.symbol_detail(free_id).expect("detail").expect("row");
     assert_eq!(detail.path, "src/plain.rs");
+    drop(store);
+}
+
+#[test]
+fn write_method_owners_resolves_two_same_named_types() {
+    let db = super::TempDb::new("thingtwice");
+    super::assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = RustLanguage::new().expect("grammar");
+    let source = "pub struct Thing;\n\nimpl Thing {\n    pub fn a(&self) {}\n}\n";
+    store
+        .put_source("src/a.rs", source, 0, &language)
+        .expect("put a");
+    let other = "pub struct Thing;\n\nimpl Thing {\n    pub fn b(&self) {}\n}\n";
+    store
+        .put_source("src/b.rs", other, 0, &language)
+        .expect("put b");
+    // Both methods carry owner `Thing`: the name-only match from the
+    // earlier G0b round would have paired both methods with both types.
+    let thing_a = store
+        .symbol_by_stable_key("src/a.rs#Thing#struct#0")
+        .expect("key query")
+        .expect("a.rs Thing");
+    let thing_b = store
+        .symbol_by_stable_key("src/b.rs#Thing#struct#0")
+        .expect("key query")
+        .expect("b.rs Thing");
+    let method_a = store
+        .symbol_by_stable_key("src/a.rs#Thing::a#method#0")
+        .expect("key query")
+        .expect("method a");
+    let method_b = store
+        .symbol_by_stable_key("src/b.rs#Thing::b#method#0")
+        .expect("key query")
+        .expect("method b");
+    // The resolver pairs each method with its own type.
+    store
+        .write_method_owners(&[(method_a, thing_a), (method_b, thing_b)])
+        .expect("owners");
+    let members_a = store.members(thing_a).expect("members a");
+    assert_eq!(members_a.len(), 1, "{members_a:?}");
+    assert_eq!(members_a[0].id, method_a);
+    assert_eq!(members_a[0].name, "a");
+    let members_b = store.members(thing_b).expect("members b");
+    assert_eq!(members_b.len(), 1, "{members_b:?}");
+    assert_eq!(members_b[0].id, method_b);
+    assert_eq!(members_b[0].name, "b");
+    // Empty for a memberless kind and an unknown id.
+    let missing = store.members(9999).expect("members");
+    assert!(missing.is_empty());
     drop(store);
 }
 

@@ -436,6 +436,25 @@ impl crate::Store {
         Ok(())
     }
 
+    /// Stores the resolved method-to-type pairs of one index pass: each
+    /// pair is `(method_id, owner_id)`, the resolver's attribution of a
+    /// method to its `impl` self type. One bound update per pair in one
+    /// transaction; the store never clears a `parent_id`, so a pass
+    /// without resolved pairs leaves the previous graph alone. `members`
+    /// reads it back (SPEC-w6 G0b, PM ruling: members come from the
+    /// resolver).
+    pub fn write_method_owners(&mut self, pairs: &[(Id, Id)]) -> Result<(), StoreError> {
+        let tx = self.conn.transaction()?;
+        for (method_id, owner_id) in pairs {
+            tx.execute(
+                "UPDATE symbols SET parent_id = ?1 WHERE id = ?2",
+                (owner_id, method_id),
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// The stored extractor version, or nothing when it was never set.
     pub fn extractor_version(&self) -> Result<Option<u32>, StoreError> {
         match crate::schema::meta_get(&self.conn, "extractor_version")? {
