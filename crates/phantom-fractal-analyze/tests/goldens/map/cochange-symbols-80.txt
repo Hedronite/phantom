@@ -1,0 +1,6 @@
+phantom-fractal map | head 6251a75 | budget 80 | used 74 | rank 1
+src/a.rs  [r 0.0833]
+  pub fn a_entry() -> u32  :2
+src/b.rs  [r 0.0833]
+  pub fn b_entry() -> u32  :2
+-- omitted: 11 files, 10 symbols (raise --budget or use --focus)

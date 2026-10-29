@@ -18,6 +18,13 @@
 //! The ranks are the stored ones when their epoch equals `graph_epoch` and
 //! there is no focus; otherwise they are computed in memory. Nothing is
 //! written.
+//!
+//! When the store holds a co-change scan (SPEC-w8 G2), the header shows
+//! `| head <7 hex>` after `phantom-fractal map`, and each file line ends
+//! in `  also-changes: ` and up to 3 partner basenames of lift above 2, in
+//! the store's order (lift, then together, both descending, then path).
+//! Those bytes count in packing like any other. Without a scan the map is
+//! the W7 map, byte for byte.
 
 mod format;
 mod store;
@@ -27,7 +34,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
-use phantom_fractal_store::{MapFile, MapRow, StoreError};
+use phantom_fractal_store::{CochangeGroup, MapFile, MapRow, StoreError};
 
 use crate::estimate_tokens;
 use crate::rank::{RankSource, Ranks, personalised, rank};
@@ -43,7 +50,26 @@ pub trait MapSource: RankSource {
     /// The stored rank rows as `(node_kind, node_id, score)`, where the
     /// kind is `symbol` or `file`.
     fn stored_rank(&self) -> Result<Vec<(String, i64, f64)>, StoreError>;
+    /// The HEAD oid of the stored co-change scan, or none without a scan.
+    fn scan_head(&self) -> Result<Option<String>, StoreError>;
+    /// One group per distinct path of `paths`, in order: up to `per_file`
+    /// partners with lift at or above `min_lift`, by lift, then together
+    /// (both descending), then partner path. The map drops those at
+    /// exactly `min_lift` itself; the order puts them last, so none above
+    /// it is lost to `per_file`.
+    fn partners(
+        &self,
+        paths: &[String],
+        min_lift: f64,
+        per_file: u32,
+    ) -> Result<Vec<CochangeGroup>, StoreError>;
 }
+
+/// An `also-changes:` partner needs a lift above this.
+pub const ALSO_CHANGES_MIN_LIFT: f64 = 2.0;
+
+/// The most partners an `also-changes:` suffix names.
+pub const ALSO_CHANGES_PARTNERS: u32 = 3;
 
 /// How much of each file the map prints.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -172,6 +198,13 @@ pub fn render(source: &impl MapSource, request: &MapRequest) -> Result<Map, MapE
         });
     }
 
+    let head = source.scan_head()?;
+    let also = match head {
+        Some(_) => also_changes(source, &files)?,
+        None => BTreeMap::new(),
+    };
+    let head = head.as_deref();
+
     let total_files = files.len() as u64;
     let total_symbols = by_file
         .iter()
@@ -179,8 +212,12 @@ pub fn render(source: &impl MapSource, request: &MapRequest) -> Result<Map, MapE
         .map(|(_, symbols)| symbols.len() as u64)
         .sum::<u64>();
     let packing = packing_budget(request.budget);
-    let reserved = estimate_tokens(&format::header(request.budget, request.budget, ranks.epoch))
-        + estimate_tokens(&format::footer(total_files, total_symbols));
+    let reserved = estimate_tokens(&format::header(
+        request.budget,
+        request.budget,
+        ranks.epoch,
+        head,
+    )) + estimate_tokens(&format::footer(total_files, total_symbols));
     if reserved > packing {
         return Err(MapError::BudgetTooSmall {
             budget: request.budget,
@@ -192,7 +229,11 @@ pub fn render(source: &impl MapSource, request: &MapRequest) -> Result<Map, MapE
     let mut body = Vec::new();
     let (mut files_shown, mut symbols_shown) = (0, 0);
     'files: for file in &files {
-        let header = format::file_line(&file.path, score(&file_rank, file.id));
+        let header = format::file_line(
+            &file.path,
+            score(&file_rank, file.id),
+            also.get(&file.path).map_or(&[][..], Vec::as_slice),
+        );
         let symbols = match request.detail {
             Detail::Files => &[][..],
             Detail::Symbols | Detail::Full => by_file.get(&file.id).map_or(&[][..], Vec::as_slice),
@@ -235,15 +276,15 @@ pub fn render(source: &impl MapSource, request: &MapRequest) -> Result<Map, MapE
         body.iter().map(|line| estimate_tokens(line)).sum::<u64>() + estimate_tokens(&footer);
     // The header states the total it is part of, so its own cost depends
     // on the digits it prints; this rises to the one fixed point.
-    let mut used = rest + estimate_tokens(&format::header(request.budget, 0, ranks.epoch));
+    let mut used = rest + estimate_tokens(&format::header(request.budget, 0, ranks.epoch, head));
     loop {
-        let next = rest + estimate_tokens(&format::header(request.budget, used, ranks.epoch));
+        let next = rest + estimate_tokens(&format::header(request.budget, used, ranks.epoch, head));
         if next == used {
             break;
         }
         used = next;
     }
-    let mut text = format::header(request.budget, used, ranks.epoch);
+    let mut text = format::header(request.budget, used, ranks.epoch, head);
     text.push('\n');
     for line in body.iter().chain([&footer]) {
         text.push_str(line);
@@ -271,6 +312,37 @@ fn take(room: &mut u64, body: &mut Vec<String>, unit: Vec<String>) -> bool {
     *room -= cost;
     body.extend(unit);
     true
+}
+
+/// Each file path's `also-changes:` names: the basenames of up to
+/// [`ALSO_CHANGES_PARTNERS`] partners above [`ALSO_CHANGES_MIN_LIFT`], in
+/// the source's order. A partner no longer in the files table is left
+/// out.
+fn also_changes(
+    source: &impl MapSource,
+    files: &[MapFile],
+) -> Result<BTreeMap<String, Vec<String>>, StoreError> {
+    let paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
+    let groups = source.partners(&paths, ALSO_CHANGES_MIN_LIFT, ALSO_CHANGES_PARTNERS)?;
+    Ok(groups
+        .into_iter()
+        .map(|group| {
+            let names = group
+                .partners
+                .into_iter()
+                .filter(|partner| partner.lift > ALSO_CHANGES_MIN_LIFT)
+                .filter_map(|partner| partner.path)
+                .take(ALSO_CHANGES_PARTNERS as usize)
+                .map(|path| basename(&path).to_owned())
+                .collect();
+            (group.path, names)
+        })
+        .collect())
+}
+
+/// The last `/`-separated component of `path`.
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 /// Higher scores first; NaN sorts as the lowest.

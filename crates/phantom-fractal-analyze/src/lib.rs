@@ -22,7 +22,10 @@ mod walk;
 use phantom_fractal_store::{CallHit, Store, StoreError, SymbolFacts};
 
 pub use estimate::estimate_tokens;
-pub use map::{Detail, Map, MapError, MapRequest, MapSource, packing_budget, render};
+pub use map::{
+    ALSO_CHANGES_MIN_LIFT, ALSO_CHANGES_PARTNERS, Detail, Map, MapError, MapRequest, MapSource,
+    packing_budget, render,
+};
 pub use rank::{
     Converged, EdgeKind, IMPL_WEIGHT, IMPORT_WEIGHT, Iteration, PRIOR_BOOST, RankEdge, RankNode,
     RankSource, Ranks, TEST_FACTOR, pagerank, personalised, rank,

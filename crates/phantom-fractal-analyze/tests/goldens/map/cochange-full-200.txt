@@ -1,0 +1,14 @@
+phantom-fractal map | head 6251a75 | budget 200 | used 160 | rank 1
+src/a.rs  [r 0.0833]
+  pub fn a_entry() -> u32  :2
+    /// The a module's entry.
+src/b.rs  [r 0.0833]
+  pub fn b_entry() -> u32  :2
+    /// The b module's entry.
+src/c.rs  [r 0.0833]  also-changes: d.rs
+  pub fn c_entry() -> u32  :2
+    /// The c module's entry.
+src/d.rs  [r 0.0833]  also-changes: c.rs
+  pub fn d_entry() -> u32  :2
+    /// The d module's entry.
+-- omitted: 9 files, 8 symbols (raise --budget or use --focus)
