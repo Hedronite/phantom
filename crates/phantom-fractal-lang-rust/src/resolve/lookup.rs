@@ -5,12 +5,14 @@
 //! scope, and `super` moves one module up. `self.m()` and `Self::m()` look
 //! up the methods of the calling impl's self type (SPEC-w4 G1). A first
 //! segment that nothing in scope binds may name a workspace lib the
-//! caller's target may call (SPEC-w4 G2b).
+//! caller's target may call (SPEC-w4 G2b). `use` paths and `impl` trait
+//! paths resolve by the same walk (SPEC-w7 G0a).
 
 use std::collections::HashMap;
 
 use phantom_fractal_lang::{
-    CallRef, Id, Module, Reason, ResolveInput, Symbol, SymbolKind, TargetKind, UseBinding,
+    CallRef, Id, LinkReason, Module, Node, Reason, ResolveInput, Symbol, SymbolKind, TargetKind,
+    UseBinding,
 };
 
 use super::segments;
@@ -45,7 +47,7 @@ enum Miss {
 
 /// How the first segment of a path was bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tier {
+pub(crate) enum Tier {
     PathExact,
     Local,
     UseAlias,
@@ -61,6 +63,41 @@ struct Walked {
     tier: Tier,
     method_hop: bool,
     crossed: bool,
+}
+
+impl Walked {
+    /// The tier that placed the path: `CratePath` once the walk entered
+    /// another crate by name, else how the first segment was bound.
+    fn path_tier(&self) -> Tier {
+        if self.crossed {
+            Tier::CratePath
+        } else {
+            self.tier
+        }
+    }
+}
+
+impl Tier {
+    /// The call reason of this tier.
+    pub(crate) fn reason(self) -> Reason {
+        match self {
+            Self::PathExact => Reason::PathExact,
+            Self::Local => Reason::Local,
+            Self::UseAlias => Reason::UseAlias,
+            Self::CratePath => Reason::CratePath,
+        }
+    }
+
+    /// The `import` link reason of this tier, the same text as
+    /// [`Self::reason`].
+    pub(crate) fn link_reason(self) -> LinkReason {
+        match self {
+            Self::PathExact => LinkReason::PathExact,
+            Self::Local => LinkReason::Local,
+            Self::UseAlias => LinkReason::UseAlias,
+            Self::CratePath => LinkReason::CratePath,
+        }
+    }
 }
 
 /// What a name binds in one module: the entities, whether they are
@@ -236,14 +273,57 @@ impl<'a> Index<'a> {
             return Placed::Unresolved;
         };
         let reason = match walked.tier {
-            _ if walked.crossed => Reason::CratePath,
-            Tier::PathExact => Reason::PathExact,
-            Tier::Local | Tier::UseAlias if segs.len() == 2 && walked.method_hop => Reason::Assoc,
-            Tier::Local => Reason::Local,
-            Tier::UseAlias => Reason::UseAlias,
-            Tier::CratePath => Reason::CratePath,
+            Tier::Local | Tier::UseAlias
+                if !walked.crossed && segs.len() == 2 && walked.method_hop =>
+            {
+                Reason::Assoc
+            }
+            _ => walked.path_tier().reason(),
         };
         Placed::Edge(target, reason)
+    }
+
+    /// What a non-glob `use` leaf imports (SPEC-w7 G0a): the module it sits
+    /// in, the one workspace module or symbol its path names, and the
+    /// path's tier. The path is walked as a call through the binding walks
+    /// it, so a link and a call agree on what a `use` means.
+    pub(crate) fn import(&self, binding: &UseBinding) -> Option<(Id, Node, Tier)> {
+        if binding.glob {
+            return None;
+        }
+        let module = self.place_of(&binding.file, &binding.scope)?;
+        // A call reaches a binding one level down from its own lookup.
+        let walked = self.use_entities(binding, 1).ok()?;
+        let target = match walked.entities[..] {
+            [Entity::Module(id)] => Node::Module(id),
+            [Entity::Symbol(id)] => Node::Symbol(id),
+            _ => return None,
+        };
+        Some((module, target, walked.path_tier()))
+    }
+
+    /// The struct or enum `method` belongs to, by [`Self::owner_of`], and
+    /// the one workspace trait its `impl`'s trait path names from the
+    /// impl's module, with that path's tier. Inherent methods, and trait
+    /// paths that are external, unresolved, or name anything but exactly
+    /// one trait, give none.
+    pub(crate) fn implemented(&self, method: &Symbol) -> Option<(Id, Id, Tier)> {
+        let path = method.trait_name.as_deref()?;
+        let ty = self.owner_of(method)?;
+        let module = self.place_of(&method.file, &method.scope)?;
+        let walked = self.walk(module, &segments(path)?, 0, false).ok()?;
+        let traits: Vec<Id> = walked
+            .entities
+            .iter()
+            .filter_map(|entity| match entity {
+                Entity::Symbol(id) if self.kind(*id) == Some(SymbolKind::Trait) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        let [one] = traits[..] else {
+            return None;
+        };
+        Some((ty, one, walked.path_tier()))
     }
 
     /// Places a call to method `name` of the calling method's own self

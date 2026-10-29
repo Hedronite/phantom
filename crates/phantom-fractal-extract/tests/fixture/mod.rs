@@ -106,25 +106,7 @@ pub fn expected(text: &str) -> (Vec<String>, HashMap<String, u64>) {
 /// symbol in the same module has the same owner and name. With more than
 /// one package, the target is `<package>/<stem>`.
 pub fn labels(store: &Store, input: &ResolveInput) -> HashMap<Id, String> {
-    let first = input.targets.first().map(|t| t.package.as_str());
-    let many = input
-        .targets
-        .iter()
-        .any(|t| Some(t.package.as_str()) != first);
-    let targets: HashMap<Id, String> = input
-        .targets
-        .iter()
-        .map(|t| {
-            let stem = Path::new(&t.root).file_stem().and_then(|s| s.to_str());
-            let stem = stem.unwrap_or_default();
-            let label = if many {
-                format!("{}/{stem}", t.package)
-            } else {
-                stem.to_owned()
-            };
-            (t.id, label)
-        })
-        .collect();
+    let targets = target_labels(input);
     let modules: HashMap<Id, (String, Id)> = input
         .modules
         .iter()
@@ -159,6 +141,41 @@ pub fn labels(store: &Store, input: &ResolveInput) -> HashMap<Id, String> {
                 name = format!("{name}@{line}");
             }
             (symbol.id, format!("{place}::{name}"))
+        })
+        .collect()
+}
+
+/// `<target>:<module path>` for each module, with the target written as
+/// [`labels`] writes it.
+pub fn module_labels(input: &ResolveInput) -> HashMap<Id, String> {
+    let targets = target_labels(input);
+    input
+        .modules
+        .iter()
+        .map(|m| (m.id, format!("{}:{}", targets[&m.target], m.path)))
+        .collect()
+}
+
+/// Each target's root file stem, as `<package>/<stem>` with more than one
+/// package.
+fn target_labels(input: &ResolveInput) -> HashMap<Id, String> {
+    let first = input.targets.first().map(|t| t.package.as_str());
+    let many = input
+        .targets
+        .iter()
+        .any(|t| Some(t.package.as_str()) != first);
+    input
+        .targets
+        .iter()
+        .map(|t| {
+            let stem = Path::new(&t.root).file_stem().and_then(|s| s.to_str());
+            let stem = stem.unwrap_or_default();
+            let label = if many {
+                format!("{}/{stem}", t.package)
+            } else {
+                stem.to_owned()
+            };
+            (t.id, label)
         })
         .collect()
 }

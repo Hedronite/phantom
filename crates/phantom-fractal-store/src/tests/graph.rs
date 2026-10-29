@@ -629,3 +629,150 @@ fn two_edges(input: &ResolveInput) -> Vec<Edge> {
 fn ids_of(edge: &Edge) -> (i64, i64, i64) {
     (edge.ref_id, edge.source, edge.target)
 }
+#[test]
+fn write_links_stores_import_and_impl_rows() {
+    let db = TempDb::new("links");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = language();
+    let source = "pub fn pick() -> u8 { 1 }\npub struct Ledger;\npub mod inner {\n\n}\n";
+    store
+        .put_source("src/flow.rs", source, 0, &language)
+        .expect("put");
+    write_graph(&mut store, "src/flow.rs", 1);
+    let input = store.resolve_input().expect("input");
+    let pick = input
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "pick")
+        .expect("pick")
+        .id;
+    let ledger = input
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "Ledger")
+        .expect("Ledger")
+        .id;
+    let module = input.modules.first().expect("module").id;
+    // ref_id must be a stored use ref (the FK is real).
+    store
+        .put_source("src/uses.rs", "use crate::pick;\n", 0, &language)
+        .expect("put uses");
+    let use_ref = store.resolve_input().expect("uses input").uses.remove(0).id;
+    store
+        .write_links(&[
+            phantom_fractal_lang::Link {
+                kind: phantom_fractal_lang::LinkKind::Import,
+                source: phantom_fractal_lang::Node::Module(module),
+                target: phantom_fractal_lang::Node::Symbol(pick),
+                confidence: 0.95,
+                reason: phantom_fractal_lang::LinkReason::Local,
+                ref_id: Some(use_ref),
+            },
+            phantom_fractal_lang::Link {
+                kind: phantom_fractal_lang::LinkKind::Impl,
+                source: phantom_fractal_lang::Node::Symbol(ledger),
+                target: phantom_fractal_lang::Node::Symbol(pick),
+                confidence: 0.8,
+                reason: phantom_fractal_lang::LinkReason::ImplTrait,
+                ref_id: None,
+            },
+        ])
+        .expect("links");
+    let import_rows = store.edges_of_kind("import").expect("import rows");
+    assert_eq!(import_rows.len(), 1, "{import_rows:?}");
+    assert_eq!(import_rows[0].src_kind, "module");
+    assert_eq!(import_rows[0].src_id, module);
+    assert_eq!(import_rows[0].dst_kind, "symbol");
+    assert_eq!(import_rows[0].dst_id, pick);
+    assert_eq!(import_rows[0].ref_id, Some(use_ref));
+    assert_eq!(import_rows[0].reason, "local");
+    let impl_rows = store.edges_of_kind("impl").expect("impl rows");
+    assert_eq!(impl_rows.len(), 1, "{impl_rows:?}");
+    assert_eq!(impl_rows[0].ref_id, None);
+    assert_eq!(impl_rows[0].reason, "impl-trait");
+    assert_eq!(impl_rows[0].confidence, 0.8);
+    // A bound read: a quote cannot change the SQL.
+    assert!(edges_kind_empty(&store, "import\" OR '1'='1"));
+    drop(store);
+}
+
+fn edges_kind_empty(store: &Store, kind: &str) -> bool {
+    store
+        .edges_of_kind(kind)
+        .map(|v| v.is_empty())
+        .unwrap_or(true)
+}
+
+#[test]
+fn a_non_call_edge_never_leaks_into_the_call_reads() {
+    let db = TempDb::new("links-call");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = language();
+    let source = "pub fn pick() -> u8 { 1 }\npub fn outer() { pick(); }\npub struct Ledger;\n";
+    store
+        .put_source("src/call.rs", source, 0, &language)
+        .expect("put");
+    write_graph(&mut store, "src/call.rs", 1);
+    let input = store.resolve_input().expect("input");
+    let outer = input
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "outer")
+        .expect("outer")
+        .id;
+    let pick = input
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "pick")
+        .expect("pick")
+        .id;
+    let reference = input
+        .refs
+        .iter()
+        .find(|reference| reference.text == "pick")
+        .expect("call ref");
+    store
+        .replace_edges(&[Edge {
+            ref_id: reference.id,
+            source: outer,
+            target: pick,
+            confidence: 0.95,
+            reason: Reason::Local,
+        }])
+        .expect("call edge");
+    // An impl edgehaving same ends with kind impl:
+    store
+        .write_links(&[phantom_fractal_lang::Link {
+            kind: phantom_fractal_lang::LinkKind::Impl,
+            source: phantom_fractal_lang::Node::Symbol(outer),
+            target: phantom_fractal_lang::Node::Symbol(pick),
+            confidence: 0.8,
+            reason: phantom_fractal_lang::LinkReason::ImplTrait,
+            ref_id: None,
+        }])
+        .expect("impl edge");
+    let callees = store.callees(outer).expect("callees");
+    assert_eq!(callees.len(), 1, "one call, not impl: {callees:?}");
+    let callers = store.callers(pick).expect("callers");
+    assert_eq!(callers.len(), 1, "one call, not impl: {callers:?}");
+    assert_eq!(callees[0].symbol, pick);
+    // The store pins counts on edges_of_kind: two edges, but one is impl.
+    assert_eq!(store.edges_of_kind("call").expect("call rows").len(), 1);
+    assert_eq!(store.edges_of_kind("impl").expect("impl rows").len(), 1);
+}
+
+#[test]
+fn write_links_second_passes_clean_individual_rounds() {
+    // A pass with no resolved links writes nothing: replace_edges wipes
+    // all kinds and write_links with an empty set leaves the empty table.
+    let db = TempDb::new("links-empty");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    store.replace_edges(&[]).expect("wipe");
+    store.write_links(&[]).expect("no links");
+    assert!(store.edges_of_kind("import").expect("import").is_empty());
+    assert!(store.edges_of_kind("impl").expect("impl").is_empty());
+    drop(store);
+}

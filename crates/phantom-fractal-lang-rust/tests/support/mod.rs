@@ -149,7 +149,21 @@ impl Input {
     }
 
     pub fn uses(&mut self, file: &str, scope: &str, path: &str, alias: Option<&str>, glob: bool) {
+        self.use_leaf(file, scope, path, alias, glob);
+    }
+
+    /// Adds a `use` leaf and returns its id.
+    pub fn use_leaf(
+        &mut self,
+        file: &str,
+        scope: &str,
+        path: &str,
+        alias: Option<&str>,
+        glob: bool,
+    ) -> Id {
+        let id = self.id();
         self.input.uses.push(UseBinding {
+            id,
             module: None,
             scope: scope.to_owned(),
             file: file.to_owned(),
@@ -157,6 +171,7 @@ impl Input {
             alias: alias.map(str::to_owned),
             glob,
         });
+        id
     }
 
     pub fn call_in(

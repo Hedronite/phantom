@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use phantom_fractal_lang::{
-    CallRef, Edge, Id, Module, Reason, ResolveInput, Symbol, SymbolKind, Target, TargetKind,
+    CallRef, Edge, Id, Link, Module, Reason, ResolveInput, Symbol, SymbolKind, Target, TargetKind,
     UseBinding,
 };
 
@@ -35,6 +35,21 @@ pub struct SymbolMatch {
     pub file: String,
     /// The symbol's start line, or nothing when the row predates it.
     pub line: Option<i64>,
+}
+
+/// One stored edge row of one kind, as `edges_of_kind` reads it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EdgeRow {
+    pub id: i64,
+    pub kind: String,
+    pub src_kind: String,
+    pub src_id: i64,
+    pub dst_kind: String,
+    pub dst_id: i64,
+    pub confidence: f64,
+    pub reason: String,
+    /// The `use` ref of an `import` edge; none for an `impl` edge.
+    pub ref_id: Option<i64>,
 }
 
 /// One edge as [`callers`](crate::Store::callers) or
@@ -323,13 +338,15 @@ impl crate::Store {
         {
             let mut statement = self.conn.prepare(
                 "SELECT r.text, r.alias, r.glob, r.scope, f.path,
-                        (SELECT m.id FROM modules m WHERE m.file_id = f.id AND m.scope = '')
+                        (SELECT m.id FROM modules m WHERE m.file_id = f.id AND m.scope = ''),
+                        r.id
                  FROM refs r JOIN files f ON f.id = r.file_id
                  WHERE r.kind = 'use' ORDER BY r.id",
             )?;
             let mut rows = statement.query([])?;
             while let Some(row) = rows.next()? {
                 uses.push(UseBinding {
+                    id: row.get(6)?,
                     module: row.get(5)?,
                     scope: row.get(3)?,
                     file: row.get(4)?,
@@ -394,6 +411,65 @@ impl crate::Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Writes the `import` and `impl` links of one index pass into
+    /// `edges`: an `import` link is a module row (or the importing
+    /// symbol-less module end) to a module or symbol row with
+    /// `ref_id` = the `use` ref, an `impl` link is symbol rows with
+    /// `ref_id` NULL. The kind text is `LinkKind::as_str` and the reason
+    /// text `LinkReason::as_str`; no `call` edge changes, so every
+    /// call-edge read keeps its rows and filters.
+    pub fn write_links(&mut self, links: &[Link]) -> Result<(), StoreError> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM edges WHERE kind IN ('import', 'impl')", [])?;
+        for link in links {
+            tx.execute(
+                "INSERT INTO edges(
+                     kind, src_kind, src_id, dst_kind, dst_id, confidence, reason, ref_id
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                (
+                    link.kind.as_str(),
+                    link.source.kind(),
+                    link.source.id(),
+                    link.target.kind(),
+                    link.target.id(),
+                    link.confidence,
+                    link.reason.as_str(),
+                    link.ref_id,
+                ),
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Every stored edge of one kind text, as a bounded read ordered by
+    /// source then target id.
+    pub fn edges_of_kind(&self, kind: &str) -> Result<Vec<EdgeRow>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT e.id, e.kind, e.src_kind, e.src_id, e.dst_kind, e.dst_id,
+                    e.confidence, e.reason, e.ref_id
+             FROM edges e
+             WHERE e.kind = ?1
+             ORDER BY e.src_kind, e.src_id, e.dst_kind, e.dst_id, e.id",
+        )?;
+        let mut rows = statement.query([kind])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push(EdgeRow {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                src_kind: row.get(2)?,
+                src_id: row.get(3)?,
+                dst_kind: row.get(4)?,
+                dst_id: row.get(5)?,
+                confidence: row.get(6)?,
+                reason: row.get(7)?,
+                ref_id: row.get(8)?,
+            });
+        }
+        Ok(out)
     }
 
     /// The stored workspace fingerprint, or nothing when it was never
@@ -534,6 +610,7 @@ impl crate::Store {
              JOIN refs r ON r.id = e.ref_id
              JOIN files f ON f.id = r.file_id
              WHERE e.dst_id = ?1 AND e.src_kind = 'symbol' AND e.dst_kind = 'symbol'
+               AND e.kind = 'call'
              ORDER BY f.path, r.line",
         )?;
         Self::collect_hits(&mut statement, [id])
@@ -549,6 +626,7 @@ impl crate::Store {
              JOIN symbols s ON s.id = e.dst_id
              JOIN files f ON f.id = s.file_id
              WHERE e.src_id = ?1 AND e.src_kind = 'symbol' AND e.dst_kind = 'symbol'
+               AND e.kind = 'call'
              ORDER BY f.path, r.line",
         )?;
         Self::collect_hits(&mut statement, [id])

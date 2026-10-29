@@ -1,0 +1,4 @@
+# Graph fixture for SPEC-w7 G0a. Never built or run.
+[workspace]
+resolver = "3"
+members = ["kit", "app"]

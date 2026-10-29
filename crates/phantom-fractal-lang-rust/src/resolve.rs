@@ -1,4 +1,5 @@
-//! The call resolver (SPEC-w3 G2b, SPEC-w4 G1, G2b).
+//! The call resolver (SPEC-w3 G2b, SPEC-w4 G1, G2b), and the `import`
+//! and `impl` links that reuse its path tiers (SPEC-w7 G0a).
 //!
 //! [`resolve`] is a pure function of its input. The candidates are `Call`
 //! references with a `from` symbol that are not `shadowed`, and method
@@ -21,7 +22,11 @@
 
 mod lookup;
 
-use phantom_fractal_lang::{Edge, Id, Reason, RefKind, ResolveCounts, ResolveInput};
+use std::collections::HashSet;
+
+use phantom_fractal_lang::{
+    Edge, Graph, Id, Link, LinkKind, LinkReason, Node, Reason, RefKind, ResolveCounts, ResolveInput,
+};
 
 use lookup::{Index, Placed};
 
@@ -108,6 +113,62 @@ pub fn method_owners(input: &ResolveInput) -> Vec<(Id, Id)> {
         .iter()
         .filter_map(|symbol| Some((symbol.id, index.owner_of(symbol)?)))
         .collect()
+}
+
+/// Every call edge and count, exactly as [`resolve`] gives them, and the
+/// [`links`] beside them.
+pub fn resolve_graph(input: &ResolveInput) -> Graph {
+    let (calls, counts) = resolve(input);
+    Graph {
+        calls,
+        counts,
+        links: links(input),
+    }
+}
+
+/// The `import` and `impl` links of `input` (SPEC-w7 G0a): one `import`
+/// per non-glob `use` leaf whose path names exactly one workspace module
+/// or symbol, in `use` order, then one `impl` per `(type, trait)` pair, in
+/// the order of the first method that names it.
+///
+/// Both resolve their path by the call tiers and carry that tier's
+/// confidence. An `import` carries the tier's reason; an `impl` carries
+/// [`LinkReason::ImplTrait`]. The type of an `impl` is its methods' owner
+/// by [`method_owners`], so an impl without methods gives no link. A pair
+/// two impls share keeps the first one's confidence. Like [`resolve`], this
+/// is a pure function of its input.
+pub fn links(input: &ResolveInput) -> Vec<Link> {
+    let index = Index::new(input);
+    let mut out = Vec::new();
+    for binding in &input.uses {
+        if let Some((module, target, tier)) = index.import(binding) {
+            out.push(Link {
+                kind: LinkKind::Import,
+                source: Node::Module(module),
+                target,
+                confidence: confidence(tier.reason()),
+                reason: tier.link_reason(),
+                ref_id: Some(binding.id),
+            });
+        }
+    }
+    let mut seen = HashSet::new();
+    for method in &input.symbols {
+        let Some((ty, trait_id, tier)) = index.implemented(method) else {
+            continue;
+        };
+        if seen.insert((ty, trait_id)) {
+            out.push(Link {
+                kind: LinkKind::Impl,
+                source: Node::Symbol(ty),
+                target: Node::Symbol(trait_id),
+                confidence: confidence(tier.reason()),
+                reason: LinkReason::ImplTrait,
+                ref_id: None,
+            });
+        }
+    }
+    out
 }
 
 /// Path segments with generic arguments removed, or none for a path that

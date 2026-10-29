@@ -1,9 +1,11 @@
 //! The contract between the store and a call resolver (SPEC-w3 G0c,
-//! SPEC-w4 G0a).
+//! SPEC-w4 G0a, SPEC-w7 G0a).
 //!
 //! The store fills a [`ResolveInput`] from its rows. A resolver reads it and
-//! returns [`Edge`]s and [`ResolveCounts`]. Nothing here resolves anything.
-//! Ids are the store's row ids. Paths are repo-relative and `/`-separated.
+//! returns a [`Graph`]: call [`Edge`]s with their [`ResolveCounts`], and
+//! beside them the `import` and `impl` [`Link`]s. Nothing here resolves
+//! anything. Ids are the store's row ids. Paths are repo-relative and
+//! `/`-separated.
 
 use crate::{ItemKind, RefKind};
 
@@ -115,6 +117,8 @@ impl From<ItemKind> for SymbolKind {
 /// One `use` leaf, bound in a module.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UseBinding {
+    /// The stored `use` reference.
+    pub id: Id,
     /// The module the `use` is declared in, or none for an orphan file.
     pub module: Option<Id>,
     /// The inline-module path within the module's file.
@@ -197,4 +201,102 @@ pub struct ResolveCounts {
     pub method_calls: u64,
     /// Macro references, counted and never resolved.
     pub macros: u64,
+}
+
+/// Everything one resolve pass places: the call edges and their counts,
+/// and the `import` and `impl` links beside them. Links add nothing to
+/// the counts.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Graph {
+    /// Call edges, in ref order.
+    pub calls: Vec<Edge>,
+    pub counts: ResolveCounts,
+    /// `import` links in `use` order, then `impl` links in method order.
+    pub links: Vec<Link>,
+}
+
+/// One resolved edge of a kind other than `call`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Link {
+    pub kind: LinkKind,
+    /// The importing module, or the implementing type.
+    pub source: Node,
+    /// The imported module or symbol, or the implemented trait.
+    pub target: Node,
+    /// In `0.0..=1.0`: the confidence of the path tier that placed it.
+    pub confidence: f64,
+    pub reason: LinkReason,
+    /// The [`UseBinding`] of an `import` link; none for an `impl` link.
+    pub ref_id: Option<Id>,
+}
+
+/// The kinds of [`Link`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LinkKind {
+    /// A non-glob `use` leaf, from the module it sits in to the one
+    /// workspace module or symbol its path names.
+    Import,
+    /// A struct or enum to the one workspace trait it implements.
+    Impl,
+}
+
+impl LinkKind {
+    /// The store's `edges.kind` text.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Import => "import",
+            Self::Impl => "impl",
+        }
+    }
+}
+
+/// One end of a [`Link`]: a module row or a symbol row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Node {
+    Module(Id),
+    Symbol(Id),
+}
+
+impl Node {
+    /// The row id.
+    pub fn id(self) -> Id {
+        match self {
+            Self::Module(id) | Self::Symbol(id) => id,
+        }
+    }
+
+    /// The store's `edges.src_kind` or `edges.dst_kind` text.
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::Module(_) => "module",
+            Self::Symbol(_) => "symbol",
+        }
+    }
+}
+
+/// Why a resolver placed a [`Link`]. An `import` link carries the path
+/// tier of its `use` path, named as for a call [`Reason`]; an `impl` link
+/// is always `ImplTrait`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LinkReason {
+    PathExact,
+    Local,
+    UseAlias,
+    CratePath,
+    /// An `impl Trait for Type`, whose trait path resolved by any tier.
+    ImplTrait,
+}
+
+impl LinkReason {
+    /// The store's `edges.reason` text, the same text a call edge of the
+    /// same tier carries.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PathExact => "path-exact",
+            Self::Local => "local",
+            Self::UseAlias => "use-alias",
+            Self::CratePath => "crate-path",
+            Self::ImplTrait => "impl-trait",
+        }
+    }
 }
