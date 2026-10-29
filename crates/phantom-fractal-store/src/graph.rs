@@ -561,3 +561,13 @@ impl crate::Store {
         )?)
     }
 }
+
+impl crate::Store {
+    /// Stores each `(method, type)` owner pair from the resolver.
+    ///
+    /// G0 compile shim: it stores nothing yet. The store writes and reads
+    /// the pairs in G0b.
+    pub fn write_method_owners(&mut self, _owners: &[(Id, Id)]) -> Result<(), StoreError> {
+        Ok(())
+    }
+}
