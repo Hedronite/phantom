@@ -277,6 +277,20 @@ impl<'a> Index<'a> {
         (self.target_of(candidate)? == self.target_of(method)?).then_some(*one)
     }
 
+    /// The struct or enum `method` belongs to: the one type its impl self
+    /// type resolves to, as [`Self::place_self`] finds it, when that type is
+    /// declared in the method's own target. No method is picked by name.
+    pub(crate) fn owner_of(&self, method: &Symbol) -> Option<Id> {
+        if method.kind != SymbolKind::Method {
+            return None;
+        }
+        let ty = self
+            .owner_type(method)
+            .filter(|ty| self.is_data_type(*ty))?;
+        let owner = self.symbols.get(&ty)?;
+        (self.target_of(owner)? == self.target_of(method)?).then_some(ty)
+    }
+
     /// The target whose module holds `symbol`.
     fn target_of(&self, symbol: &Symbol) -> Option<Id> {
         let module = self.place_of(&symbol.file, &symbol.scope)?;

@@ -25,7 +25,7 @@ use phantom_fractal_store::{Store, StoreError};
 use fingerprint::{Unread, read_manifests, stamp};
 
 pub use read::{Source, read_source};
-pub use rebuild::stored_graph;
+pub use rebuild::{stored_graph, stored_method_owners};
 pub use walk::{Candidate, MAX_FILE_BYTES, SkipReason, Skipped, Walk, is_secret, walk};
 
 /// Version of the extraction this walker writes, stored after each graph

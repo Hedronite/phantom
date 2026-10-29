@@ -64,21 +64,21 @@ impl crate::Store {
         }
     }
 
-    /// For a struct, enum or trait, the stored methods the W4
-    /// `self-method` edges attribute to that type: a method row whose
-    /// `owner` equals the symbol's `name` (the `impl` self type's last
-    /// path segment). Ordered by path, then line. Empty for any other
-    /// kind, and for any symbol with no method rows.
+    /// For a struct or enum, the methods the index pass resolved to
+    /// that type: `write_method_owners` stored each resolved method's
+    /// `parent_id` as the type's symbol id, and this read follows it.
+    /// Ordered by path, then line. Empty for every other kind — trait
+    /// owners get no pairs by the resolver rule, so a trait's members are
+    /// empty too — and for any symbol the pass has not resolved.
     pub fn members(&self, id: i64) -> Result<Vec<SymbolDetail>, StoreError> {
         let mut statement = self.conn.prepare(
             "SELECT m.id, m.stable_key, m.kind, m.name, m.qual_name, m.visibility,
                     f.path, m.start_line, m.end_line, m.signature, m.doc_summary, m.is_test
              FROM symbols s
-             JOIN files fs ON fs.id = s.file_id
-             JOIN symbols m ON m.kind = 'method' AND m.owner = s.name
+             JOIN symbols m ON m.parent_id = s.id AND m.kind = 'method'
              JOIN files f ON f.id = m.file_id
              WHERE s.id = ?1
-               AND s.kind IN ('struct', 'enum', 'trait')
+               AND s.kind IN ('struct', 'enum')
              ORDER BY f.path, m.start_line, m.id",
         )?;
         let mut rows = statement.query([id])?;
