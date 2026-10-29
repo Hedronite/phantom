@@ -58,8 +58,7 @@ fn help_lists_the_six_commands() {
 
 #[test]
 fn other_commands_and_unknown_flags_exit_one() {
-    let cases: [&[&str]; 12] = [
-        &["mcp"],
+    let cases: [&[&str]; 11] = [
         &["serve"],
         &["impact"],
         &["map"],
