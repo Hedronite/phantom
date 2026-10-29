@@ -327,6 +327,10 @@ pub(crate) fn item_from_row(
         name,
         visibility: visibility_from_text(&visibility)?,
         start_line,
+        // G0a compile shim: the stored detail columns are read in G0b.
+        end_line: start_line,
+        signature: String::new(),
+        doc_summary: None,
         is_test: is_test.unwrap_or(0) != 0,
     })
 }
