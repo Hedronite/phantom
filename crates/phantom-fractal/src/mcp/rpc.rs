@@ -4,6 +4,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use super::frame::Line;
+use super::roots::Roots;
 use super::tools;
 
 /// The supported protocol revisions, newest first: the `initialize`-based
@@ -28,14 +29,17 @@ const INSTRUCTIONS: &str = "Phantom answers questions about a Rust tree from a l
 /// One server's state across messages.
 pub(crate) struct Server {
     allow_index: bool,
+    /// The trees the tools may use.
+    roots: Roots,
     /// Set once an `initialize` request has been answered.
     initialized: bool,
 }
 
 impl Server {
-    pub(crate) fn new(allow_index: bool) -> Self {
+    pub(crate) fn new(allow_index: bool, roots: Roots) -> Self {
         Self {
             allow_index,
+            roots,
             initialized: false,
         }
     }
@@ -130,7 +134,7 @@ impl Server {
             Some(Value::Object(arguments)) => arguments,
             Some(_) => return error(id, INVALID_PARAMS, "arguments must be an object"),
         };
-        match tools::call(name, arguments, self.allow_index) {
+        match tools::call(name, arguments, self.allow_index, &self.roots) {
             Some(Ok(outcome)) => tool_result(id, &outcome),
             Some(Err(())) => error(id, INTERNAL_ERROR, "the result could not be encoded"),
             None => error(id, INVALID_PARAMS, "unknown tool"),

@@ -15,6 +15,7 @@ use phantom_fractal_store::{Store, StoreError};
 use serde::Serialize;
 
 use super::Failure;
+use super::budget::{self, Shed, Tokens, drop_last};
 use super::lookup::current_index;
 
 /// The fewest and most hits one `rank` returns.
@@ -22,6 +23,8 @@ pub(crate) const LIMIT_MIN: u64 = 1;
 pub(crate) const LIMIT_MAX: u64 = 100;
 /// The hits `rank` returns when no limit is given.
 pub(crate) const DEFAULT_LIMIT: u64 = 20;
+/// The most focus paths `rank` and `map` take.
+pub(crate) const FOCUS_MAX: usize = 100;
 
 /// Which nodes `rank` lists.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -59,10 +62,12 @@ pub(crate) struct RankRequest {
     pub(crate) limit: u64,
     /// The indexed tree.
     pub(crate) repo: PathBuf,
+    /// The most estimated tokens the reply may cost.
+    pub(crate) max_tokens: Option<u64>,
 }
 
 /// `data` of a successful `rank`, with its keys in this order.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct RankResult {
     kind: &'static str,
     /// The graph epoch of the scores.
@@ -72,9 +77,31 @@ pub(crate) struct RankResult {
     hits: Hits,
     /// True when more nodes were ranked than `hits` holds.
     truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tokens: Option<Tokens>,
 }
 
-#[derive(Serialize)]
+impl Shed for RankResult {
+    fn sheddable(&self) -> usize {
+        match &self.hits {
+            Hits::Symbols(hits) => hits.len(),
+            Hits::Files(hits) => hits.len(),
+        }
+    }
+
+    fn shed(&mut self, mut count: usize) {
+        match &mut self.hits {
+            Hits::Symbols(hits) => drop_last(hits, &mut count),
+            Hits::Files(hits) => drop_last(hits, &mut count),
+        }
+    }
+
+    fn set_tokens(&mut self, tokens: Tokens) {
+        self.tokens = Some(tokens);
+    }
+}
+
+#[derive(Clone, Serialize)]
 #[serde(untagged)]
 enum Hits {
     Symbols(Vec<SymbolHit>),
@@ -83,7 +110,7 @@ enum Hits {
 
 /// One ranked symbol. `name` is the bare name and `qual_name` the name
 /// `callers` prints for it.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct SymbolHit {
     name: String,
     qual_name: String,
@@ -94,14 +121,14 @@ struct SymbolHit {
 }
 
 /// One ranked file.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct FileHit {
     path: String,
     score: f64,
 }
 
-/// The top `request.limit` symbols or files, best first. Ties break by
-/// path, then line.
+/// The top `request.limit` symbols or files, best first, fitted to
+/// `request.max_tokens`. Ties break by path, then line.
 pub(crate) fn rank(request: &RankRequest) -> Result<RankResult, Failure> {
     if !(LIMIT_MIN..=LIMIT_MAX).contains(&request.limit) {
         return Err(Failure::new(
@@ -109,6 +136,8 @@ pub(crate) fn rank(request: &RankRequest) -> Result<RankResult, Failure> {
             format!("limit must be {LIMIT_MIN} to {LIMIT_MAX}"),
         ));
     }
+    focus_cap(&request.focus)?;
+    budget::check(request.max_tokens)?;
     let (store, names) = current_index(&request.repo)?;
     let focus = focus_files(&store, &request.focus)?;
     let ranks = ranks(&store, &focus.ids)?;
@@ -123,13 +152,26 @@ pub(crate) fn rank(request: &RankRequest) -> Result<RankResult, Failure> {
             (Hits::Files(hits), ranks.files.len())
         }
     };
-    Ok(RankResult {
+    let result = RankResult {
         kind: request.kind.as_str(),
         epoch: ranks.epoch,
         focus: focus.paths,
         hits,
         truncated: total > limit,
-    })
+        tokens: None,
+    };
+    budget::fit(result, request.max_tokens)
+}
+
+/// `Usage` when there are more than [`FOCUS_MAX`] focus paths.
+pub(crate) fn focus_cap(paths: &[String]) -> Result<(), Failure> {
+    if paths.len() > FOCUS_MAX {
+        return Err(Failure::new(
+            ErrorKind::Usage,
+            format!("focus takes at most {FOCUS_MAX} paths"),
+        ));
+    }
+    Ok(())
 }
 
 /// Focus paths matched to indexed files.

@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use super::Failure;
 use super::lookup::current_store;
-use super::rank::focus_files;
+use super::rank::{focus_cap, focus_files};
 
 /// The smallest and largest budget `map` takes, in estimated tokens.
 pub(crate) const BUDGET_MIN: u64 = 1;
@@ -59,6 +59,7 @@ pub(crate) fn map(request: &MapRequest) -> Result<MapResult, Failure> {
             format!("budget must be {BUDGET_MIN} to {BUDGET_MAX}"),
         ));
     }
+    focus_cap(&request.focus)?;
     let store = current_store(&request.repo)?;
     let focus = focus_files(&store, &request.focus)?;
     let rendered = render(

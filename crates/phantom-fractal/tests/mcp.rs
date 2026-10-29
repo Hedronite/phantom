@@ -391,15 +391,20 @@ fn tools_list_matches_the_spec_table() {
         keys
     };
     let want: [(&str, &[&str], &[&str]); 8] = [
-        ("find_symbols", &["query", "repo"], &["query"]),
-        ("show_symbol", &["id", "repo", "source", "symbol"], &[]),
-        ("callers", &["repo", "symbol"], &["symbol"]),
-        ("callees", &["repo", "symbol"], &["symbol"]),
+        ("find_symbols", &["max_tokens", "query", "repo"], &["query"]),
+        (
+            "show_symbol",
+            &["id", "max_tokens", "repo", "source", "symbol"],
+            &[],
+        ),
+        ("callers", &["max_tokens", "repo", "symbol"], &["symbol"]),
+        ("callees", &["max_tokens", "repo", "symbol"], &["symbol"]),
         (
             "impact",
             &[
                 "depth",
                 "include_tests",
+                "max_tokens",
                 "min_confidence",
                 "repo",
                 "summary",
@@ -407,7 +412,11 @@ fn tools_list_matches_the_spec_table() {
             ],
             &["symbol"],
         ),
-        ("top_ranked", &["focus", "kind", "limit", "repo"], &[]),
+        (
+            "top_ranked",
+            &["focus", "kind", "limit", "max_tokens", "repo"],
+            &[],
+        ),
         (
             "repo_map",
             &["budget", "detail", "focus", "repo"],
@@ -471,6 +480,19 @@ fn tools_list_matches_the_spec_table() {
     assert_eq!(ranked["kind"]["default"], "symbols");
     assert_eq!(ranked["focus"]["type"], "array");
     assert_eq!(ranked["focus"]["items"], json!({ "type": "string" }));
+    assert_eq!(ranked["focus"]["maxItems"], 100);
+    for tool in &all[..6] {
+        let max_tokens = &tool["inputSchema"]["properties"]["max_tokens"];
+        assert_eq!(
+            *max_tokens,
+            json!({
+                "type": "integer", "minimum": 1, "maximum": 100_000,
+                "description": max_tokens["description"],
+            }),
+            "{}",
+            tool["name"]
+        );
+    }
     let map = &all[6]["inputSchema"]["properties"];
     assert_eq!(
         map["budget"],
@@ -546,7 +568,7 @@ fn unknown_tools_and_bad_arguments() {
     let messages = [
         "query is required",
         "query must be a string",
-        "unknown argument; this tool takes query, repo",
+        "unknown argument; this tool takes query, repo, max_tokens",
         "give exactly one of symbol and id",
         "give exactly one of symbol and id",
         "source must be true or false",
@@ -619,7 +641,7 @@ fn top_ranked_and_repo_map_refuse_bad_arguments() {
         (
             "top_ranked",
             json!({ "symbol": "a" }),
-            "unknown argument; this tool takes kind, focus, limit, repo",
+            "unknown argument; this tool takes kind, focus, limit, repo, max_tokens",
         ),
         ("repo_map", json!({}), "budget is required"),
         (
@@ -713,7 +735,13 @@ fn reads_write_nothing_and_index_repo_writes_only_the_data_directory() {
         ),
         call(4, "index_repo", json!({ "path": "impact" })),
     ]);
-    let run = serve(BINS[0], &[], cwd.path(), data.path(), &reads);
+    let run = serve(
+        BINS[0],
+        &["--root", "impact"],
+        cwd.path(),
+        data.path(),
+        &reads,
+    );
     let replies = run.replies();
     assert_eq!(envelope(&replies[1])["error"]["kind"], "no_index");
     assert_eq!(error_code(&replies[3]), -32602);
@@ -731,7 +759,13 @@ fn reads_write_nothing_and_index_repo_writes_only_the_data_directory() {
             json!({ "query": "root_fn", "repo": "impact" }),
         ),
     ]);
-    let run = serve(BINS[1], &["--allow-index"], cwd.path(), data.path(), &index);
+    let run = serve(
+        BINS[1],
+        &["--allow-index", "--root", "impact"],
+        cwd.path(),
+        data.path(),
+        &index,
+    );
     let replies = run.replies();
     assert_eq!(envelope(&replies[1])["ok"], true, "{}", replies[1]);
     assert_eq!(
@@ -781,7 +815,13 @@ fn no_output_line_holds_an_absolute_path() {
             json!({ "symbol": "largest", "repo": cwd.path().join("detail") }),
         ),
     ]);
-    let run = serve(BINS[0], &["--allow-index"], cwd.path(), data.path(), &input);
+    let run = serve(
+        BINS[0],
+        &["--allow-index", "--root", "detail"],
+        cwd.path(),
+        data.path(),
+        &input,
+    );
     let root = cwd.path().to_str().expect("utf-8 temp path");
     let data_dir = data.path().to_str().expect("utf-8 temp path");
     assert_eq!(run.replies().len(), 9);
@@ -837,7 +877,13 @@ fn stdout_carries_only_json_rpc_lines() {
     input.extend(vec![b'x'; MAX_LINE + 10]);
     input.extend_from_slice(b"\n");
     input.extend(transcript(&[request(10, "ping", json!({}))]));
-    let run = serve(BINS[0], &["--allow-index"], cwd.path(), data.path(), &input);
+    let run = serve(
+        BINS[0],
+        &["--allow-index", "--root", "impact"],
+        cwd.path(),
+        data.path(),
+        &input,
+    );
     assert_eq!(run.code, Some(0));
     assert!(run.stderr.is_empty());
     let replies = run.replies();

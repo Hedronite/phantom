@@ -21,7 +21,7 @@ const MAX_BYTES: usize = 32 * 1024;
 
 /// `source` of `show`. `text` is the item's lines, exactly as in the file,
 /// and is present only when `status` is `ok`.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub(crate) struct SourceOut {
     status: &'static str,
     start_line: Option<i64>,

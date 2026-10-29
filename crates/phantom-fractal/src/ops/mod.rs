@@ -7,6 +7,7 @@
 //! an operation returns is relative to the indexed tree, and no message
 //! holds an absolute path.
 
+pub(crate) mod budget;
 pub(crate) mod calls;
 pub(crate) mod find;
 pub(crate) mod impact;
@@ -109,14 +110,19 @@ pub(crate) fn envelope<T: Serialize>(
 /// database; neither case creates anything.
 fn open_index(repo: &Path) -> Result<Store, Failure> {
     let root = canonical_repo(repo)?;
-    let database = index_database_path(&root);
-    if !database.exists() {
+    if !has_index(&root) {
         return Err(Failure::new(
             ErrorKind::NoIndex,
             "no index for this path; run index first",
         ));
     }
-    Ok(Store::open(&database)?)
+    Ok(Store::open(&index_database_path(&root))?)
+}
+
+/// True when the canonical tree `root` has a database in the data
+/// directory. Nothing is opened or created.
+pub(crate) fn has_index(root: &Path) -> bool {
+    index_database_path(root).exists()
 }
 
 /// `repo` canonicalized, or `NotFound` when it does not exist.
