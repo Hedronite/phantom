@@ -10,7 +10,7 @@ The crates build on unix only. There is no Windows build.
 
 The `phantom-fractal` package builds two binaries from one `main.rs`: `phantom-fractal` and `fract`. Scripts should call `phantom-fractal`, since another program named `fract` may come first on `PATH`.
 
-They have thirteen commands:
+They have sixteen commands:
 
 - `index PATH` walks the Rust files under PATH, extracts their items, `use` paths, and calls, and stores them in a SQLite database in the Phantom data directory. It then builds each package's module tree and resolves calls to edges, as [Calls](#calls) describes, adds `import` and `impl` edges, and stores the rank of the graph, as [Rank](#rank) describes. On a git root it also reads the history and stores which files change together, as [Co-change](#co-change) describes. PATH itself is only read. It holds the database's writer lock while it runs, as [Freshness](#freshness) describes. A second run over an unchanged tree and an unmoved HEAD writes nothing.
 - `find NAME` returns the indexed symbols named exactly NAME as `hits`, each with its kind, visibility, path, and line, ordered by path and then line. It returns at most 100; `truncated` is true when more matched. A name that was not indexed returns no hits.
@@ -23,10 +23,13 @@ They have thirteen commands:
 - `cochange FILE` lists the files that tend to change with FILE, from the history `index` read, as [Co-change](#co-change) describes.
 - `status` says whether the index is stale and why, as [Freshness](#freshness) describes.
 - `watch` keeps the index fresh while you edit: it polls the tree, and after each change settles it runs the same pass `index` runs, holding the writer lock for its whole life, as [Watch](#watch) describes.
+- `path FROM TO` finds a call path from one symbol to another, as [Path](#path) describes.
+- `repos` lists the indexes in the data directory, and `repos remove KEY` deletes one, as [Registry](#registry) describes.
+- `doctor` checks the data directory, the indexes, and this binary, and repairs nothing, as [Doctor](#doctor) describes.
 - `mcp` serves the same operations to an MCP client over stdin and stdout, for the trees it is started with, as [MCP](#mcp) describes.
 - `version` prints the binary's name, version, and commit, as [Version](#version) describes. It needs no index.
 
-Run `find`, `callers`, `callees`, `impact`, `show`, `rank`, `map`, `cochange`, and `status` from the directory you indexed, or pass `--repo PATH`. `find`, `callers`, `callees`, `impact`, `show`, `rank`, and `cochange` also take `--max-tokens N`, which fits the reply into N estimated tokens, as [Budgets](#budgets) describes.
+Run `find`, `callers`, `callees`, `impact`, `show`, `rank`, `map`, `cochange`, `status`, `path`, and `watch` from the directory you indexed, or pass `--repo PATH`, or `--repo KEY` with a key `repos` lists. `find`, `callers`, `callees`, `impact`, `show`, `rank`, `cochange`, and `path` also take `--max-tokens N`, which fits the reply into N estimated tokens, as [Budgets](#budgets) describes.
 
 Each command but `mcp` prints one JSON envelope: `{"ok": …, "data": …, "meta": …, "error": …, "schema": 1}`. `meta` is on every success of a command that reads an index, `index` included, and says whether that index is stale, as [Freshness](#freshness) describes; a failure and `version` have none. An error exits with its canon code, for example 2 when the tree has no index yet, 3 when PATH does not exist, and 4 when another writer holds the index. Every command also accepts `--json`, before or after the command name. It changes nothing, since the output is always the envelope.
 
@@ -205,7 +208,7 @@ That output, from `fixtures/impact`, is cut to one hit: the depth-2 group is lef
 
 ### What impact does not do
 
-Canon §7.3 describes more than this command does. The impact of a diff is [Diff impact](#diff-impact). There is no file path as a target, no path between two symbols, no `--edges`, no rank, and no co-change: history never changes what `impact` reports. Only `calls` edges are walked, so receivers other than `self` and trait dispatch are not followed.
+Canon §7.3 describes more than this command does. The impact of a diff is [Diff impact](#diff-impact). A path between two symbols is [Path](#path). There is no file path as a target, no `--edges`, no rank, and no co-change: history never changes what `impact` reports. Only `calls` edges are walked, so receivers other than `self` and trait dispatch are not followed.
 
 ## Diff impact
 
@@ -500,6 +503,68 @@ After `fract index .`, `fract watch` and a new function saved in `src/a.rs`, it 
 {"ok":true,"data":{"batch":1,"written":1,"removed":0,"rebuilt":true,"cochange":null},"meta":{"stale":false,"head":null,"index_head":null,"rank_epoch":2},"error":null,"schema":1}
 ```
 
+## Path
+
+`path FROM TO [--max-depth N] [--max-tokens N] [--repo PATH]` finds a call path from FROM to TO.
+
+- **FROM and TO** are each a stable key, as `show --id` takes it, or a name as `show` takes it. A name that matches more than one symbol is `ambiguous`, exit 6, with the candidates and their stable keys in `data`. A name that matches none is `not_found`, exit 3.
+- **The walk** follows stored `calls` edges forward, and `has_member` edges from a struct or enum to its methods. `--max-depth` is the most edges walked, 1 to 20, 10 by default.
+- **The answer** is a shortest path. Among the shortest it is the one whose edge confidences have the highest product, and on a tie the one whose sequence of stable keys sorts first.
+- **No hop is dropped** under `--max-tokens`: a path that does not fit is `budget_too_small`.
+- It never writes.
+
+`data` holds these keys, in this order:
+
+- `found`;
+- `from`: `{key, name, path, line}` of FROM;
+- `hops`: each step after FROM, `{key, name, path, line, edge_kind, confidence}`, where `edge_kind` (`calls` or `has_member`) and `confidence` are those of the edge into that symbol. A path from a symbol to itself has no hops.
+- `confidence`: the product of the hops' confidences, 1 for no hops, or `null` when nothing was found;
+- `farthest`: when nothing was found within `--max-depth`, the symbol FROM reaches at the greatest depth, ties by stable key, or FROM itself when it reaches nothing; otherwise `null`;
+- `max_depth`.
+
+On the history in [`cochange`](#cochange), `fract path top fb` prints:
+
+```
+{"ok":true,"data":{"found":true,"from":{"key":"src/lib.rs#top#function#0","name":"top","path":"src/lib.rs","line":9},"hops":[{"key":"src/b.rs#fb#function#0","name":"fb","path":"src/b.rs","line":2,"edge_kind":"calls","confidence":0.95}],"confidence":0.95,"farthest":null,"max_depth":10},"meta":{"stale":false,"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","rank_epoch":1},"error":null,"schema":1}
+```
+
+`fract path fb top` finds nothing, since `fb` calls nothing, and its `farthest` is `fb` itself.
+
+## Registry
+
+Each index is a directory under the data directory's `repos/`, named `<name>-<hash>`: the tree's directory name in lowercase, each run of other characters a dash, then 8 hex digits of a hash of its canonical path. That name is the index's **key**.
+
+- **`repos`**, or **`repos list`**, prints `data.repos`: `{key, name, stale, files, symbols}` for each index, by key.
+  - `name` is the indexed tree's directory name, or the key without its hash when no tree is stored.
+  - `stale` is as in [Freshness](#freshness), or `null` when the tree is gone, no tree is stored, or the index cannot be read.
+  - `files` and `symbols` are stored counts, or `null` when the index cannot be read.
+
+  Only directories whose name is a key and that hold a `graph.db` are listed. No path is printed, and nothing is written. `repos` carries no `meta`, since it reads no one index.
+- **`repos remove KEY`** deletes exactly `<data>/repos/KEY/` and everything in it.
+  - It takes the index's writer lock first. While another writer holds it, the result is `lock_held`, exit 4, and nothing is deleted.
+  - A KEY that is not a key (a lowercase name, a dash, and 8 hex digits) is `usage`, exit 1. So no KEY can name anything outside `repos/`.
+  - A KEY with no directory, or whose entry is a file or a link, is `not_found`, exit 3.
+  - A link inside the index directory is removed, never followed.
+  - It is a command-line command only. No MCP tool removes anything.
+- **`--repo KEY`**: every command that takes `--repo` takes a key too. A value that is a key, is not an existing path, and names an index runs on that index's tree. An existing path always wins.
+- **The MCP `repos` tool** takes no arguments. It lists, in the same shape, only this server's `--root` roots that have an index.
+
+## Doctor
+
+`doctor` checks the install and prints `data: {ok, checks}`. Each check is `{name, ok, detail}`, in this order:
+
+1. `data_dir`: `repos/` and each index directory are private (no group or other bits, and not a link), the data directory is not writable by group or others, and all have one owner, the owner of `HOME`. No data directory yet is fine.
+2. `databases`: each `graph.db`, and its WAL and shared memory when present, is `0600`. Its schema, read from the SQLite header without opening the database, is not newer than this binary's. An older schema is noted, since `index` migrates it.
+3. `locks`: whether a writer holds each index. A held lock is not a fault.
+4. `extractor`: the extractor version this binary writes, 7.
+5. `grammar`: the tree-sitter-rust version the binary was built with.
+6. `network`: `none: Phantom has no network code`.
+7. `git`: for each index, whether HEAD reads at its stored tree, or why it was not checked. Only a HEAD that cannot be read is a fault.
+
+`ok` is true when every check passed. `doctor` always exits 0, so read `ok`.
+
+It names a directory by its role (`the data directory`, `repos/`) or by its key, never by its path. It writes nothing and repairs nothing: a `0644` database stays `0644`, and a directory with group or other bits stays as it is. It opens an index only for the `git` check, and only when the index's schema is this binary's and its directories are already private, so the open migrates and narrows nothing. Otherwise it reports that index `not checked`. It is a command-line command only, and carries no `meta`.
+
 ## MCP
 
 `phantom-fractal mcp [--allow-index] [--root PATH]...` runs a [Model Context Protocol](https://modelcontextprotocol.io) server on stdin and stdout. `fract mcp` is the same server.
@@ -536,7 +601,9 @@ The server is read-only by default. It offers these tools:
 | `repo_map` | `budget` (1 to 100000), `focus?` (an array of at most 100 paths), `detail?` (`files`, `symbols`, or `full`, default `symbols`), `repo?` | `map` |
 | `cochange` | `file`, `min_lift?` (at least 0, default 1.5), `limit?` (1 to 100, default 20), `repo?`, `max_tokens?` | `cochange` |
 | `diff_impact` | `against?` (a branch, a tag, or a commit id of at least 7 hex digits), `depth?`, `min_confidence?` and `include_tests?` as for `impact`, `summary_only?` (default false), `max_tokens?`, `repo?` | `impact --diff`, or `--against` |
+| `symbol_path` | `from`, `to`, `max_depth?` (1 to 20, default 10), `max_tokens?`, `repo?` | `path` |
 | `repo_status` | `repo?` | `status` |
+| `repos` | none | `repos list`, over this server's roots only |
 | `index_repo` | `path`, `cochange_days?` (1 to 3650, default 365), `cochange_commits?` (1 to 50000, default 5000) | `index`, only with `--allow-index` |
 
 - **`index_repo`:** `phantom-fractal mcp --allow-index` adds it, and only then is it listed or callable. It indexes only a root (see [Roots](#roots)), and writes the database in the data directory, as `index` does, and nothing else.
@@ -638,6 +705,7 @@ This repository may have a Phantom index. Phantom answers questions about Rust c
 - Where is X: `find_symbols` with the exact name, or `show_symbol` with a qualified name.
 - What X is: `show_symbol` gives the signature, doc summary, span, members, and the first 20 callers and callees.
 - Who calls X, and what X calls: `callers` and `callees`.
+- How X reaches Y: `symbol_path`, by name or stable key.
 - What a change to X reaches: `impact`. What your uncommitted change reaches: `diff_impact`, on a git root; index first, or its reasons include `stale_index`.
 - What matters most here: `top_ranked`, by symbols or by files, with `focus` for the files you are working in.
 - An overview that fits your context: `repo_map` with a `budget` in tokens. The budget is an estimate, so leave room.
@@ -681,7 +749,7 @@ The envelope keys come in the order `ok`, `data`, `error`, `schema`. `version` r
 
 ## Other
 
-`--version` prints `phantom-fractal 0.0.0`. `--help` lists the thirteen commands with a usage line, and so does a run with no command. `find` matches names only. There is no other command.
+`--version` prints `phantom-fractal 0.0.0`. `--help` lists the sixteen commands with a usage line, and so does a run with no command. `find` matches names only. There is no other command.
 
 ## Licence
 
