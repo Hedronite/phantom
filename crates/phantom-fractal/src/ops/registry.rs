@@ -2,7 +2,9 @@
 //! directory's `repos/`, each named by its directory, its key.
 //!
 //! `repos list` and the MCP `repos` tool name each index by key and by
-//! its tree's directory name, never by a path. `repos remove KEY` deletes
+//! its tree's directory name, never by a path. They read each index with
+//! the store's guarded read-only open, which creates and changes nothing,
+//! and show null for what an index in use does not let them read. `repos remove KEY` deletes
 //! exactly `<data>/repos/KEY/`, under that index's writer lock. A key is
 //! `^[a-z0-9-]+-[0-9a-f]{8}$`, so it can name nothing outside `repos/`.
 
@@ -79,14 +81,6 @@ pub(crate) fn header_schema(database: &Path) -> Option<i64> {
     (&head[..16] == b"SQLite format 3\0").then_some(i64::from(version))
 }
 
-/// The store at `database` when this binary reads its schema as is, so
-/// opening it migrates nothing.
-pub(crate) fn open_current(database: &Path) -> Option<Store> {
-    (header_schema(database)? == SCHEMA_VERSION)
-        .then(|| Store::open(database).ok())
-        .flatten()
-}
-
 /// Every index under `repos/` whose directory name is a key and holds a
 /// `graph.db`, by key. Nothing is written.
 pub(crate) fn list() -> Result<Reply<ReposResult>, Failure> {
@@ -139,19 +133,19 @@ pub(crate) fn roots(roots: &[PathBuf]) -> Result<Reply<ReposResult>, Failure> {
 }
 
 fn entry(key: String, database: &Path) -> RepoEntry {
-    let slug = || {
-        key.rsplit_once('-')
-            .map_or(key.as_str(), |(slug, _)| slug)
-            .to_owned()
+    let slug = key
+        .rsplit_once('-')
+        .map_or(key.as_str(), |(slug, _)| slug)
+        .to_owned();
+    let unread = |key: String, slug: String| RepoEntry {
+        name: slug,
+        key,
+        stale: None,
+        files: None,
+        symbols: None,
     };
-    let Some(store) = open_current(database) else {
-        return RepoEntry {
-            name: slug(),
-            key,
-            stale: None,
-            files: None,
-            symbols: None,
-        };
+    let Ok(store) = Store::open_read_only(database) else {
+        return unread(key, slug);
     };
     let stale = store
         .root()
@@ -161,28 +155,43 @@ fn entry(key: String, database: &Path) -> RepoEntry {
         .filter(|root| root.is_dir())
         .and_then(|root| probe(&root, &store).ok())
         .map(|freshness| freshness.stale());
-    RepoEntry {
-        name: name(&store, &key).unwrap_or_else(|_| slug()),
+    let entry = RepoEntry {
+        name: name(&store, &key).unwrap_or_else(|_| slug.clone()),
         stale,
         files: store.row_count("files").ok(),
         symbols: store.row_count("symbols").ok(),
         key,
+    };
+    // A writer that started during the reads makes them unreliable.
+    if store.read_only_still_valid().unwrap_or(false) {
+        entry
+    } else {
+        unread(entry.key, slug)
     }
 }
 
 /// The stored tree of the index `text` names, when `text` is a key of an
-/// index and not a path that exists, for the command line's `--repo`.
+/// index and not a path that exists, for the command line's `--repo`. It
+/// is read with the guarded read-only open; an index in use is read with
+/// the open the command itself then makes, as every read op opens it.
 pub(crate) fn root_of_key(text: &Path) -> Option<PathBuf> {
     let key = text.to_str()?;
     if !is_key(key) || text.exists() {
         return None;
     }
     let database = repos_dir()?.join(key).join("graph.db");
-    open_current(&database)?
-        .root()
-        .ok()
-        .flatten()
-        .map(PathBuf::from)
+    let guarded = Store::open_read_only(&database).ok().and_then(|store| {
+        let root = store.root().ok().flatten();
+        store.read_only_still_valid().ok()?.then_some(root)
+    });
+    let root = match guarded {
+        Some(root) => root,
+        None if database.is_file() && header_schema(&database) == Some(SCHEMA_VERSION) => {
+            Store::open(&database).ok()?.root().ok().flatten()
+        }
+        None => None,
+    };
+    root.map(PathBuf::from)
 }
 
 /// Deletes exactly `<data>/repos/KEY/`. A key that is not one is `Usage`,

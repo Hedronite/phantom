@@ -539,7 +539,7 @@ Each index is a directory under the data directory's `repos/`, named `<name>-<ha
   - `stale` is as in [Freshness](#freshness), or `null` when the tree is gone, no tree is stored, or the index cannot be read.
   - `files` and `symbols` are stored counts, or `null` when the index cannot be read.
 
-  Only directories whose name is a key and that hold a `graph.db` are listed. No path is printed, and nothing is written. `repos` carries no `meta`, since it reads no one index.
+  Only directories whose name is a key and that hold a `graph.db` are listed. Each index is read through a read-only open that creates and changes nothing. An index in use, with its writer lock held or a `-wal` or `-shm` beside it, is not read: its `stale`, `files`, and `symbols` are `null`. No path is printed, and nothing is written. `repos` carries no `meta`, since it reads no one index.
 - **`repos remove KEY`** deletes exactly `<data>/repos/KEY/` and everything in it.
   - It takes the index's writer lock first. While another writer holds it, the result is `lock_held`, exit 4, and nothing is deleted.
   - A KEY that is not a key (a lowercase name, a dash, and 8 hex digits) is `usage`, exit 1. So no KEY can name anything outside `repos/`.
@@ -563,7 +563,7 @@ Each index is a directory under the data directory's `repos/`, named `<name>-<ha
 
 `ok` is true when every check passed. `doctor` always exits 0, so read `ok`.
 
-It names a directory by its role (`the data directory`, `repos/`) or by its key, never by its path. It writes nothing and repairs nothing: a `0644` database stays `0644`, and a directory with group or other bits stays as it is. It opens an index only for the `git` check, and only when the index's schema is this binary's and its directories are already private, so the open migrates and narrows nothing. Otherwise it reports that index `not checked`. It is a command-line command only, and carries no `meta`.
+It names a directory by its role (`the data directory`, `repos/`) or by its key, never by its path. It writes nothing and repairs nothing: no file is made, changed, or removed, not even for a moment, a `0644` database stays `0644`, and a directory with group or other bits stays as it is. It reads an index only for the `git` check, through a read-only open that creates and changes nothing. An index in use, with its writer lock held or a `-wal` or `-shm` beside it, is reported `not checked, the index is in use`, and so is one a writer started on while it was read. It is a command-line command only, and carries no `meta`.
 
 ## MCP
 

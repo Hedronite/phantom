@@ -110,7 +110,8 @@ impl World {
     }
 
     fn store(&self, key: &str) -> Store {
-        Store::open(&self.repos().join(key).join("graph.db")).expect("store")
+        // Read-only, so the expected values change nothing either.
+        Store::open_read_only(&self.repos().join(key).join("graph.db")).expect("store")
     }
 
     fn entry(&self, key: &str, name: &str, stale: Value) -> Value {
@@ -145,7 +146,9 @@ fn list_is_sorted_by_key_and_says_what_is_stale_or_gone() {
     want.sort_by(|a, b| a["key"].as_str().cmp(&b["key"].as_str()));
     assert_eq!(world.list(), json!(want));
 
-    let db = support::database(world.data.path());
+    // `list` writes nothing at all: not a byte, a mode, or an mtime of a
+    // file or a directory.
+    let before = snapshot(world.data.path());
     fs::write(
         world.root("graph-copy").join("app/src/extra.rs"),
         "pub fn e() {}\n",
@@ -168,7 +171,27 @@ fn list_is_sorted_by_key_and_says_what_is_stale_or_gone() {
         world.entry(&impact, "impact-copy", Value::Null)
     );
     assert_eq!(by_key(&detail)["stale"], false);
-    assert_eq!(support::database(world.data.path()), db, "list wrote");
+    assert_eq!(snapshot(world.data.path()), before, "list wrote");
+
+    // An index in use, with a WAL beside it, is not opened: what it holds
+    // is null, and it is still listed by key.
+    let wal = world.repos().join(&detail).join("graph.db-wal");
+    fs::write(&wal, b"").expect("a WAL");
+    let in_use = snapshot(world.data.path());
+    let listed = world.list();
+    let entry = listed
+        .as_array()
+        .expect("repos")
+        .iter()
+        .find(|entry| entry["key"] == detail.as_str())
+        .cloned()
+        .expect("listed");
+    assert_eq!(
+        entry,
+        json!({ "key": detail, "name": "detail-copy", "stale": null, "files": null, "symbols": null })
+    );
+    assert_eq!(snapshot(world.data.path()), in_use, "list wrote");
+    fs::remove_file(&wal).expect("remove");
 }
 
 #[test]
@@ -299,6 +322,11 @@ fn repo_takes_a_key_as_well_as_a_path() {
         assert_eq!(want.0, Some(0), "{args:?}: {}", want.1);
         assert_eq!(by_key(args), want, "{args:?}");
     }
+    // An index in use, with a WAL beside it, still resolves.
+    let wal = world.repos().join(&graph).join("graph.db-wal");
+    fs::write(&wal, b"").expect("a WAL");
+    assert_eq!(by_key(&["find", "deep"]), by_path(&["find", "deep"]));
+    fs::remove_file(&wal).ok();
     // An unknown key is a missing path, as before.
     let (code, line) = world.line(&["find", "deep", "--repo", "nope-00000000"]);
     assert_eq!(code, Some(3), "{line}");

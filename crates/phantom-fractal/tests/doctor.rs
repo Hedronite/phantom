@@ -28,13 +28,23 @@ const ORDER: [&str; 7] = [
     "git",
 ];
 
-/// A file's length, mtime and bytes.
-type Content = (u64, std::time::SystemTime, Vec<u8>);
+/// An entry's mtime, and for a file its length and bytes.
+type Content = (std::time::SystemTime, Option<(u64, Vec<u8>)>);
 
-/// Every entry under `data`: path, kind, mode and, for files other than
-/// SQLite's shared memory, its [`Content`].
+/// `data` and every entry under it: path, kind, mode, and its
+/// [`Content`]. Directory mtimes count, so a file made and removed again
+/// shows. SQLite's shared memory is not there to start with, and never
+/// made by `doctor`.
 fn state(data: &Path) -> Vec<(PathBuf, bool, u32, Option<Content>)> {
     let mut out = Vec::new();
+    if let Ok(meta) = fs::symlink_metadata(data) {
+        out.push((
+            data.to_path_buf(),
+            true,
+            0,
+            Some((meta.modified().expect("mtime"), None)),
+        ));
+    }
     let mut stack = vec![data.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else {
@@ -54,14 +64,8 @@ fn state(data: &Path) -> Vec<(PathBuf, bool, u32, Option<Content>)> {
                     0
                 }
             };
-            let content =
-                (!meta.is_dir() && !path.to_string_lossy().ends_with("-shm")).then(|| {
-                    (
-                        meta.len(),
-                        meta.modified().expect("mtime"),
-                        fs::read(&path).unwrap_or_default(),
-                    )
-                });
+            let bytes = (!meta.is_dir()).then(|| (meta.len(), fs::read(&path).unwrap_or_default()));
+            let content = Some((meta.modified().expect("mtime"), bytes));
             if meta.is_dir() {
                 stack.push(path.clone());
             }
@@ -266,8 +270,9 @@ fn a_0644_database_and_an_open_directory_are_flagged_and_left_as_they_are() {
         .as_str()
         .expect("git")
         .to_owned();
+    // The read-only open narrows nothing, so the index is still checked.
     assert!(
-        git.contains("not checked, its directories are not private"),
+        git.contains(&format!("{}: not a git root", world.key("graph-"))),
         "{git}"
     );
     let mode = fs::metadata(&dir).expect("meta").permissions().mode() & 0o777;
@@ -326,7 +331,43 @@ fn a_held_lock_is_reported_and_is_no_fault() {
             .contains(&format!("{}: held", world.key("repo-"))),
         "{locks}"
     );
+    let git = check(&data, "git")["detail"]
+        .as_str()
+        .expect("git")
+        .to_owned();
+    assert!(
+        git.contains(&format!(
+            "{}: not checked, the index is in use",
+            world.key("repo-")
+        )),
+        "{git}"
+    );
     drop(guard);
+}
+
+#[test]
+fn an_index_with_a_wal_beside_it_is_in_use_and_never_opened() {
+    let world = World::new();
+    let wal = world.database("graph-").with_file_name("graph.db-wal");
+    fs::write(&wal, b"").expect("a WAL beside the index");
+    let data = doctor(world.data.path(), world.dir.path());
+    let git = check(&data, "git")["detail"]
+        .as_str()
+        .expect("git")
+        .to_owned();
+    assert!(
+        git.contains(&format!(
+            "{}: not checked, the index is in use",
+            world.key("graph-")
+        )),
+        "{git}"
+    );
+    assert!(
+        git.contains(&format!("{}: HEAD reads", world.key("repo-"))),
+        "{git}"
+    );
+    assert_eq!(fs::read(&wal).expect("wal"), b"");
+    fs::remove_file(&wal).expect("remove");
 }
 
 #[test]

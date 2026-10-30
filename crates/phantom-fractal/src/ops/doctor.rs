@@ -2,18 +2,18 @@
 //! D11), in a fixed order, and repairs nothing.
 //!
 //! It names a directory by its role or its key, never by its path. A
-//! database's schema is read from its SQLite header, and a database is
-//! opened only when its schema is this binary's and its directories
-//! already have their modes, so the open migrates and narrows nothing.
-//! It always succeeds: `ok` carries the verdict.
+//! database's schema is read from its SQLite header, and an index is read
+//! only through the store's guarded read-only open, which creates and
+//! changes nothing; an index in use is reported not checked. It always
+//! succeeds: `ok` carries the verdict.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use phantom_fractal_store::{LockState, SCHEMA_VERSION, lock_state};
+use phantom_fractal_store::{LockState, SCHEMA_VERSION, Store, StoreError, lock_state};
 use serde::Serialize;
 
-use super::registry::{header_schema, indexes, open_current, repos_dir};
+use super::registry::{header_schema, indexes, repos_dir};
 use super::{Failure, Reply};
 
 /// The tree-sitter-rust version `build.rs` read from `Cargo.lock`, or
@@ -73,7 +73,7 @@ pub(crate) fn doctor(_request: &DoctorRequest) -> Result<Reply<DoctorResult>, Fa
             ok: true,
             detail: "none: Phantom has no network code".to_owned(),
         },
-        git(repos.as_deref(), &databases),
+        git(&databases),
     ];
     Ok(Reply::plain(DoctorResult {
         ok: checks.iter().all(|check| check.ok),
@@ -253,22 +253,28 @@ fn locks(databases: &[(String, PathBuf)]) -> Check {
     }
 }
 
-/// For each index this binary reads as is, whether HEAD reads at its
-/// stored tree. Only a HEAD that cannot be read is a fault.
-fn git(repos: Option<&Path>, databases: &[(String, PathBuf)]) -> Check {
+/// For each index the guarded read-only open reads, whether HEAD reads
+/// at its stored tree. Only a HEAD that cannot be read is a fault.
+fn git(databases: &[(String, PathBuf)]) -> Check {
     let mut ok = true;
-    let chain_private = repos.is_some_and(private_dir);
+    let in_use = |key: &str| format!("{key}: not checked, the index is in use");
     let details: Vec<String> = databases
         .iter()
         .map(|(key, database)| {
-            let dir = database.parent().unwrap_or(database);
-            if !chain_private || !private_dir(dir) {
-                return format!("{key}: not checked, its directories are not private");
-            }
-            let Some(store) = open_current(database) else {
-                return format!("{key}: not checked, its schema is not this binary's");
+            let store = match Store::open_read_only(database) {
+                Ok(store) => store,
+                Err(StoreError::ReadOnlyUnavailable) => return in_use(key),
+                Err(StoreError::SchemaNewer { .. } | StoreError::SchemaMismatch { .. }) => {
+                    return format!("{key}: not checked, its schema is not this binary's");
+                }
+                Err(_) => return format!("{key}: not checked, it cannot be read"),
             };
-            let Some(root) = store.root().ok().flatten().map(PathBuf::from) else {
+            let root = store.root();
+            // A writer that started during the read makes it unreliable.
+            if !store.read_only_still_valid().unwrap_or(false) {
+                return in_use(key);
+            }
+            let Some(root) = root.ok().flatten().map(PathBuf::from) else {
                 return format!("{key}: no tree stored; index stores it");
             };
             if !root.is_dir() {
