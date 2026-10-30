@@ -553,7 +553,7 @@ Each index is a directory under the data directory's `repos/`, named `<name>-<ha
 
 `doctor` checks the install and prints `data: {ok, checks}`. Each check is `{name, ok, detail}`, in this order:
 
-1. `data_dir`: `repos/` and each index directory are private (no group or other bits, and not a link), the data directory is not writable by group or others, and all have one owner, the owner of `HOME`. No data directory yet is fine.
+1. `data_dir`: `repos/` and each index directory are private (no group or other bits, and not a link), the data directory is not writable by group or others, and every one of them, and every database file, is owned by the data directory's owner. No data directory yet is fine.
 2. `databases`: each `graph.db`, and its WAL and shared memory when present, is `0600`. Its schema, read from the SQLite header without opening the database, is not newer than this binary's. An older schema is noted, since `index` migrates it.
 3. `locks`: whether a writer holds each index. A held lock is not a fault.
 4. `extractor`: the extractor version this binary writes, 7.

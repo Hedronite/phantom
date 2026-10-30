@@ -114,10 +114,11 @@ fn private_dir(path: &Path) -> bool {
         && mode(path).is_some_and(|mode| mode & 0o077 == 0)
 }
 
-/// The data directory, `repos/` and each index directory: `repos/` and
-/// the index directories `0700` and real directories, the data directory
-/// not writable by group or others, and one owner for all, the owner of
-/// `HOME`.
+/// The data directory, `repos/`, each index directory and each database
+/// file: `repos/` and the index directories private real directories, the
+/// data directory not writable by group or others, and every one owned by
+/// the data directory's owner. Only what the tree itself shows is read:
+/// no process identity, which would need a write or `libc`.
 fn data_dir(repos: Option<&Path>, keys: &[String]) -> Check {
     let check = |ok, detail: String| Check {
         name: "data_dir",
@@ -156,16 +157,20 @@ fn data_dir(repos: Option<&Path>, keys: &[String]) -> Check {
                 mode(&dir).unwrap_or(0)
             ));
         }
+        for file in ["graph.db", "graph.db-wal", "graph.db-shm"] {
+            let file = dir.join(file);
+            if fs::symlink_metadata(&file).is_ok() {
+                members.push(file);
+            }
+        }
         members.push(dir);
     }
-    let owners: Vec<Option<u32>> = members.iter().map(|path| owner(path)).collect();
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .and_then(|home| owner(&home));
-    if owners.windows(2).any(|pair| pair[0] != pair[1]) {
-        problems.push("its directories have more than one owner".to_owned());
-    } else if home.is_some() && owners.first().copied().flatten() != home {
-        problems.push("its owner is not the owner of HOME".to_owned());
+    let data_owner = owner(data);
+    if members.iter().any(|path| owner(path) != data_owner) {
+        problems.push(
+            "its directories and databases are not all owned by the data directory's owner"
+                .to_owned(),
+        );
     }
     if problems.is_empty() {
         check(

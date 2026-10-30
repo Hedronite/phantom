@@ -280,14 +280,22 @@ fn remove_refuses_bad_keys_unknown_keys_links_and_a_held_lock() {
     fs::remove_file(world.repos().join("link-0123abcd")).expect("unlink");
     fs::remove_file(world.repos().join("file-0123abcd")).expect("rm");
 
-    // A held lock refuses, and leaves everything in place.
+    // A held lock refuses, and leaves every entry and file in place. The
+    // writer's lock acquire runs the W1 owner check, which makes and
+    // removes a probe file, so only directory mtimes may move.
     let guard = WriterLock::acquire(&world.repos().join(&graph).join("graph.db")).expect("lock");
-    let held = snapshot(world.data.path());
+    let entries = |data: &Path| -> Vec<(PathBuf, bool, u64, Vec<u8>)> {
+        snapshot(data)
+            .into_iter()
+            .map(|(path, dir, len, _mtime, bytes)| (path, dir, len, bytes))
+            .collect()
+    };
+    let held = entries(world.data.path());
     assert_eq!(
         world.line(&["repos", "remove", &graph]),
         (Some(4), LOCK_HELD.to_owned())
     );
-    assert_eq!(snapshot(world.data.path()), held);
+    assert_eq!(entries(world.data.path()), held);
     drop(guard);
     assert_eq!(world.line(&["repos", "remove", &graph]).0, Some(0));
 }

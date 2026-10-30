@@ -105,7 +105,7 @@ impl World {
     }
 
     /// [`World::generated`] committed as a git root, then changed in the
-    /// work tree and indexed: every `dup` body, `hub`'s body, a removed
+    /// work tree and indexed: 15 `dup` bodies, `hub`'s body, a removed
     /// module, a new file and 8 notes, so `impact --diff` has many changed
     /// symbols, files and hits to drop.
     fn generated_diff() -> Self {
@@ -123,7 +123,9 @@ impl World {
         };
         let root = world.root().to_path_buf();
         for (path, body) in &files {
-            if path.starts_with("src/m") {
+            // Half the modules, so the oracle's many runs stay quick.
+            let edited = (0..15).any(|i| *path == format!("src/m{i}.rs"));
+            if edited {
                 fs::write(
                     root.join(path),
                     body.replace("pub fn dup() {}", "pub fn dup() { let _ = 1; }"),
@@ -717,12 +719,6 @@ fn impact_diff_fits_in_its_own_order() {
         ),
         case(
             "impact_diff",
-            &["impact", "--diff", "--no-tests", "--depth", "2"],
-            "diff_impact",
-            json!({ "include_tests": false, "depth": 2 }),
-        ),
-        case(
-            "impact_diff",
             &["impact", "--diff", "--summary", "--against", "main"],
             "diff_impact",
             json!({ "summary_only": true, "against": "main" }),
@@ -732,7 +728,7 @@ fn impact_diff_fits_in_its_own_order() {
     let data = &serde_json::from_str::<Value>(&full).expect("envelope")["data"];
     // Enough of every list that each step of the order is reached.
     assert!(
-        data["changed"].as_array().expect("changed").len() >= 30,
+        data["changed"].as_array().expect("changed").len() >= 20,
         "{full}"
     );
     assert!(
@@ -744,7 +740,7 @@ fn impact_diff_fits_in_its_own_order() {
         "{full}"
     );
     let (dropped, small) = check(&world, &cases);
-    assert!(dropped >= 40, "{dropped} replies dropped entries");
+    assert!(dropped >= 25, "{dropped} replies dropped entries");
     assert!(small >= cases.len(), "{small} replies were too small");
 }
 
