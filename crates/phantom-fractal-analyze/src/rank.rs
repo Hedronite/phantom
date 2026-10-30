@@ -9,8 +9,12 @@
 //! weights between two files and adds [`IMPORT_WEIGHT`] per `import` edge,
 //! under a uniform prior. [`personalised`] moves all prior mass onto the
 //! focus files. Both read through [`RankSource`], never write, and give
-//! the same output for the same input: nodes and edges are taken in id
-//! order.
+//! the same output for the same graph, however it was built: files are
+//! taken in walk order (by path, compared one component at a time), each
+//! file's symbols in id order, and edges in that node order (SPEC-w9 G1).
+//! A fresh index stores files in walk order and each file's symbols in
+//! insert order, so for it this is plain id order; a file re-indexed later
+//! gets new ids but keeps its place.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,6 +30,12 @@ pub trait RankSource {
     fn edges(&self) -> Result<Vec<RankEdge>, StoreError>;
     /// Every `import` edge as `(importing file, imported symbol's file)`.
     fn imports(&self) -> Result<Vec<(i64, i64)>, StoreError>;
+    /// Every file as `(id, repo-relative path)`, which orders the files.
+    /// A file with no path here sorts after those with one, by id; with
+    /// none at all, everything is in id order.
+    fn file_paths(&self) -> Result<Vec<(i64, String)>, StoreError> {
+        Ok(Vec::new())
+    }
 }
 
 impl RankSource for Store {
@@ -72,6 +82,14 @@ impl RankSource for Store {
             .rank_import_edges()?
             .into_iter()
             .map(|edge| (edge.src_file_id, edge.dst_file_id))
+            .collect())
+    }
+
+    fn file_paths(&self) -> Result<Vec<(i64, String)>, StoreError> {
+        Ok(self
+            .files()?
+            .into_iter()
+            .map(|file| (file.id, file.path))
             .collect())
     }
 }
@@ -166,25 +184,43 @@ pub fn personalised(source: &impl RankSource, focus_files: &[i64]) -> Result<Ran
 
 fn compute(source: &impl RankSource, focus: Option<&BTreeSet<i64>>) -> Result<Ranks, StoreError> {
     let mut nodes = source.nodes()?;
-    nodes.sort_by_key(|node| node.id);
-    let mut edges = source.edges()?;
-    edges.sort_by(|a, b| {
-        (a.source, a.target)
-            .cmp(&(b.source, b.target))
-            .then(a.confidence.total_cmp(&b.confidence))
-    });
-    let mut imports = source.imports()?;
-    imports.sort_unstable();
+    let imports = source.imports()?;
+    let files = file_order(
+        source.file_paths()?,
+        nodes
+            .iter()
+            .map(|node| node.file_id)
+            .chain(imports.iter().flat_map(|&(from, to)| [from, to])),
+    );
+    let file_index: BTreeMap<i64, usize> = files
+        .iter()
+        .enumerate()
+        .map(|(position, file)| (*file, position))
+        .collect();
+    nodes.sort_by_key(|node| (file_index[&node.file_id], node.id));
     let index: BTreeMap<i64, usize> = nodes
         .iter()
         .enumerate()
         .map(|(position, node)| (node.id, position))
         .collect();
+    let mut edges = source.edges()?;
+    edges.sort_by(|a, b| {
+        let at = |edge: &RankEdge| (index.get(&edge.source), index.get(&edge.target));
+        at(a)
+            .cmp(&at(b))
+            .then((a.source, a.target).cmp(&(b.source, b.target)))
+            .then(a.confidence.total_cmp(&b.confidence))
+    });
+    let mut imports: Vec<(usize, usize)> = imports
+        .iter()
+        .map(|(from, to)| (file_index[from], file_index[to]))
+        .collect();
+    imports.sort_unstable();
 
     // Symbol edges by node index, parallel edges summed; the file graph
-    // gets the same weight between two different files.
+    // gets the same weight between two different files, by file index.
     let mut symbol_weights: BTreeMap<(usize, usize), f64> = BTreeMap::new();
-    let mut file_weights: BTreeMap<(i64, i64), f64> = BTreeMap::new();
+    let mut file_weights: BTreeMap<(usize, usize), f64> = BTreeMap::new();
     for edge in &edges {
         let (Some(&from), Some(&to)) = (index.get(&edge.source), index.get(&edge.target)) else {
             continue;
@@ -194,7 +230,10 @@ fn compute(source: &impl RankSource, focus: Option<&BTreeSet<i64>>) -> Result<Ra
             EdgeKind::Impl => IMPL_WEIGHT,
         };
         *symbol_weights.entry((from, to)).or_default() += weight;
-        let files = (nodes[from].file_id, nodes[to].file_id);
+        let files = (
+            file_index[&nodes[from].file_id],
+            file_index[&nodes[to].file_id],
+        );
         if files.0 != files.1 {
             *file_weights.entry(files).or_default() += weight * retain(&nodes[from]);
         }
@@ -226,21 +265,9 @@ fn compute(source: &impl RankSource, focus: Option<&BTreeSet<i64>>) -> Result<Ra
         &Iteration::SPEC,
     );
 
-    let files: Vec<i64> = nodes
-        .iter()
-        .map(|node| node.file_id)
-        .chain(imports.iter().flat_map(|&(from, to)| [from, to]))
-        .collect::<BTreeSet<i64>>()
-        .into_iter()
-        .collect();
-    let file_index: BTreeMap<i64, usize> = files
-        .iter()
-        .enumerate()
-        .map(|(position, file)| (*file, position))
-        .collect();
     let file_edges: Vec<(usize, usize, f64)> = file_weights
         .iter()
-        .map(|(&(from, to), &weight)| (file_index[&from], file_index[&to], weight))
+        .map(|(&(from, to), &weight)| (from, to, weight))
         .collect();
     let file_prior: Vec<f64> = files
         .iter()
@@ -254,15 +281,38 @@ fn compute(source: &impl RankSource, focus: Option<&BTreeSet<i64>>) -> Result<Ra
         &Iteration::SPEC,
     );
 
+    let mut symbols: Vec<(i64, f64)> = nodes
+        .iter()
+        .map(|node| node.id)
+        .zip(symbols.scores)
+        .collect();
+    symbols.sort_by_key(|&(id, _)| id);
+    let mut files: Vec<(i64, f64)> = files.into_iter().zip(file_scores.scores).collect();
+    files.sort_by_key(|&(id, _)| id);
     Ok(Ranks {
-        symbols: nodes
-            .iter()
-            .map(|node| node.id)
-            .zip(symbols.scores)
-            .collect(),
-        files: files.into_iter().zip(file_scores.scores).collect(),
+        symbols,
+        files,
         epoch: source.graph_epoch()?,
     })
+}
+
+/// The files of the rank graph, `in_graph`, in walk order: those with a
+/// path by path, one component at a time (`a/b.rs` before `a.rs`, as the
+/// walk visits them), then the rest by id.
+fn file_order(paths: Vec<(i64, String)>, in_graph: impl Iterator<Item = i64>) -> Vec<i64> {
+    let in_graph: BTreeSet<i64> = in_graph.collect();
+    let paths: BTreeMap<i64, String> = paths
+        .into_iter()
+        .filter(|(id, _)| in_graph.contains(id))
+        .collect();
+    let mut files: Vec<i64> = in_graph.into_iter().collect();
+    files.sort_by(|a, b| match (paths.get(a), paths.get(b)) {
+        (Some(a), Some(b)) => a.split('/').cmp(b.split('/')),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.cmp(b),
+    });
+    files
 }
 
 /// The share of a symbol's out-weight its edges keep: [`TEST_FACTOR`]
