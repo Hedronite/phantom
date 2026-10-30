@@ -39,10 +39,23 @@ impl WriterLock {
     /// call retries every [`RETRY_INTERVAL`] for up to [`RETRY_WINDOW`],
     /// then answers `StoreError::LockHeld` (exit 4 in the CLI).
     ///
+    /// Creation sits under the lock (the W9 G0 fix): `acquire` first
+    /// runs the same directory-chain preparation and checks
+    /// [`Store::open`](crate::Store) runs — the shape refusal, the
+    /// `0700` creation, the owner check, the tighten — so a first index
+    /// creates the chain while it holds, and a second writer takes the
+    /// same lock before its own `Store::open` ever touches the file.
+    /// The refusals carry the same
+    /// [`StoreError::DataDirectory`](crate::StoreError) and
+    /// [`StoreError::NotOwnedByUs`](crate::StoreError) kinds as the
+    /// store's, path-free with the mapped file name.
+    ///
     /// The lock file is never written to and never truncated; a wider or
     /// looser existing file is narrowed to `0600` on the way in. Dropping
     /// the guard releases the lock; the OS frees it if the holder dies.
     pub fn acquire(db_path: &Path) -> Result<Self, StoreError> {
+        #[cfg(unix)]
+        crate::prepare_chain(db_path)?;
         let path = lock_path(db_path);
         let file = open_lock_file(&path)?;
         #[cfg(unix)]
