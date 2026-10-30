@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod deps;
+mod diff;
 mod fingerprint;
 mod fresh;
 pub mod graph;
@@ -26,6 +27,7 @@ use phantom_fractal_store::{Store, StoreError};
 
 use fingerprint::{Unread, read_manifests, stamp};
 
+pub use diff::{ChangedSymbol, Diff, DiffError, FileOnly, diff, symbol_keys};
 pub use fresh::{Freshness, probe};
 pub use read::{Source, read_source};
 pub use rebuild::{stored_graph, stored_links, stored_method_owners};
