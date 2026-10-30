@@ -72,6 +72,11 @@ impl Roots {
             .ok_or_else(not_a_root)
     }
 
+    /// Every root, canonical and sorted.
+    pub(crate) fn all(&self) -> &[PathBuf] {
+        &self.roots
+    }
+
     /// [`Roots::root`], when that root has an index.
     pub(crate) fn indexed(&self, repo: Option<&str>) -> Result<PathBuf, Failure> {
         let root = self.root(repo)?;

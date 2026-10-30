@@ -1,4 +1,5 @@
-//! Embeds the commit the binary is built from, for `version`.
+//! Embeds the commit the binary is built from, for `version`, and the
+//! tree-sitter-rust version `Cargo.lock` pins, for `doctor`.
 //!
 //! `PHANTOM_FRACTAL_GIT_SHA`, when it is 40 hex characters, wins; it is
 //! for packagers. Otherwise `git rev-parse HEAD` in this crate's directory
@@ -28,6 +29,36 @@ fn main() {
         })
         .unwrap_or_default();
     println!("cargo:rustc-env=PHANTOM_FRACTAL_BUILD_GIT_SHA={sha}");
+    println!(
+        "cargo:rustc-env=PHANTOM_FRACTAL_BUILD_GRAMMAR={}",
+        grammar(&dir).unwrap_or_default()
+    );
+}
+
+/// The version `Cargo.lock` gives `tree-sitter-rust`, from the workspace
+/// lock two directories up. Without that lock, as in a crates.io tarball,
+/// there is none.
+fn grammar(dir: &Path) -> Option<String> {
+    let lock = dir.join("../../Cargo.lock");
+    if !lock.exists() {
+        return None;
+    }
+    println!("cargo:rerun-if-changed={}", lock.display());
+    let text = std::fs::read_to_string(lock).ok()?;
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        if line == "name = \"tree-sitter-rust\"" {
+            let version = lines
+                .next()?
+                .strip_prefix("version = \"")?
+                .strip_suffix('"')?;
+            return version
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b".-+".contains(&byte))
+                .then(|| version.to_owned());
+        }
+    }
+    None
 }
 
 /// `text`, trimmed and lowercased, when it is exactly 40 hex characters.
