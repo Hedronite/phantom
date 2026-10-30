@@ -421,7 +421,8 @@ fn cochange_exits_are_usage_no_index_and_not_found() {
     let line = String::from_utf8(output.stdout).expect("utf-8");
     assert_eq!(
         line,
-        "{\"ok\":true,\"data\":{\"file\":\"app/src/dup.rs\",\"scan\":null,\"partners\":[],\"truncated\":false},\"error\":null,\"schema\":1}\n"
+        "{\"ok\":true,\"data\":{\"file\":\"app/src/dup.rs\",\"scan\":null,\"partners\":[],\"truncated\":false},\
+         \"meta\":{\"stale\":false,\"head\":null,\"index_head\":null,\"rank_epoch\":1},\"error\":null,\"schema\":1}\n"
     );
 }
 

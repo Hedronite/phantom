@@ -1,18 +1,27 @@
 //! `index`: store the Rust files under a tree, resolve their calls,
 //! store the rank of the graph they make, and, on a git root, store the
-//! co-change of its history (SPEC-w8 G3a).
+//! co-change of its history (SPEC-w8 G3a). The whole pass holds the
+//! database's writer lock, and it ends by storing the canonical root and
+//! HEAD (SPEC-w9 G0c).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use phantom_fractal_extract::{GraphReport, IndexReport, ReasonCounts};
 use phantom_fractal_git::Window;
 use phantom_fractal_lang_rust::RustLanguage;
 use phantom_fractal_proto::ErrorKind;
-use phantom_fractal_store::{CochangeScan, Store, index_database_path};
+use phantom_fractal_store::{CochangeScan, Store, StoreError, WriterLock, index_database_path};
 use serde::Serialize;
 
-use super::Failure;
+use super::cochange::stored_window;
+use super::{Failure, Reply, fresh};
+
+/// How long, and how often, a writer retries opening a database another
+/// writer has just created.
+const SETTLE_WINDOW: Duration = Duration::from_millis(250);
+const SETTLE_INTERVAL: Duration = Duration::from_millis(25);
 
 /// What `index` is asked for.
 pub(crate) struct IndexRequest {
@@ -46,10 +55,10 @@ pub(crate) struct IndexSummary {
     cochange: Option<CochangeSummary>,
 }
 
-/// `data.cochange` of `index`: the scan's HEAD, what its window walked,
-/// and how many pairs it stored.
+/// `data.cochange` of `index` and `status`: the scan's HEAD, what its
+/// window walked, and how many pairs it stored.
 #[derive(Serialize)]
-struct CochangeSummary {
+pub(crate) struct CochangeSummary {
     head: String,
     commits_seen: u64,
     skipped_bulk: u64,
@@ -128,8 +137,9 @@ impl IndexSummary {
 }
 
 /// Indexes the Rust files under `request.path` into its database in the
-/// data directory.
-pub(crate) fn index(request: &IndexRequest) -> Result<IndexSummary, Failure> {
+/// data directory, holding the database's writer lock throughout. Another
+/// writer holding it is `LockHeld`.
+pub(crate) fn index(request: &IndexRequest) -> Result<Reply<IndexSummary>, Failure> {
     if !request.window.in_range() {
         return Err(Failure::new(
             ErrorKind::Usage,
@@ -159,23 +169,66 @@ pub(crate) fn index(request: &IndexRequest) -> Result<IndexSummary, Failure> {
     }
     let language = RustLanguage::new()
         .map_err(|err| Failure::new(ErrorKind::Usage, format!("extract: {err}")))?;
-    let mut store = Store::open(&database)?;
+    let (mut store, _lock) = open_locked(&database)?;
     let report = phantom_fractal_extract::index(&root, &mut store, &language)?;
     let graph = match report.graph {
         Some(graph) => graph,
         None => stored_graph(&store, &root)?,
     };
     store_rank(&mut store)?;
-    let cochange = store_cochange(&mut store, &root, request.window)?;
-    Ok(IndexSummary {
+    let head = phantom_fractal_git::head(&root).map_err(history_failure)?;
+    let cochange = store_cochange(&mut store, &root, head.as_deref(), request.window)?;
+    // Each writes only when its value changed.
+    store.set_root(&root.to_string_lossy())?;
+    store.set_index_head(head.as_deref())?;
+    let meta = fresh::meta(&root, &store)?;
+    let summary = IndexSummary {
         cochange,
         ..IndexSummary::new(&report, &graph)
-    })
+    };
+    Ok(Reply::with_meta(summary, meta))
 }
 
-/// Mines the co-change of the git root `root` and stores it, only when no
-/// scan is stored or the stored one has another HEAD or window. A root
-/// that is not the top of a git work tree is not mined, and gives none; a
+/// The store at `database`, under its writer lock, which is taken before
+/// the open whenever the lock file's directory exists, so no open runs
+/// beside another writer's pass. Before the first index there is no
+/// directory: the open makes and checks it, and the lock follows. When two
+/// writers create the database at once, the one whose create fails waits
+/// for the lock like any other second writer.
+fn open_locked(database: &Path) -> Result<(Store, WriterLock), Failure> {
+    let lock = match WriterLock::acquire(database) {
+        Ok(lock) => lock,
+        Err(StoreError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
+            match Store::open(database) {
+                Ok(store) => return Ok((store, WriterLock::acquire(database)?)),
+                Err(_) if database.exists() => WriterLock::acquire(database)?,
+                Err(err) => return Err(err.into()),
+            }
+        }
+        Err(err) => return Err(err.into()),
+    };
+    Ok((open_settled(database)?, lock))
+}
+
+/// Opens `database` under its lock. A writer that created it a moment ago
+/// may still be writing its schema, unlocked, so a failed open is retried
+/// every 25 ms for up to 250 ms, the lock's own window, before it is
+/// reported.
+fn open_settled(database: &Path) -> Result<Store, Failure> {
+    let deadline = Instant::now() + SETTLE_WINDOW;
+    loop {
+        match Store::open(database) {
+            Ok(store) => return Ok(store),
+            Err(_) if Instant::now() < deadline => std::thread::sleep(SETTLE_INTERVAL),
+            Err(err) => return Err(err.into()),
+        }
+    }
+}
+
+/// Mines the co-change of the git root `root`, whose HEAD is `head`, and
+/// stores it, only when no scan is stored or the stored one has another
+/// HEAD or window. A root that is not the top of a git work tree has no
+/// HEAD, is not mined, and gives none; a
 /// scan stored while it was one is replaced, once, by an empty scan whose
 /// HEAD is empty, so no read reports history the root no longer has. The
 /// store keeps `meta cochange_head` as it was for a scan with no HEAD at
@@ -183,9 +236,10 @@ pub(crate) fn index(request: &IndexRequest) -> Result<IndexSummary, Failure> {
 fn store_cochange(
     store: &mut Store,
     root: &Path,
+    head: Option<&str>,
     window: Window,
 ) -> Result<Option<CochangeSummary>, Failure> {
-    let Some(head) = phantom_fractal_git::head(root).map_err(history_failure)? else {
+    let Some(head) = head else {
         if store.cochange_head()?.is_some() {
             store.write_cochange(&CochangeScan {
                 last_oid: Some(String::new()),
@@ -195,9 +249,9 @@ fn store_cochange(
         return Ok(None);
     };
     let window_json = window.to_json();
-    let current = store.cochange_scan()?.filter(|scan| {
-        scan.last_oid.as_deref() == Some(head.as_str()) && scan.window_json == window_json
-    });
+    let current = store
+        .cochange_scan()?
+        .filter(|scan| scan.last_oid.as_deref() == Some(head) && scan.window_json == window_json);
     let scan = match current {
         Some(scan) => scan,
         None => {
@@ -213,6 +267,19 @@ fn store_cochange(
             store.cochange_scan()?.unwrap_or(scan)
         }
     };
+    Ok(Some(summary(&scan, head.to_owned(), window)))
+}
+
+/// The stored scan's summary, as the pass that stored it printed it, or
+/// none without a scan or with a cleared one.
+pub(crate) fn stored_cochange(store: &Store) -> Result<Option<CochangeSummary>, Failure> {
+    let Some(scan) = store.cochange_scan()? else {
+        return Ok(None);
+    };
+    let Some(head) = scan.last_oid.clone().filter(|head| !head.is_empty()) else {
+        return Ok(None);
+    };
+    let window = stored_window(&scan.window_json)?;
     Ok(Some(summary(&scan, head, window)))
 }
 

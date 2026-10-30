@@ -16,7 +16,7 @@ use super::calls::{CallOut, Direction, edges};
 use super::cochange::{DEFAULT_MIN_LIFT, PartnerOut, partners};
 use super::lookup::{Names, current_index, lookup_keyed};
 use super::source::{SourceOut, read_source};
-use super::{Failure, canonical_repo};
+use super::{Failure, Reply, answer, canonical_repo};
 
 /// Most members one `show` returns.
 const MEMBER_CAP: usize = 100;
@@ -136,7 +136,7 @@ struct Calls {
 
 /// The detail of the one symbol `request.target` names in the index of
 /// `request.repo`, fitted to `request.max_tokens`.
-pub(crate) fn show(request: &ShowRequest) -> Result<ShowResult, Failure> {
+pub(crate) fn show(request: &ShowRequest) -> Result<Reply<ShowResult>, Failure> {
     budget::check(request.max_tokens)?;
     let (store, names) = current_index(&request.repo)?;
     let id = match &request.target {
@@ -191,7 +191,7 @@ pub(crate) fn show(request: &ShowRequest) -> Result<ShowResult, Failure> {
         source,
         tokens: None,
     };
-    budget::fit(result, request.max_tokens)
+    answer(result, &store, &request.repo, request.max_tokens)
 }
 
 fn calls(mut hits: Vec<CallOut>, unresolved_calls: Option<i64>) -> Calls {

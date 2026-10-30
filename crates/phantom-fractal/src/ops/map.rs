@@ -7,9 +7,9 @@ use phantom_fractal_analyze::{Detail, MapError, MapRequest as Render, render};
 use phantom_fractal_proto::ErrorKind;
 use serde::Serialize;
 
-use super::Failure;
 use super::lookup::current_store;
 use super::rank::{focus_cap, focus_files};
+use super::{Failure, Reply, canonical_repo, fresh};
 
 /// The smallest and largest budget `map` takes, in estimated tokens.
 pub(crate) const BUDGET_MIN: u64 = 1;
@@ -52,7 +52,7 @@ pub(crate) struct MapResult {
 /// The map of `request.repo` within `request.budget`. A budget too small
 /// for the map's header and footer is `Usage`, with a message that starts
 /// `budget_too_small`.
-pub(crate) fn map(request: &MapRequest) -> Result<MapResult, Failure> {
+pub(crate) fn map(request: &MapRequest) -> Result<Reply<MapResult>, Failure> {
     if !(BUDGET_MIN..=BUDGET_MAX).contains(&request.budget) {
         return Err(Failure::new(
             ErrorKind::Usage,
@@ -77,7 +77,8 @@ pub(crate) fn map(request: &MapRequest) -> Result<MapResult, Failure> {
         }
         err => Failure::new(ErrorKind::Usage, err.to_string()),
     })?;
-    Ok(MapResult {
+    let meta = fresh::meta(&canonical_repo(&request.repo)?, &store)?;
+    let result = MapResult {
         text: rendered.text,
         used_tokens: rendered.used_tokens,
         budget: rendered.budget,
@@ -86,5 +87,6 @@ pub(crate) fn map(request: &MapRequest) -> Result<MapResult, Failure> {
         symbols_shown: rendered.symbols_shown,
         symbols_omitted: rendered.symbols_omitted,
         rank_epoch: rendered.rank_epoch,
-    })
+    };
+    Ok(Reply::with_meta(result, meta))
 }

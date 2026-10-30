@@ -1,4 +1,6 @@
-//! Synthetic git roots for the co-change tests (SPEC-w8 G3).
+//! Synthetic git roots for the co-change tests (SPEC-w8 G3), and the
+//! fixture copies and raw-line helpers of the freshness tests (SPEC-w9
+//! G0c).
 //!
 //! Each repository lives in a fresh temp dir and is built by the `git`
 //! CLI, run only here: `git init`, then one `git fast-import` stream with
@@ -302,4 +304,94 @@ pub fn database(data: &Path) -> Vec<(PathBuf, Vec<u8>, Option<SystemTime>)> {
         })
         .map(|(path, _, _, mtime, bytes)| (path, bytes, Some(mtime)))
         .collect()
+}
+
+/// A copy of the fixture tree `name` at `to`.
+pub fn copy_fixture(name: &str, to: &Path) {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures");
+    copy_tree(&fixtures.join(name), to);
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).expect("create dir");
+    for entry in fs::read_dir(from).expect("read fixture dir") {
+        let entry = entry.expect("fixture entry");
+        let dest = to.join(entry.file_name());
+        if entry.file_type().expect("file type").is_dir() {
+            copy_tree(&entry.path(), &dest);
+        } else {
+            fs::copy(entry.path(), &dest).expect("copy file");
+        }
+    }
+}
+
+/// The keys of the object that starts at `at` in `raw`, at its own depth,
+/// in the order they were printed. A parsed `Value` sorts its keys.
+pub fn raw_keys(raw: &str, at: usize) -> Vec<String> {
+    let bytes = raw.as_bytes();
+    assert_eq!(bytes[at], b'{', "no object at {at}: {raw}");
+    let (mut depth, mut keys, mut i) = (0usize, Vec::new(), at);
+    let mut expect_key = false;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'{' | b'[' => {
+                depth += 1;
+                expect_key = bytes[i] == b'{' && depth == 1;
+            }
+            b'}' | b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            b',' if depth == 1 => expect_key = true,
+            b'"' => {
+                let start = i + 1;
+                i += 1;
+                while bytes[i] != b'"' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+                if expect_key && depth == 1 {
+                    keys.push(raw[start..i].to_owned());
+                    expect_key = false;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    keys
+}
+
+/// Where the value of the first `"key":` at or after `from` starts.
+pub fn value_at(raw: &str, key: &str, from: usize) -> usize {
+    let needle = format!("\"{key}\":");
+    from + raw[from..]
+        .find(&needle)
+        .unwrap_or_else(|| panic!("no {key}"))
+        + needle.len()
+}
+
+/// `line` without its top-level `meta`. A `,"meta":{` cannot occur inside
+/// a JSON string, and `meta` holds no nested object.
+pub fn strip_meta(line: &str) -> String {
+    match line.find(",\"meta\":{") {
+        Some(start) => {
+            let end = start + line[start..].find('}').expect("meta closes") + 1;
+            format!("{}{}", &line[..start], &line[end..])
+        }
+        None => line.to_owned(),
+    }
+}
+
+/// The path of the one `graph.db` under the data directory `data`.
+pub fn database_path(data: &Path) -> PathBuf {
+    let repos = data.join("repos");
+    let mut found: Vec<PathBuf> = fs::read_dir(&repos)
+        .expect("repos dir")
+        .map(|entry| entry.expect("entry").path().join("graph.db"))
+        .filter(|path| path.exists())
+        .collect();
+    assert_eq!(found.len(), 1, "one database under {}", repos.display());
+    found.remove(0)
 }
