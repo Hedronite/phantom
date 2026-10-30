@@ -9,6 +9,7 @@
 
 pub mod deps;
 mod fingerprint;
+mod fresh;
 pub mod graph;
 mod read;
 mod rebuild;
@@ -18,12 +19,14 @@ use std::collections::HashSet;
 use std::fmt;
 use std::path::Path;
 
+use phantom_fractal_git::GitError;
 use phantom_fractal_lang::{Edge, Reason, ResolveCounts};
 use phantom_fractal_lang_rust::RustLanguage;
 use phantom_fractal_store::{Store, StoreError};
 
 use fingerprint::{Unread, read_manifests, stamp};
 
+pub use fresh::{Freshness, probe};
 pub use read::{Source, read_source};
 pub use rebuild::{stored_graph, stored_links, stored_method_owners};
 pub use walk::{Candidate, MAX_FILE_BYTES, SkipReason, Skipped, Walk, is_secret, walk};
@@ -128,6 +131,9 @@ pub enum IndexError {
     Io(std::io::Error),
     /// The store refused a read or a write.
     Store(StoreError),
+    /// The root's repository opened but its HEAD could not be read
+    /// ([`probe`] only).
+    Git(GitError),
 }
 
 impl fmt::Display for IndexError {
@@ -135,6 +141,7 @@ impl fmt::Display for IndexError {
         match self {
             Self::Io(err) => write!(f, "walk failed: {err}"),
             Self::Store(err) => write!(f, "store failed: {err}"),
+            Self::Git(err) => write!(f, "{err}"),
         }
     }
 }
@@ -144,6 +151,7 @@ impl std::error::Error for IndexError {
         match self {
             Self::Io(err) => Some(err),
             Self::Store(err) => Some(err),
+            Self::Git(err) => Some(err),
         }
     }
 }
@@ -151,6 +159,12 @@ impl std::error::Error for IndexError {
 impl From<std::io::Error> for IndexError {
     fn from(err: std::io::Error) -> Self {
         Self::Io(err)
+    }
+}
+
+impl From<GitError> for IndexError {
+    fn from(err: GitError) -> Self {
+        Self::Git(err)
     }
 }
 

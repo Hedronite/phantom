@@ -5,7 +5,7 @@
 //! swapped for a symlink, a fifo, a hard link, or a longer file is still not
 //! read as source.
 
-use std::fs::OpenOptions;
+use std::fs::{Metadata, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
@@ -56,11 +56,17 @@ pub fn read_source(path: &Path) -> io::Result<Source> {
     if !u64::try_from(bytes.len()).is_ok_and(|len| len <= MAX_FILE_BYTES) {
         return Ok(Source::Skipped(SkipReason::TooLarge));
     }
-    let mtime_ns = meta
-        .modified()
+    Ok(Source::Bytes {
+        bytes,
+        mtime_ns: mtime_ns(&meta),
+    })
+}
+
+/// Modification time in nanoseconds since the epoch, or 0 if unknown.
+pub(crate) fn mtime_ns(meta: &Metadata) -> i64 {
+    meta.modified()
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .and_then(|dur| i64::try_from(dur.as_nanos()).ok())
-        .unwrap_or(0);
-    Ok(Source::Bytes { bytes, mtime_ns })
+        .unwrap_or(0)
 }
