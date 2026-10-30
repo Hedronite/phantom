@@ -6,22 +6,16 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 use phantom_fractal_extract::{GraphReport, IndexReport, ReasonCounts};
 use phantom_fractal_git::Window;
 use phantom_fractal_lang_rust::RustLanguage;
 use phantom_fractal_proto::ErrorKind;
-use phantom_fractal_store::{CochangeScan, Store, StoreError, WriterLock, index_database_path};
+use phantom_fractal_store::{CochangeScan, Store, WriterLock, index_database_path};
 use serde::Serialize;
 
 use super::cochange::stored_window;
 use super::{Failure, Reply, fresh};
-
-/// How long, and how often, a writer retries opening a database another
-/// writer has just created.
-const SETTLE_WINDOW: Duration = Duration::from_millis(250);
-const SETTLE_INTERVAL: Duration = Duration::from_millis(25);
 
 /// What `index` is asked for.
 pub(crate) struct IndexRequest {
@@ -169,7 +163,12 @@ pub(crate) fn index(request: &IndexRequest) -> Result<Reply<IndexSummary>, Failu
     }
     let language = RustLanguage::new()
         .map_err(|err| Failure::new(ErrorKind::Usage, format!("extract: {err}")))?;
-    let (mut store, _lock) = open_locked(&database)?;
+    // The lock comes first: it makes and checks the directory chain, so
+    // even a first index creates its database under the lock, and a
+    // second writer waits for it. The store is declared after the lock,
+    // so it is closed before the lock is released.
+    let _lock = WriterLock::acquire(&database)?;
+    let mut store = Store::open(&database)?;
     let report = phantom_fractal_extract::index(&root, &mut store, &language)?;
     let graph = match report.graph {
         Some(graph) => graph,
@@ -187,42 +186,6 @@ pub(crate) fn index(request: &IndexRequest) -> Result<Reply<IndexSummary>, Failu
         ..IndexSummary::new(&report, &graph)
     };
     Ok(Reply::with_meta(summary, meta))
-}
-
-/// The store at `database`, under its writer lock, which is taken before
-/// the open whenever the lock file's directory exists, so no open runs
-/// beside another writer's pass. Before the first index there is no
-/// directory: the open makes and checks it, and the lock follows. When two
-/// writers create the database at once, the one whose create fails waits
-/// for the lock like any other second writer.
-fn open_locked(database: &Path) -> Result<(Store, WriterLock), Failure> {
-    let lock = match WriterLock::acquire(database) {
-        Ok(lock) => lock,
-        Err(StoreError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
-            match Store::open(database) {
-                Ok(store) => return Ok((store, WriterLock::acquire(database)?)),
-                Err(_) if database.exists() => WriterLock::acquire(database)?,
-                Err(err) => return Err(err.into()),
-            }
-        }
-        Err(err) => return Err(err.into()),
-    };
-    Ok((open_settled(database)?, lock))
-}
-
-/// Opens `database` under its lock. A writer that created it a moment ago
-/// may still be writing its schema, unlocked, so a failed open is retried
-/// every 25 ms for up to 250 ms, the lock's own window, before it is
-/// reported.
-fn open_settled(database: &Path) -> Result<Store, Failure> {
-    let deadline = Instant::now() + SETTLE_WINDOW;
-    loop {
-        match Store::open(database) {
-            Ok(store) => return Ok(store),
-            Err(_) if Instant::now() < deadline => std::thread::sleep(SETTLE_INTERVAL),
-            Err(err) => return Err(err.into()),
-        }
-    }
 }
 
 /// Mines the co-change of the git root `root`, whose HEAD is `head`, and
