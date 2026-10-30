@@ -1,6 +1,6 @@
 //! The tools: their definitions, their argument checks, and the
 //! [`crate::ops`] call behind each one (SPEC-w6 G2b, SPEC-w7 G3b, SPEC-w8
-//! G0b, G0c and G3b, SPEC-w9 G0c).
+//! G0b, G0c and G3b, SPEC-w9 G0c and G2b).
 //!
 //! A tool never does an operation's work itself. It turns its arguments
 //! into the request the command line builds for the same flags, calls the
@@ -20,8 +20,8 @@ use crate::ops::cochange::{self as cochange, DEFAULT_MIN_LIFT, min_lift_in_range
 use crate::ops::map::{BUDGET_MAX, BUDGET_MIN};
 use crate::ops::rank::{DEFAULT_LIMIT, FOCUS_MAX, LIMIT_MAX, LIMIT_MIN, focus_cap};
 use crate::ops::{
-    self, CallsRequest, CochangeRequest, Failure, FindRequest, ImpactRequest, IndexRequest,
-    MapRequest, RankKind, RankRequest, Reply, ShowRequest, StatusRequest, Target,
+    self, CallsRequest, CochangeRequest, DiffRequest, Failure, FindRequest, ImpactRequest,
+    IndexRequest, MapRequest, RankKind, RankRequest, Reply, ShowRequest, StatusRequest, Target,
 };
 
 /// One tool call's envelope line and whether it reports a failure.
@@ -259,6 +259,53 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
             "annotations": read,
         }),
         json!({
+            "name": "diff_impact",
+            "description": "Estimate what the uncommitted change reaches: the work tree is compared \
+                with HEAD, or with `against`, by raw bytes, and the calls into every changed \
+                symbol the index holds are walked backwards at once. Returns the base, the changed \
+                symbols, the changed files with no changed symbol, whether a manifest changed, \
+                and the impact: hits by depth, tests apart, counts, the reasons the answer may be \
+                incomplete, and a risk level. On a git root only; staged and unstaged diffs are \
+                not offered.",
+            "inputSchema": schema(
+                json!({
+                    "against": {
+                        "type": "string",
+                        "description": "The base instead of HEAD: a branch, a tag, or a commit id \
+                            of at least 7 hex digits.",
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": ImpactOptions::MAX_DEPTH,
+                        "default": defaults.max_depth,
+                        "description": "The deepest level reported.",
+                    },
+                    "min_confidence": {
+                        "type": "number",
+                        "exclusiveMinimum": 0,
+                        "maximum": 1,
+                        "default": defaults.min_confidence,
+                        "description": "The lowest path confidence reported.",
+                    },
+                    "include_tests": {
+                        "type": "boolean",
+                        "default": true,
+                        "description": "List the tests the change reaches.",
+                    },
+                    "summary_only": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Counts, reasons and risk only, without the hits.",
+                    },
+                    "max_tokens": max_tokens(),
+                    "repo": { "type": "string", "description": REPO },
+                }),
+                &[],
+            ),
+            "annotations": read,
+        }),
+        json!({
             "name": "repo_status",
             "description": "Say whether the index is stale and why: how many files an index \
                 pass would add, rewrite and remove, whether the workspace manifests changed, \
@@ -346,6 +393,7 @@ pub(crate) fn call(
         "top_ranked" => run(rank_request(arguments, roots), ops::rank),
         "repo_map" => run(map_request(arguments, roots), ops::map),
         "cochange" => run(cochange_request(arguments, roots), ops::cochange),
+        "diff_impact" => run(diff_request(arguments, roots), ops::impact_diff),
         "repo_status" => run(status_request(arguments, roots), ops::status),
         "index_repo" if allow_index => run(index_request(arguments, roots), ops::index),
         _ => return None,
@@ -491,6 +539,38 @@ fn cochange_request(
         min_lift,
         limit,
         repo: roots.indexed(repo.as_deref())?,
+        max_tokens,
+    })
+}
+
+fn diff_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<DiffRequest, Failure> {
+    let args = Args::new(
+        arguments,
+        &[
+            "against",
+            "depth",
+            "min_confidence",
+            "include_tests",
+            "summary_only",
+            "max_tokens",
+            "repo",
+        ],
+    )?;
+    let defaults = ImpactOptions::default();
+    let options = ImpactOptions {
+        max_depth: args.depth()?.unwrap_or(defaults.max_depth),
+        min_confidence: args.min_confidence()?.unwrap_or(defaults.min_confidence),
+        include_tests: args.boolean("include_tests")?.unwrap_or(true),
+    };
+    let against = args.string("against")?;
+    let summary = args.boolean("summary_only")?.unwrap_or(false);
+    let max_tokens = args.max_tokens()?;
+    let repo = args.string("repo")?;
+    Ok(DiffRequest {
+        against,
+        repo: roots.indexed(repo.as_deref())?,
+        options,
+        summary,
         max_tokens,
     })
 }

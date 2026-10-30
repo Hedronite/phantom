@@ -16,7 +16,7 @@ They have thirteen commands:
 - `find NAME` returns the indexed symbols named exactly NAME as `hits`, each with its kind, visibility, path, and line, ordered by path and then line. It returns at most 100; `truncated` is true when more matched. A name that was not indexed returns no hits.
 - `callers SYMBOL` returns the resolved calls to SYMBOL.
 - `callees SYMBOL` returns the resolved calls SYMBOL makes, and `unresolved_calls`: how many calls, method calls, and macros inside SYMBOL have no edge.
-- `impact SYMBOL` walks the calls into SYMBOL backwards and says what a change to it reaches, as [Impact](#impact) describes.
+- `impact SYMBOL` walks the calls into SYMBOL backwards and says what a change to it reaches, as [Impact](#impact) describes. `impact --diff` does the same from every symbol the work tree changed against HEAD or a named commit, as [Diff impact](#diff-impact) describes.
 - `show SYMBOL` or `show --id KEY` gives one symbol's detail, members, and a capped look at its callers and callees, and its source lines only when asked, as [Show](#show) describes.
 - `rank` lists the best-ranked symbols or files of the index, as [Rank](#rank) describes.
 - `map --budget N` packs a ranked map of the repo into N estimated tokens, as [Map](#map) describes.
@@ -205,7 +205,37 @@ That output, from `fixtures/impact`, is cut to one hit: the depth-2 group is lef
 
 ### What impact does not do
 
-Canon §7.3 describes more than this command does. There is no impact of a diff, no file path as a target, no path between two symbols, no `--edges`, no rank, and no co-change: history never changes what `impact` reports. Only `calls` edges are walked, so receivers other than `self` and trait dispatch are not followed.
+Canon §7.3 describes more than this command does. The impact of a diff is [Diff impact](#diff-impact). There is no file path as a target, no path between two symbols, no `--edges`, no rank, and no co-change: history never changes what `impact` reports. Only `calls` edges are walked, so receivers other than `self` and trait dispatch are not followed.
+
+## Diff impact
+
+`impact --diff [--all | --against REF] [--depth N] [--min-confidence X] [--no-tests] [--summary] [--max-tokens N] [--repo PATH]` answers "what does my change touch": it compares the work tree with a base commit and walks the calls into every changed symbol at once, as `impact` walks them from one.
+
+- **The base.** `--all`, the default, compares the work tree with HEAD. `--against REF` compares it with a branch, a tag, or a commit id of at least 7 hex digits that names one commit. Anything else, such as `HEAD~1`, a remote branch, or `HEAD` itself, is `usage`, exit 1, with the message `the base is not a branch, a tag, or a commit id of at least 7 hex digits`. A name that is both a branch and a tag of two commits is `usage` with `the base names more than one commit`.
+- **Raw bytes.** Each file the index would keep is compared byte for byte with the base commit's blob. No git filter, attribute, or line-ending rule is applied, and a rename is a removal plus an addition. Files the index never keeps, such as ignored or secret files, are never counted.
+- **No staged or unstaged diff yet.** `--staged` and `--unstaged` are refused with `usage`, exit 1, and the message `staged and unstaged diffs need the git index, which this build does not read`. Phantom never reads `.git/index`.
+- **Errors.** A tree that is not the top of a git work tree is `usage`, exit 1, with `impact --diff needs a git root: the indexed tree is not the top of a git work tree`. No index is `no_index`, exit 2. No message holds a path.
+- **Symbols.** Both sides of each changed `.rs` file are extracted in memory. A symbol is `added` or `removed` when its stable key is on one side only, and `modified` when its lines' bytes differ. Nothing is written: not the tree, not `.git`, not the index.
+
+`data` holds these keys, in this order:
+
+- `base`: `{kind, ref, oid}`, where `kind` is `head` or `ref`, `ref` is the name `--against` gave or `null`, and `oid` is the commit's full hex id.
+- `changed`: `{path, key, name, change, in_index}` for each changed symbol, by path, then key. `in_index` says whether the index holds that key.
+- `files_only`: `{path, change}` for each changed file with no changed symbol: a file that is not `.rs`, or a `.rs` change that touches no symbol's lines, such as a comment between items.
+- `manifest_changed`: true when a `Cargo.toml` changed.
+- `impact`: `{risk, exact, reasons, counts, groups, tests, options}`, the shape of [Impact](#impact) without its `symbol`. The walk starts from every changed symbol the index holds, and each reached symbol keeps its best path. A changed symbol is never a hit. Two reasons join the five of [Completeness](#completeness), after them:
+  - `stale_index` (no count): the index is stale, as `meta.stale` says, so it may not hold the change's calls. Run `index` first.
+  - `unindexed_changes`: how many changed symbols the index does not hold, such as one added since the last `index` or one removed by it.
+
+Under `--max-tokens`, the deepest group's hits go first, from the end, then the next group's, then `tests`, then `files_only`, then `changed`, each from the end. `base`, the counts, `risk`, `exact`, and `reasons` are never dropped.
+
+On the history in [`cochange`](#cochange), after `src/b.rs` becomes `/// b.` and `pub fn fb() { let _ = 1; }`, a `README.md` is added, and `fract index .` runs, `fract impact --diff` prints:
+
+```
+{"ok":true,"data":{"base":{"kind":"head","ref":null,"oid":"beb28036163f91ba4918d2acf7d2a294c73d10f8"},"changed":[{"path":"src/b.rs","key":"src/b.rs#fb#function#0","name":"fb","change":"modified","in_index":true}],"files_only":[{"path":"README.md","change":"added"}],"manifest_changed":false,"impact":{"risk":"low","exact":false,"reasons":[{"reason":"external_users_possible","count":null}],"counts":{"direct":1,"total":1,"packages":1,"tests":0,"below_floor":0},"groups":[{"depth":1,"total":1,"truncated":false,"hits":[{"name":"crate::top","kind":"function","path":"src/lib.rs","line":9,"confidence":0.95,"reason":"local","site_path":"src/lib.rs","site_line":11}]}],"tests":[],"options":{"depth":3,"min_confidence":0.2,"include_tests":true}}},"meta":{"stale":false,"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","rank_epoch":2},"error":null,"schema":1}
+```
+
+Before that `index`, the same command adds `stale_index` to `reasons`, and `meta.stale` is true.
 
 ## Show
 
@@ -505,6 +535,7 @@ The server is read-only by default. It offers these tools:
 | `top_ranked` | `kind?` (`symbols` or `files`, default `symbols`), `focus?` (an array of at most 100 paths), `limit?` (1 to 100, default 20), `repo?`, `max_tokens?` | `rank` |
 | `repo_map` | `budget` (1 to 100000), `focus?` (an array of at most 100 paths), `detail?` (`files`, `symbols`, or `full`, default `symbols`), `repo?` | `map` |
 | `cochange` | `file`, `min_lift?` (at least 0, default 1.5), `limit?` (1 to 100, default 20), `repo?`, `max_tokens?` | `cochange` |
+| `diff_impact` | `against?` (a branch, a tag, or a commit id of at least 7 hex digits), `depth?`, `min_confidence?` and `include_tests?` as for `impact`, `summary_only?` (default false), `max_tokens?`, `repo?` | `impact --diff`, or `--against` |
 | `repo_status` | `repo?` | `status` |
 | `index_repo` | `path`, `cochange_days?` (1 to 3650, default 365), `cochange_commits?` (1 to 50000, default 5000) | `index`, only with `--allow-index` |
 
@@ -528,6 +559,7 @@ The server is read-only by default. It offers these tools:
   - `find`, `callers`, `callees`, and `rank`: `hits`, from the end;
   - `cochange`: `partners`, from the end;
   - `impact`: the deepest group's hits from the end, then the next group's, then `tests` from the end;
+  - `impact --diff`: as `impact`, within `impact`, then `files_only` and `changed` from the end;
   - `show`: `source` as a whole, then the `cochange` partners, the callees' hits, the callers' hits, and the members' hits, each from the end.
 
   The target symbol, the counts, `risk`, `exact`, `reasons`, the groups themselves, and every `truncated` flag stay. `truncated` still says only whether the command's own cap cut the list.
@@ -606,7 +638,7 @@ This repository may have a Phantom index. Phantom answers questions about Rust c
 - Where is X: `find_symbols` with the exact name, or `show_symbol` with a qualified name.
 - What X is: `show_symbol` gives the signature, doc summary, span, members, and the first 20 callers and callees.
 - Who calls X, and what X calls: `callers` and `callees`.
-- What a change to X reaches: `impact`.
+- What a change to X reaches: `impact`. What your uncommitted change reaches: `diff_impact`, on a git root; index first, or its reasons include `stale_index`.
 - What matters most here: `top_ranked`, by symbols or by files, with `focus` for the files you are working in.
 - An overview that fits your context: `repo_map` with a `budget` in tokens. The budget is an estimate, so leave room.
 - What else usually changes with a file: `cochange`, on a git root that was indexed. It is history, not a dependency.

@@ -10,6 +10,7 @@
 pub(crate) mod budget;
 pub(crate) mod calls;
 pub(crate) mod cochange;
+pub(crate) mod diff;
 pub(crate) mod find;
 pub(crate) mod fresh;
 pub(crate) mod impact;
@@ -31,6 +32,7 @@ use serde::Serialize;
 
 pub(crate) use calls::{CallsRequest, callees, callers};
 pub(crate) use cochange::{CochangeRequest, cochange};
+pub(crate) use diff::{DiffRequest, impact_diff};
 pub(crate) use find::{FindRequest, find};
 pub(crate) use impact::{ImpactRequest, impact};
 pub(crate) use index::{IndexRequest, index};

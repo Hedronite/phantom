@@ -4,7 +4,9 @@
 //! directory and resolves their calls. `find NAME` looks symbols up in that
 //! database and returns at most 100. `callers SYMBOL` and `callees SYMBOL`
 //! return the stored call edges of one symbol, at most 100. `impact SYMBOL`
-//! walks those edges backwards to say what a change to the symbol reaches.
+//! walks those edges backwards to say what a change to the symbol reaches,
+//! and `impact --diff` walks them from every symbol the work tree changed
+//! against HEAD or `--against REF`.
 //! `show SYMBOL` gives one symbol's detail, members, and a capped look at
 //! its edges, with its source under `--source`. `rank` lists the
 //! best-ranked symbols or files, and `map` packs a ranked repo map into a
@@ -41,8 +43,8 @@ use phantom_fractal_git::Window;
 use serde::Serialize;
 
 use crate::ops::{
-    CallsRequest, CochangeRequest, Failure, FindRequest, ImpactRequest, IndexRequest, MapRequest,
-    RankKind, RankRequest, Reply, ShowRequest, StatusRequest, Target, VersionRequest,
+    CallsRequest, CochangeRequest, DiffRequest, Failure, FindRequest, ImpactRequest, IndexRequest,
+    MapRequest, RankKind, RankRequest, Reply, ShowRequest, StatusRequest, Target, VersionRequest,
 };
 
 /// Canon exit 1: usage or internal error.
@@ -122,7 +124,27 @@ enum Command {
     },
     /// Walk the calls into one symbol backwards: what a change to it reaches.
     Impact {
-        symbol: String,
+        /// A bare or qualified name, as `callers` takes. Give this or
+        /// `--diff`, not both; the `--diff` options need `--diff`.
+        #[arg(required_unless_present = "diff", conflicts_with = "diff")]
+        symbol: Option<String>,
+        /// Walk from every symbol the work tree changed against a base,
+        /// HEAD unless `--against` names another, compared by raw bytes.
+        #[arg(long)]
+        diff: bool,
+        /// With `--diff`: the work tree against HEAD, the default.
+        #[arg(long, conflicts_with_all = ["symbol", "against"])]
+        all: bool,
+        /// With `--diff`: the work tree against a branch, a tag, or a commit
+        /// id of at least 7 hex digits.
+        #[arg(long, value_name = "REF", conflicts_with = "symbol")]
+        against: Option<String>,
+        /// Refused: a staged diff needs the git index, which is not read.
+        #[arg(long, conflicts_with = "symbol")]
+        staged: bool,
+        /// Refused: an unstaged diff needs the git index, which is not read.
+        #[arg(long, conflicts_with = "symbol")]
+        unstaged: bool,
         /// Tree that was indexed. Defaults to the current directory.
         #[arg(long, default_value = ".")]
         repo: PathBuf,
@@ -324,23 +346,44 @@ fn main() -> ExitCode {
         })),
         Command::Impact {
             symbol,
+            diff,
+            all: _,
+            against,
+            staged,
+            unstaged,
             repo,
             depth,
             min_confidence,
             no_tests,
             summary,
             max_tokens,
-        } => emit(ops::impact(&ImpactRequest {
-            symbol,
-            repo,
-            options: ImpactOptions {
+        } => {
+            let options = ImpactOptions {
                 max_depth: depth,
                 min_confidence,
                 include_tests: !no_tests,
-            },
-            summary,
-            max_tokens,
-        })),
+            };
+            if staged || unstaged {
+                emit::<()>(Err(ops::diff::staged_refusal()))
+            } else if diff {
+                emit(ops::impact_diff(&DiffRequest {
+                    against,
+                    repo,
+                    options,
+                    summary,
+                    max_tokens,
+                }))
+            } else {
+                // clap admits exactly one of SYMBOL and --diff.
+                emit(ops::impact(&ImpactRequest {
+                    symbol: symbol.unwrap_or_default(),
+                    repo,
+                    options,
+                    summary,
+                    max_tokens,
+                }))
+            }
+        }
         Command::Show {
             symbol,
             id,
