@@ -10,7 +10,7 @@ The crates build on unix only. There is no Windows build.
 
 The `phantom-fractal` package builds two binaries from one `main.rs`: `phantom-fractal` and `fract`. Scripts should call `phantom-fractal`, since another program named `fract` may come first on `PATH`.
 
-They have twelve commands:
+They have thirteen commands:
 
 - `index PATH` walks the Rust files under PATH, extracts their items, `use` paths, and calls, and stores them in a SQLite database in the Phantom data directory. It then builds each package's module tree and resolves calls to edges, as [Calls](#calls) describes, adds `import` and `impl` edges, and stores the rank of the graph, as [Rank](#rank) describes. On a git root it also reads the history and stores which files change together, as [Co-change](#co-change) describes. PATH itself is only read. It holds the database's writer lock while it runs, as [Freshness](#freshness) describes. A second run over an unchanged tree and an unmoved HEAD writes nothing.
 - `find NAME` returns the indexed symbols named exactly NAME as `hits`, each with its kind, visibility, path, and line, ordered by path and then line. It returns at most 100; `truncated` is true when more matched. A name that was not indexed returns no hits.
@@ -22,6 +22,7 @@ They have twelve commands:
 - `map --budget N` packs a ranked map of the repo into N estimated tokens, as [Map](#map) describes.
 - `cochange FILE` lists the files that tend to change with FILE, from the history `index` read, as [Co-change](#co-change) describes.
 - `status` says whether the index is stale and why, as [Freshness](#freshness) describes.
+- `watch` keeps the index fresh while you edit: it polls the tree, and after each change settles it runs the same pass `index` runs, holding the writer lock for its whole life, as [Watch](#watch) describes.
 - `mcp` serves the same operations to an MCP client over stdin and stdout, for the trees it is started with, as [MCP](#mcp) describes.
 - `version` prints the binary's name, version, and commit, as [Version](#version) describes. It needs no index.
 
@@ -447,6 +448,28 @@ On the history in [`cochange`](#cochange), after `fract index .` and one line ad
 
 The key's hash comes from the tree's canonical path, so it differs on another machine. `fract find fb` still answers from the index, with the same `meta`.
 
+## Watch
+
+`watch [--repo PATH] [--interval-ms N] [--debounce-ms N] [--max-batches N]` keeps one index fresh while its tree is edited. It is meant to run in its own terminal pane, one per workspace, beside the agent or editor making the changes.
+
+- **It polls.** Every `--interval-ms` (default 500, 100 to 10000) it runs the check behind [`meta`](#freshness). No file-event library is used.
+- **It waits for the tree to settle.** When the check says stale, it waits `--debounce-ms` (default 250, 50 to 5000) and checks again, until two checks in a row agree, with no listed file's size or mtime moving between them. A burst of saves inside the debounce gives one pass.
+- **It runs the `index` pass.** Each pass is the same pass `index` runs, with the same skips, rank and co-change. On a git root it uses the stored co-change scan's window, or the default window when no scan is stored, so a window given to `index` is kept. A HEAD move alone runs a pass, which rescans the co-change.
+- **It needs no index first.** The first check of a tree with no index is stale, and the first pass creates it.
+- **It holds the writer lock** from start to exit. While it runs, `index`, `index_repo` and a second `watch` on the same index fail with `lock_held`, exit 4, after the lock's 250 ms retry. Reads still answer, and reads never re-index.
+- **One line per pass.** Each pass prints one compact envelope line on stdout, with `data` keys `batch` (1, 2, …), `written`, `removed`, `rebuilt` (whether the crate graph and edges were rebuilt) and `cochange` (the stored scan as `index` prints it, or `null` off a git root), then `meta` as it stands after the pass. The line holds no path and no time. Nothing prints while the index is fresh, and a touch that leaves a file's bytes unchanged runs no pass.
+- **Stopping.** With `--max-batches N` (1 to 1000000) it exits 0 after N passes. Otherwise it runs until killed. There is no signal handler: each pass commits in its own transactions, so a kill leaves a database that reads answer from, the next `index` or `watch` completes it, and the operating system frees the lock.
+- **Errors.** A check or pass that fails is tried again at the next interval, since a save can remove a file between the walk and the read. A second failure in a row prints that failure's envelope and exits with its code.
+- After each pass, the index equals what a fresh `index` of the same tree stores.
+
+There is no `mcp --watch` yet: the MCP server answers from whatever index `index`, `index_repo` or `watch` last wrote.
+
+After `fract index .`, `fract watch` and a new function saved in `src/a.rs`, it prints:
+
+```
+{"ok":true,"data":{"batch":1,"written":1,"removed":0,"rebuilt":true,"cochange":null},"meta":{"stale":false,"head":null,"index_head":null,"rank_epoch":2},"error":null,"schema":1}
+```
+
 ## MCP
 
 `phantom-fractal mcp [--allow-index] [--root PATH]...` runs a [Model Context Protocol](https://modelcontextprotocol.io) server on stdin and stdout. `fract mcp` is the same server.
@@ -626,7 +649,7 @@ The envelope keys come in the order `ok`, `data`, `error`, `schema`. `version` r
 
 ## Other
 
-`--version` prints `phantom-fractal 0.0.0`. `--help` lists the twelve commands with a usage line, and so does a run with no command. `find` matches names only. There is no other command.
+`--version` prints `phantom-fractal 0.0.0`. `--help` lists the thirteen commands with a usage line, and so does a run with no command. `find` matches names only. There is no other command.
 
 ## Licence
 

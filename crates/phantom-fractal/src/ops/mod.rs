@@ -11,7 +11,7 @@ pub(crate) mod budget;
 pub(crate) mod calls;
 pub(crate) mod cochange;
 pub(crate) mod find;
-mod fresh;
+pub(crate) mod fresh;
 pub(crate) mod impact;
 pub(crate) mod index;
 pub(crate) mod lookup;

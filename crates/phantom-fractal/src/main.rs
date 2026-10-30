@@ -15,7 +15,9 @@
 //! needs no index. Each prints the JSON envelope from
 //! `phantom-fractal-proto`, whose `meta` says, on every success that read
 //! an index, whether that index is stale. `index` holds the database's
-//! writer lock while it runs. `mcp` serves the same
+//! writer lock while it runs. `watch` holds it for as long as it runs,
+//! polls the tree, and runs an index pass each time the tree settles
+//! stale, printing one envelope line per pass. `mcp` serves the same
 //! operations to an MCP client over stdin and stdout, for the trees named
 //! by `--root` only. There are no other commands.
 //!
@@ -26,10 +28,12 @@
 
 mod mcp;
 mod ops;
+mod watch;
 
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use phantom_fractal_analyze::ImpactOptions;
@@ -236,6 +240,29 @@ enum Command {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
     },
+    /// Keep the index of a tree fresh while it is edited: poll it, and
+    /// run an index pass each time it settles stale, one envelope line per
+    /// pass. Holds the writer lock until killed or until --max-batches
+    /// passes have run.
+    Watch {
+        /// Tree to keep indexed. Defaults to the current directory.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Milliseconds between probes of the tree, 100 to 10000.
+        #[arg(long, default_value_t = watch::DEFAULT_INTERVAL_MS,
+              value_parser = clap::value_parser!(u64).range(watch::INTERVAL_MS_MIN..=watch::INTERVAL_MS_MAX))]
+        interval_ms: u64,
+        /// Milliseconds a stale tree must hold still before a pass, 50 to
+        /// 5000.
+        #[arg(long, default_value_t = watch::DEFAULT_DEBOUNCE_MS,
+              value_parser = clap::value_parser!(u64).range(watch::DEBOUNCE_MS_MIN..=watch::DEBOUNCE_MS_MAX))]
+        debounce_ms: u64,
+        /// Exit 0 after this many passes, 1 to 1000000. Without it, runs
+        /// until killed.
+        #[arg(long,
+              value_parser = clap::value_parser!(u64).range(watch::MAX_BATCHES_MIN..=watch::MAX_BATCHES_MAX))]
+        max_batches: Option<u64>,
+    },
     /// Print the name, version, and commit of this binary. Needs no index.
     Version,
     /// Serve the read operations to an MCP client: JSON-RPC on stdin and
@@ -377,6 +404,17 @@ fn main() -> ExitCode {
             repo,
         })),
         Command::Status { repo } => emit(ops::status(&StatusRequest { repo })),
+        Command::Watch {
+            repo,
+            interval_ms,
+            debounce_ms,
+            max_batches,
+        } => watch::run(&watch::WatchRequest {
+            repo,
+            interval: Duration::from_millis(interval_ms),
+            debounce: Duration::from_millis(debounce_ms),
+            max_batches,
+        }),
         Command::Version => emit(ops::version(&VersionRequest)),
         Command::Mcp { allow_index, root } => mcp::serve(allow_index, &root),
     }

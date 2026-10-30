@@ -144,8 +144,30 @@ pub(crate) fn index(request: &IndexRequest) -> Result<Reply<IndexSummary>, Failu
             ),
         ));
     }
-    let root = request
-        .path
+    let root = checked_root(&request.path)?;
+    let language = RustLanguage::new()
+        .map_err(|err| Failure::new(ErrorKind::Usage, format!("extract: {err}")))?;
+    let database = index_database_path(&root);
+    // The lock comes first: it makes and checks the directory chain, so
+    // even a first index creates its database under the lock, and a
+    // second writer waits for it. The store is declared after the lock,
+    // so it is closed before the lock is released.
+    let _lock = WriterLock::acquire(&database)?;
+    let mut store = Store::open(&database)?;
+    let pass = pass(&root, &mut store, &language, request.window)?;
+    let meta = fresh::meta(&root, &store)?;
+    let summary = IndexSummary {
+        cochange: pass.cochange,
+        ..IndexSummary::new(&pass.report, &pass.graph)
+    };
+    Ok(Reply::with_meta(summary, meta))
+}
+
+/// `path` canonicalized, when it is a directory to index: `NotFound` when
+/// it does not exist, and `Usage` when it is not a directory or holds the
+/// data directory.
+pub(crate) fn checked_root(path: &Path) -> Result<PathBuf, Failure> {
+    let root = path
         .canonicalize()
         .map_err(|_| Failure::new(ErrorKind::NotFound, "index path not found"))?;
     if !root.is_dir() {
@@ -154,38 +176,59 @@ pub(crate) fn index(request: &IndexRequest) -> Result<Reply<IndexSummary>, Failu
             "index path is not a directory",
         ));
     }
-    let database = index_database_path(&root);
-    if resolve(&database).starts_with(&root) {
+    if resolve(&index_database_path(&root)).starts_with(&root) {
         return Err(Failure::new(
             ErrorKind::Usage,
             "data directory is inside the index path",
         ));
     }
-    let language = RustLanguage::new()
-        .map_err(|err| Failure::new(ErrorKind::Usage, format!("extract: {err}")))?;
-    // The lock comes first: it makes and checks the directory chain, so
-    // even a first index creates its database under the lock, and a
-    // second writer waits for it. The store is declared after the lock,
-    // so it is closed before the lock is released.
-    let _lock = WriterLock::acquire(&database)?;
-    let mut store = Store::open(&database)?;
-    let report = phantom_fractal_extract::index(&root, &mut store, &language)?;
+    Ok(root)
+}
+
+/// What one index pass did: the files it wrote and skipped, the graph it
+/// stored or kept, and the co-change scan on a git root.
+pub(crate) struct Pass {
+    pub(crate) report: IndexReport,
+    pub(crate) graph: GraphReport,
+    pub(crate) cochange: Option<CochangeSummary>,
+}
+
+/// One index pass over the canonical `root` into `store`, whose writer
+/// lock the caller holds: the files, the graph, the rank, the co-change
+/// scan over `window`, and then `root` and `index_head`, each written only
+/// when it changed.
+pub(crate) fn pass(
+    root: &Path,
+    store: &mut Store,
+    language: &RustLanguage,
+    window: Window,
+) -> Result<Pass, Failure> {
+    let report = phantom_fractal_extract::index(root, store, language)?;
     let graph = match report.graph {
         Some(graph) => graph,
-        None => stored_graph(&store, &root)?,
+        None => stored_graph(store, root)?,
     };
-    store_rank(&mut store)?;
-    let head = phantom_fractal_git::head(&root).map_err(history_failure)?;
-    let cochange = store_cochange(&mut store, &root, head.as_deref(), request.window)?;
+    store_rank(store)?;
+    let head = phantom_fractal_git::head(root).map_err(history_failure)?;
+    let cochange = store_cochange(store, root, head.as_deref(), window)?;
     // Each writes only when its value changed.
     store.set_root(&root.to_string_lossy())?;
     store.set_index_head(head.as_deref())?;
-    let meta = fresh::meta(&root, &store)?;
-    let summary = IndexSummary {
+    Ok(Pass {
+        report,
+        graph,
         cochange,
-        ..IndexSummary::new(&report, &graph)
-    };
-    Ok(Reply::with_meta(summary, meta))
+    })
+}
+
+/// The store at `database` under its writer lock, the lock taken first,
+/// as `index` takes it: acquiring it makes and checks the directory
+/// chain, so even a first index creates its database under the lock, and
+/// a second writer waits for it.
+pub(crate) fn open_locked(database: &Path) -> Result<(Store, WriterLock), Failure> {
+    let lock = WriterLock::acquire(database)?;
+    let store = Store::open(database)?;
+    Ok((store, lock))
 }
 
 /// Mines the co-change of the git root `root`, whose HEAD is `head`, and
