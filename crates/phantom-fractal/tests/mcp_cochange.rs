@@ -106,7 +106,13 @@ fn the_tool_sits_after_repo_map_with_the_cli_ranges() {
         .collect();
     assert_eq!(
         names[6..],
-        ["repo_map", "cochange", "repo_status", "index_repo"]
+        [
+            "repo_map",
+            "cochange",
+            "diff_impact",
+            "repo_status",
+            "index_repo"
+        ]
     );
     let tool = &tools[7];
     assert_eq!(

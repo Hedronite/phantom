@@ -1,6 +1,6 @@
 //! `--max-tokens` and `max_tokens` on `find`, `show`, `callers`,
 //! `callees`, `impact`, `rank` and `cochange`, and the `focus` cap
-//! (SPEC-w8 G0c, G3a).
+//! (SPEC-w8 G0c, G3a), and on `impact --diff` (SPEC-w9 G2b).
 //!
 //! Every budgeted reply is checked byte for byte against a reply built
 //! here from the unbudgeted one: its entries cut out of the printed text
@@ -95,41 +95,53 @@ impl World {
             data: TempDir::new("data"),
         };
         let root = world.tree.path();
-        fs::create_dir_all(root.join("src")).expect("create src");
-        fs::write(
-            root.join("Cargo.toml"),
-            "[package]\nname = \"generated\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
-        )
-        .expect("write manifest");
-        let mut lib = String::new();
-        let mut methods = String::new();
-        let mut fan = String::new();
-        let mut tests = String::new();
-        for i in 0..30 {
-            lib.push_str(&format!("pub mod m{i};\n"));
-            methods.push_str(&format!("    pub fn method_{i}(&self) {{}}\n"));
-            fan.push_str(&format!("    crate::m{i}::dup();\n"));
-            tests.push_str(&format!(
-                "    #[test]\n    fn t{i}() {{\n        crate::m{i}::caller_{i}();\n    }}\n"
-            ));
-            fs::write(
-                root.join(format!("src/m{i}.rs")),
-                format!(
-                    "/// Module {i}'s dup.\npub fn dup() {{}}\n\npub fn caller_{i}() {{\n    \
-                     crate::hub();\n}}\n\npub fn deep_{i}() {{\n    caller_{i}();\n}}\n\n\
-                     pub fn deeper_{i}() {{\n    deep_{i}();\n    crate::relay();\n}}\n"
-                ),
-            )
-            .expect("write module");
+        for (path, body) in generated_files() {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().expect("parent")).expect("create dir");
+            fs::write(path, body).expect("write file");
         }
-        lib.push_str(&format!(
-            "\n/// Many methods.\npub struct Hub;\n\nimpl Hub {{\n{methods}}}\n\n\
-             /// Called from every module.\npub fn hub() {{}}\n\n\
-             /// Calls every dup.\npub fn fan() {{\n{fan}}}\n\n\
-             /// Called by every top caller, and calls every dup.\npub fn relay() {{\n{fan}}}\n\n\
-             #[cfg(test)]\nmod tests {{\n{tests}}}\n"
-        ));
-        fs::write(root.join("src/lib.rs"), lib).expect("write lib");
+        world.index();
+        world
+    }
+
+    /// [`World::generated`] committed as a git root, then changed in the
+    /// work tree and indexed: every `dup` body, `hub`'s body, a removed
+    /// module, a new file and 8 notes, so `impact --diff` has many changed
+    /// symbols, files and hits to drop.
+    fn generated_diff() -> Self {
+        let files = generated_files();
+        let mut script = support::Script::default();
+        let borrowed: Vec<(&str, String)> = files
+            .iter()
+            .map(|(path, body)| (path.as_str(), body.clone()))
+            .collect();
+        script.commit(support::HEAD, &borrowed);
+        let world = Self {
+            tree: TempDir::new("unused"),
+            repo: Some(support::Repo::new("diff-budget", &script)),
+            data: TempDir::new("data"),
+        };
+        let root = world.root().to_path_buf();
+        for (path, body) in &files {
+            if path.starts_with("src/m") {
+                fs::write(
+                    root.join(path),
+                    body.replace("pub fn dup() {}", "pub fn dup() { let _ = 1; }"),
+                )
+                .expect("edit dup");
+            }
+        }
+        let lib = fs::read_to_string(root.join("src/lib.rs")).expect("lib");
+        fs::write(
+            root.join("src/lib.rs"),
+            lib.replace("pub fn hub() {}", "pub fn hub() { let _ = 2; }"),
+        )
+        .expect("edit hub");
+        fs::write(root.join("src/extra.rs"), "pub fn extra() {}\n").expect("add");
+        fs::remove_file(root.join("src/m29.rs")).expect("remove a module");
+        for i in 0..8 {
+            fs::write(root.join(format!("note{i}.md")), "a note\n").expect("note");
+        }
         world.index();
         world
     }
@@ -218,6 +230,46 @@ impl World {
             })
             .collect()
     }
+}
+
+/// The files of [`World::generated`]: 30 modules, each with a `dup`, a
+/// direct caller of `hub` and two callers above it, a test per module, a
+/// struct with 30 methods, a `fan` that calls every `dup`, and a `relay`
+/// that calls every `dup` and that every top caller calls.
+fn generated_files() -> Vec<(String, String)> {
+    let mut files = vec![(
+        "Cargo.toml".to_owned(),
+        "[package]\nname = \"generated\"\nversion = \"0.0.0\"\nedition = \"2024\"\n".to_owned(),
+    )];
+    let mut lib = String::new();
+    let mut methods = String::new();
+    let mut fan = String::new();
+    let mut tests = String::new();
+    for i in 0..30 {
+        lib.push_str(&format!("pub mod m{i};\n"));
+        methods.push_str(&format!("    pub fn method_{i}(&self) {{}}\n"));
+        fan.push_str(&format!("    crate::m{i}::dup();\n"));
+        tests.push_str(&format!(
+            "    #[test]\n    fn t{i}() {{\n        crate::m{i}::caller_{i}();\n    }}\n"
+        ));
+        files.push((
+            format!("src/m{i}.rs"),
+            format!(
+                "/// Module {i}'s dup.\npub fn dup() {{}}\n\npub fn caller_{i}() {{\n    \
+                     crate::hub();\n}}\n\npub fn deep_{i}() {{\n    caller_{i}();\n}}\n\n\
+                     pub fn deeper_{i}() {{\n    deep_{i}();\n    crate::relay();\n}}\n"
+            ),
+        ));
+    }
+    lib.push_str(&format!(
+        "\n/// Many methods.\npub struct Hub;\n\nimpl Hub {{\n{methods}}}\n\n\
+             /// Called from every module.\npub fn hub() {{}}\n\n\
+             /// Calls every dup.\npub fn fan() {{\n{fan}}}\n\n\
+             /// Called by every top caller, and calls every dup.\npub fn relay() {{\n{fan}}}\n\n\
+             #[cfg(test)]\nmod tests {{\n{tests}}}\n"
+    ));
+    files.push(("src/lib.rs".to_owned(), lib));
+    files
 }
 
 /// `ceil(bytes / 3.5) + 1` for one line with no newline.
@@ -325,7 +377,33 @@ fn array_drops(raw: &[u8], at: usize) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// The SPEC-w8 G0c drop order for `op`, as byte ranges of `line`.
+/// The impact drops of the object at `object`: the deepest group's hits
+/// from the end, then the next group's, then `tests` from the end.
+fn impact_drops(line: &str, object: usize) -> Vec<(usize, usize)> {
+    let raw = line.as_bytes();
+    let array = |object: usize, key: &str| {
+        member(raw, object, key).map_or_else(Vec::new, |(start, _)| array_drops(raw, start))
+    };
+    let mut out = Vec::new();
+    if let Some((groups, _)) = member(raw, object, "groups") {
+        let mut by_depth: Vec<(u64, usize)> = elements(raw, groups)
+            .into_iter()
+            .map(|(start, _)| {
+                let (depth, end) = member(raw, start, "depth").expect("depth");
+                (line[depth..end].parse().expect("depth"), start)
+            })
+            .collect();
+        by_depth.sort_by_key(|&(depth, _)| std::cmp::Reverse(depth));
+        for (_, group) in by_depth {
+            out.extend(array(group, "hits"));
+        }
+    }
+    out.extend(array(object, "tests"));
+    out
+}
+
+/// The SPEC-w8 G0c drop order for `op`, as byte ranges of `line`, and the
+/// SPEC-w9 G2b order for `impact_diff`.
 fn drops(op: &str, line: &str) -> Vec<(usize, usize)> {
     let raw = line.as_bytes();
     let (data, _) = member(raw, 0, "data").expect("data");
@@ -335,22 +413,12 @@ fn drops(op: &str, line: &str) -> Vec<(usize, usize)> {
     match op {
         "find" | "callers" | "callees" | "rank" => array(data, "hits"),
         "cochange" => array(data, "partners"),
-        "impact" => {
-            let mut out = Vec::new();
-            if let Some((groups, _)) = member(raw, data, "groups") {
-                let mut by_depth: Vec<(u64, usize)> = elements(raw, groups)
-                    .into_iter()
-                    .map(|(start, _)| {
-                        let (depth, end) = member(raw, start, "depth").expect("depth");
-                        (line[depth..end].parse().expect("depth"), start)
-                    })
-                    .collect();
-                by_depth.sort_by_key(|&(depth, _)| std::cmp::Reverse(depth));
-                for (_, group) in by_depth {
-                    out.extend(array(group, "hits"));
-                }
-            }
-            out.extend(array(data, "tests"));
+        "impact" => impact_drops(line, data),
+        "impact_diff" => {
+            let (impact, _) = member(raw, data, "impact").expect("impact");
+            let mut out = impact_drops(line, impact);
+            out.extend(array(data, "files_only"));
+            out.extend(array(data, "changed"));
             out
         }
         "show" => {
@@ -634,6 +702,49 @@ fn cochange_and_show_on_a_git_root_fit_the_same_way() {
     ];
     let (dropped, small) = check(&world, &cases);
     assert!(dropped >= 20, "{dropped} replies dropped entries");
+    assert!(small >= cases.len(), "{small} replies were too small");
+}
+
+#[test]
+fn impact_diff_fits_in_its_own_order() {
+    let world = World::generated_diff();
+    let cases = [
+        case(
+            "impact_diff",
+            &["impact", "--diff"],
+            "diff_impact",
+            json!({}),
+        ),
+        case(
+            "impact_diff",
+            &["impact", "--diff", "--no-tests", "--depth", "2"],
+            "diff_impact",
+            json!({ "include_tests": false, "depth": 2 }),
+        ),
+        case(
+            "impact_diff",
+            &["impact", "--diff", "--summary", "--against", "main"],
+            "diff_impact",
+            json!({ "summary_only": true, "against": "main" }),
+        ),
+    ];
+    let (_, full) = world.cli(&cases[0].cli);
+    let data = &serde_json::from_str::<Value>(&full).expect("envelope")["data"];
+    // Enough of every list that each step of the order is reached.
+    assert!(
+        data["changed"].as_array().expect("changed").len() >= 30,
+        "{full}"
+    );
+    assert!(
+        data["files_only"].as_array().expect("files").len() >= 8,
+        "{full}"
+    );
+    assert!(
+        data["impact"]["tests"].as_array().expect("tests").len() >= 20,
+        "{full}"
+    );
+    let (dropped, small) = check(&world, &cases);
+    assert!(dropped >= 40, "{dropped} replies dropped entries");
     assert!(small >= cases.len(), "{small} replies were too small");
 }
 

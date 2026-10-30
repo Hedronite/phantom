@@ -80,13 +80,13 @@ impl Shed for ImpactResult {
 
 /// One completeness reason. `count` is null where it cannot be counted.
 #[derive(Clone, Serialize)]
-struct ReasonOut {
+pub(crate) struct ReasonOut {
     reason: &'static str,
     count: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
-struct CountsOut {
+pub(crate) struct CountsOut {
     direct: u64,
     total: u64,
     packages: u64,
@@ -97,18 +97,18 @@ struct CountsOut {
 /// The non-test hits of one depth: `total` of them, of which `hits` holds
 /// at most 100, with `truncated` set when there were more.
 #[derive(Clone, Serialize)]
-struct GroupOut {
-    depth: u8,
+pub(crate) struct GroupOut {
+    pub(crate) depth: u8,
     total: usize,
     truncated: bool,
-    hits: Vec<HitOut>,
+    pub(crate) hits: Vec<HitOut>,
 }
 
 /// One reached symbol. `name`, `kind`, `path`, and `line` describe it;
 /// `reason` and the site are the edge it was best reached by, and
 /// `confidence` is the product along that path.
 #[derive(Clone, Serialize)]
-struct HitOut {
+pub(crate) struct HitOut {
     name: String,
     kind: String,
     path: String,
@@ -121,14 +121,14 @@ struct HitOut {
 
 /// A reached test: the hit shape plus its depth.
 #[derive(Clone, Serialize)]
-struct TestOut {
+pub(crate) struct TestOut {
     depth: u8,
     #[serde(flatten)]
     hit: HitOut,
 }
 
 #[derive(Clone, Serialize)]
-struct OptionsOut {
+pub(crate) struct OptionsOut {
     depth: u8,
     min_confidence: f64,
     include_tests: bool,
@@ -160,10 +160,7 @@ pub(crate) fn impact(request: &ImpactRequest) -> Result<Reply<ImpactResult>, Fai
             answer
                 .tests
                 .into_iter()
-                .map(|hit| TestOut {
-                    depth: hit.depth,
-                    hit: hit_out(&names, hit),
-                })
+                .map(|hit| test_out(&names, hit))
                 .collect()
         });
         (Some(groups), tests)
@@ -176,24 +173,20 @@ pub(crate) fn impact(request: &ImpactRequest) -> Result<Reply<ImpactResult>, Fai
         counts: counts_out(answer.counts),
         groups,
         tests,
-        options: OptionsOut {
-            depth: options.max_depth,
-            min_confidence: options.min_confidence,
-            include_tests: options.include_tests,
-        },
+        options: options_out(&options),
         tokens: None,
     };
     super::answer(result, &store, &request.repo, request.max_tokens)
 }
 
-fn reason_out(reason: ReasonCount) -> ReasonOut {
+pub(crate) fn reason_out(reason: ReasonCount) -> ReasonOut {
     ReasonOut {
         reason: reason.reason.as_str(),
         count: reason.count,
     }
 }
 
-const fn counts_out(counts: Counts) -> CountsOut {
+pub(crate) const fn counts_out(counts: Counts) -> CountsOut {
     CountsOut {
         direct: counts.direct,
         total: counts.total,
@@ -203,7 +196,7 @@ const fn counts_out(counts: Counts) -> CountsOut {
     }
 }
 
-fn group_out(names: &Names, group: Group) -> GroupOut {
+pub(crate) fn group_out(names: &Names, group: Group) -> GroupOut {
     GroupOut {
         depth: group.depth,
         total: group.total,
@@ -213,6 +206,23 @@ fn group_out(names: &Names, group: Group) -> GroupOut {
             .into_iter()
             .map(|hit| hit_out(names, hit))
             .collect(),
+    }
+}
+
+/// A reached test, named as [`hit_out`] names a hit.
+pub(crate) fn test_out(names: &Names, hit: Hit) -> TestOut {
+    TestOut {
+        depth: hit.depth,
+        hit: hit_out(names, hit),
+    }
+}
+
+/// The options an answer was walked with.
+pub(crate) const fn options_out(options: &ImpactOptions) -> OptionsOut {
+    OptionsOut {
+        depth: options.max_depth,
+        min_confidence: options.min_confidence,
+        include_tests: options.include_tests,
     }
 }
 
