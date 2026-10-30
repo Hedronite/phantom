@@ -128,7 +128,11 @@ fn watch(
     let root = checked_root(&request.repo)?;
     let language = RustLanguage::new()
         .map_err(|err| Failure::new(ErrorKind::Usage, format!("extract: {err}")))?;
-    let (mut store, _lock) = open_locked(&index_database_path(&root))?;
+    let (store, lock) = open_locked(&index_database_path(&root))?;
+    // The lock is bound before the store, so when the watch ends the store
+    // is closed first and the lock is released after it, as in `index`.
+    let _lock = lock;
+    let mut store = store;
     let mut batches = 0;
     let mut failed = false;
     let mut first = true;
