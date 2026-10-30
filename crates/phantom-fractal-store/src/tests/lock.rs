@@ -10,8 +10,8 @@ use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::{TempDb, assert_outside_workspace, file_mode};
-use crate::{LockState, StoreError, WriterLock, lock_state};
+use super::{TempData, TempDb, assert_outside_workspace, file_mode};
+use crate::{LockState, Store, StoreError, WriterLock, lock_state};
 
 /// The test's own process runs the child.
 fn spawn_lock_child(db: &std::path::Path, marker: &std::path::Path) -> Command {
@@ -176,4 +176,66 @@ fn spawned_child_holds_the_lock() {
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+#[test]
+fn acquire_creates_the_0700_chain_and_holds() {
+    let data = TempData::new("lockchain");
+    // No chain exists yet: only the lock file is here, and the chain
+    // Store::open would have created is born around it — at `0700`,
+    // before any database file exists at all.
+    let guard = WriterLock::acquire(&data.db()).expect("acquire");
+    assert_outside_workspace(&data.db());
+    assert_eq!(file_mode(&data.root.join("repos")), 0o700);
+    assert_eq!(file_mode(&data.repo_dir()), 0o700);
+    let lock = crate::lock::lock_path(&data.db());
+    assert_eq!(file_mode(&lock), 0o600);
+    let mut text = String::new();
+    std::fs::OpenOptions::new()
+        .read(true)
+        .open(&lock)
+        .map(|mut file| file.read_to_string(&mut text).expect("lock read"))
+        .expect("lock open");
+    assert_eq!(text, String::new(), "the lock file holds content");
+    assert!(matches!(lock_state(&data.db()), Ok(LockState::Held)));
+    drop(guard);
+    // The chain the acquire made is the chain the store opens.
+    let store = Store::open(&data.db()).expect("store on the born chain");
+    assert_eq!(store.row_count("meta").expect("rows"), 2);
+    drop(store);
+    let _ = std::fs::remove_file(&lock);
+}
+
+#[test]
+fn acquire_refuses_a_broken_chain_like_the_store() {
+    use std::fs;
+    let data = TempData::new("lockshape");
+    fs::create_dir_all(data.root.join("repos")).expect("repos");
+    // The index dir is a file: the shape refusal, no chmod anywhere.
+    fs::File::create(data.repo_dir()).expect("file the repo spot");
+    let name_err = |err: StoreError| format!("{err:?}");
+    let acquired = WriterLock::acquire(&data.db())
+        .map(|_| ())
+        .map_err(name_err);
+    let opened = Store::open(&data.db()).map(|_| ()).map_err(name_err);
+    // The same refusal, from the same checks.
+    assert_eq!(acquired, opened, "{acquired:?}");
+    let refused = acquired.as_ref().expect_err("the file-refused dir");
+    assert!(refused.contains("DataDirectory"), "{refused}");
+    // and neither left a database, nor content: the refusal lands
+    // before any lock file is opened.
+    assert!(!crate::lock::lock_path(&data.db()).exists());
+    // A symlinked repos/ refrains the same way.
+    let data = TempData::new("locklink");
+    fs::create_dir_all(&data.root).expect("data root");
+    let elsewhere = TempData::new("locklink-target");
+    fs::create_dir_all(elsewhere.repo_dir()).expect("target repo");
+    std::os::unix::fs::symlink(elsewhere.repo_dir(), data.root.join("repos")).expect("symlink");
+    let acquired = WriterLock::acquire(&data.db())
+        .map(|_| ())
+        .map_err(name_err);
+    let opened = Store::open(&data.db()).map(|_| ()).map_err(name_err);
+    assert_eq!(acquired, opened, "{acquired:?}");
+    let refused = acquired.as_ref().expect_err("the symlinked dir");
+    assert!(refused.contains("DataDirectory"), "{refused}");
 }
