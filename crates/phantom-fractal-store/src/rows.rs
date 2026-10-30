@@ -45,6 +45,11 @@ pub(crate) fn delete_file_rows(conn: &Connection, path: &str) -> Result<bool, St
              OR (dst_kind = 'symbol' AND dst_id IN (SELECT id FROM symbols WHERE file_id = ?1))",
         [file_id],
     )?;
+    conn.execute(
+        "UPDATE symbols SET parent_id = NULL
+         WHERE file_id <> ?1 AND parent_id IN (SELECT id FROM symbols WHERE file_id = ?1)",
+        [file_id],
+    )?;
     // `modules.file_id` is NO ACTION on delete: a file's map module row
     // keeps its path but must not keep the dead link.
     conn.execute(

@@ -680,3 +680,76 @@ fn file_stats_reads_sorted_stat_rows() {
     drop(store);
     drop(language);
 }
+
+#[test]
+fn replacing_or_removing_an_impl_owner_file_keeps_the_pass() {
+    let db = TempDb::new("fkowner");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = language();
+    store
+        .put_source("src/lib.rs", "pub struct Counter;\n", 0, &language)
+        .expect("put owner");
+    store
+        .put_source(
+            "src/shapes.rs",
+            "impl super::Counter {\n    pub fn fire() -> u8 {\n        2\n    }\n}\n",
+            0,
+            &language,
+        )
+        .expect("put method");
+    let input = store.resolve_input().expect("resolve");
+    let fire = input
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "fire")
+        .expect("method")
+        .id;
+    let counter = input
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "Counter")
+        .expect("owner")
+        .id;
+    store
+        .write_method_owners(&[(fire, counter)])
+        .expect("owners");
+    // The owner's row leaves the index with its file; the cross-file
+    // parent link must not block the delete.
+    store
+        .remove_file("src/lib.rs")
+        .expect("remove without an FK failure");
+    // The pass that removed a file rebuilds: a new reference file
+    // re-attributes the method, in one more pass.
+    store
+        .put_source("src/lib.rs", "pub struct Counter;\n", 7, &language)
+        .expect("re-put");
+    let input = store.resolve_input().expect("resolve again");
+    let fire = input
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "fire")
+        .expect("method")
+        .id;
+    let counter = input
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "Counter")
+        .expect("owner")
+        .id;
+    store
+        .write_method_owners(&[(fire, counter)])
+        .expect("owners after the rebuild");
+    // The same failure through the replace path inside put_source: an
+    // appended comment on the owner's file.
+    store
+        .put_source(
+            "src/lib.rs",
+            "// appended\npub struct Counter;\n",
+            8,
+            &language,
+        )
+        .expect("replace without an FK failure");
+    drop(store);
+    drop(language);
+}

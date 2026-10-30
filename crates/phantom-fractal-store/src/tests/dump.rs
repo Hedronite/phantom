@@ -205,3 +205,47 @@ fn canonical_dump_shows_a_one_byte_edit() {
     let after = store.canonical_dump().expect("dump after");
     assert_ne!(baseline, after, "a one-byte edit changes the dump");
 }
+
+#[test]
+fn canonical_dump_leaves_out_the_run_history() {
+    let db = TempDb::new("dumpfresh");
+    assert_outside_workspace(db.path());
+    let mut fresh = Store::open(db.path()).expect("open");
+    let language = language();
+    fresh
+        .put_source("src/a.rs", ALPHA, 0, &language)
+        .expect("put");
+    fresh.replace_edges(&[]).expect("first build");
+    // The first pass's file row ids start at 1.
+    fresh.write_rank(1, &[], &[(1, 1.0)]).expect("rank");
+    let fresh = fresh.canonical_dump().expect("fresh dump");
+
+    let db = TempDb::new("dumprerun");
+    assert_outside_workspace(db.path());
+    let mut rerun = Store::open(db.path()).expect("open");
+    rerun
+        .put_source("src/a.rs", ALPHA, 0, &language)
+        .expect("first put");
+    rerun.replace_edges(&[]).expect("first build");
+    // The second pass: a touch moves the stored mtime, replaces edges
+    // (the epoch counter moves), and re-ranks (its epoch moves too).
+    // The replace deletes and re-inserts the file row; without
+    // AUTOINCREMENT it aliases the freed id.
+    rerun
+        .put_source("src/a.rs", ALPHA, 999, &language)
+        .expect("second put");
+    rerun.replace_edges(&[]).expect("second build");
+    rerun.write_rank(5, &[], &[(1, 1.0)]).expect("rerank");
+    let rerun = rerun.canonical_dump().expect("rerun dump");
+
+    assert_eq!(fresh, rerun, "the run history is out of the dump");
+    assert!(!fresh.contains("graph_epoch"), "{fresh}");
+    assert!(!fresh.contains("rank_epoch"), "{fresh}");
+    assert!(!fresh.contains("mtime_ns"), "{fresh}");
+    // The graph state that matters stays: the producer stamp, the file
+    // sizes, and the rank scores all read back.
+    assert!(fresh.contains("producer\tphantom-fractal"), "{fresh}");
+    drop(fresh);
+    drop(rerun);
+    drop(language);
+}

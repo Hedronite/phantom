@@ -84,7 +84,6 @@ const TABLES: &[(&str, &[&str])] = &[
             "lang",
             "blake3",
             "size",
-            "mtime_ns",
             "module",
             "generated",
             "parse_status",
@@ -103,7 +102,7 @@ const TABLES: &[(&str, &[&str])] = &[
     ("meta", &["key", "value"]),
     ("modules", &["target", "path", "file", "parent", "scope"]),
     ("packages", &["name", "version", "manifest_path"]),
-    ("rank", &["node_kind", "node", "score", "epoch"]),
+    ("rank", &["node_kind", "node", "score"]),
     (
         "refs",
         &[
@@ -508,7 +507,7 @@ fn dump_table(
         "files" => {
             let raw = query_values(
                 conn,
-                "SELECT path, lang, blake3, size, mtime_ns, module_id, generated, parse_status
+                "SELECT path, lang, blake3, size, module_id, generated, parse_status
                  FROM files",
             )?;
             raw.into_iter()
@@ -518,10 +517,9 @@ fn dump_table(
                         row[1].clone(),
                         row[2].clone(),
                         row[3].clone(),
-                        row[4].clone(),
-                        lookup(&maps.modules, &row[5]),
+                        lookup(&maps.modules, &row[4]),
+                        row[5].clone(),
                         row[6].clone(),
-                        row[7].clone(),
                     ]
                 })
                 .collect()
@@ -530,7 +528,19 @@ fn dump_table(
             conn,
             "SELECT head_oid, oldest_oid, commits_seen, skipped_bulk, window_json FROM git_scan",
         )?,
-        "meta" => query_values(conn, "SELECT key, value FROM meta")?,
+        "meta" => query_values(conn, "SELECT key, value FROM meta")?
+            .into_iter()
+            // The run counters move when a pass ran, not when the
+            // graph moved; a re-indexed database does not dump like a
+            // fresh one with them in. The stored run's epochs still
+            // read their own ways.
+            .filter(|row| {
+                !matches!(
+                    &row[0],
+                    SqlValue::Text(key) if key == "graph_epoch" || key == "rank_epoch"
+                )
+            })
+            .collect::<Vec<_>>(),
         "modules" => {
             let raw = query_values(
                 conn,
@@ -550,14 +560,13 @@ fn dump_table(
         }
         "packages" => query_values(conn, "SELECT name, version, manifest_path FROM packages")?,
         "rank" => {
-            let raw = query_values(conn, "SELECT node_kind, node_id, score, epoch FROM rank")?;
+            let raw = query_values(conn, "SELECT node_kind, node_id, score FROM rank")?;
             raw.into_iter()
                 .map(|row| {
                     vec![
                         row[0].clone(),
                         node_value(&row[0], &row[1], maps),
                         row[2].clone(),
-                        row[3].clone(),
                     ]
                 })
                 .collect()

@@ -97,6 +97,14 @@ pub enum StoreError {
     /// Another writer holds the database's `graph.db.lock` after the
     /// 250 ms window. The CLI maps this to `lock_held`, exit 4.
     LockHeld,
+    /// The caller's own-test-flag list does not match the file's
+    /// stored symbol count.
+    OwnFlagCount {
+        /// Symbols the file stores.
+        stored: usize,
+        /// Flags the reset was called with.
+        flags: usize,
+    },
 }
 
 impl std::fmt::Display for StoreError {
@@ -136,6 +144,12 @@ impl std::fmt::Display for StoreError {
                 write!(f, "{path}: {detail}")
             }
             Self::LockHeld => f.write_str("another writer holds the database lock"),
+            Self::OwnFlagCount { stored, flags } => {
+                write!(
+                    f,
+                    "{flags} own test flags do not match the file's {stored} symbols"
+                )
+            }
         }
     }
 }

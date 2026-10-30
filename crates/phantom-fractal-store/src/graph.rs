@@ -542,6 +542,70 @@ impl crate::Store {
         Ok(())
     }
 
+    /// Resets every symbol stored for `path` to its own test flag, in
+    /// stored insert order — items first, then methods, the order a
+    /// fresh [`put_source`](crate::Store::put_source) inserts — before
+    /// [`write_crate_graph`](crate::Store::write_crate_graph) marks the
+    /// test modules (W9 G0 fix, Finding 3). `flags` carries one bool
+    /// per stored symbol. A caller reuses each file's own flags from
+    /// its fresh extract, so a re-indexed file leaves marks it no
+    /// longer earns.
+    ///
+    /// A `flags` list whose length does not match the file's stored
+    /// symbol count fails before anything is written. No existing
+    /// signature changes; the caller wires this before the crate
+    /// graph's marks.
+    pub fn reset_symbol_test_flags(
+        &mut self,
+        path: &str,
+        flags: &[bool],
+    ) -> Result<(), StoreError> {
+        let file_id: Option<i64> =
+            match self
+                .conn
+                .query_row("SELECT id FROM files WHERE path = ?1", [path], |row| {
+                    row.get(0)
+                }) {
+                Ok(id) => Some(id),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(err) => return Err(err.into()),
+            };
+        let Some(file_id) = file_id else {
+            // No file row stores no symbols: an empty list is a clean
+            // no-op, anything else cannot own a reset.
+            if flags.is_empty() {
+                return Ok(());
+            }
+            return Err(StoreError::OwnFlagCount {
+                stored: 0,
+                flags: flags.len(),
+            });
+        };
+        let ids: Vec<i64> = {
+            let mut statement = self
+                .conn
+                .prepare("SELECT id FROM symbols WHERE file_id = ?1 ORDER BY id")?;
+            statement
+                .query_map([file_id], |row| row.get(0))?
+                .collect::<Result<Vec<i64>, _>>()?
+        };
+        if ids.len() != flags.len() {
+            return Err(StoreError::OwnFlagCount {
+                stored: ids.len(),
+                flags: flags.len(),
+            });
+        }
+        let tx = self.conn.transaction()?;
+        for (id, flag) in ids.iter().zip(flags) {
+            tx.execute(
+                "UPDATE symbols SET is_test = ?1 WHERE id = ?2",
+                (i64::from(*flag), id),
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// The stored extractor version, or nothing when it was never set.
     pub fn extractor_version(&self) -> Result<Option<u32>, StoreError> {
         match crate::schema::meta_get(&self.conn, "extractor_version")? {
