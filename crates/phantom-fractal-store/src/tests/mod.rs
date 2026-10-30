@@ -1,7 +1,8 @@
 //! Shared throwaway fixtures for the store's tests, plus the module
 //! split: `legacy` holds the W1/W2 rows still under grade, `dirs` the
-//! directory work, `writes` the replace/remove/persist rows, and `graph`
-//! the crate-graph API rows.
+//! directory work, `writes` the replace/remove/persist rows, `graph`
+//! the crate-graph API rows, `lock` the W9 writer lock, `meta` the W9
+//! meta setters, and `dump` the canonical dump.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,8 +12,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod cochange;
 mod detail;
 mod dirs;
+mod dump;
 mod graph;
 mod legacy;
+mod lock;
+mod meta;
 mod rank;
 mod writes;
 

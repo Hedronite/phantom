@@ -648,3 +648,35 @@ fn write_lib_graph(store: &mut Store, file: &str) {
         )
         .expect("graph");
 }
+
+#[test]
+fn file_stats_reads_sorted_stat_rows() {
+    let db = TempDb::new("filestats");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    assert!(store.file_stats().expect("empty stats").is_empty());
+    let language = language();
+    store
+        .put_source("src/c.rs", "pub struct Cap;\n", 20, &language)
+        .expect("put c");
+    store
+        .put_source("src/a.rs", "pub fn alpha11() {}\n", 7, &language)
+        .expect("put a");
+    let stats = store.file_stats().expect("stats");
+    assert_eq!(stats.len(), 2);
+    assert_eq!(stats[0].path, "src/a.rs");
+    assert_eq!(stats[1].path, "src/c.rs");
+    assert_eq!(stats[0].size, "pub fn alpha11() {}\n".len() as i64);
+    assert_eq!(stats[0].mtime_ns, 7);
+    assert_eq!(
+        stats[0].blake3,
+        blake3::hash("pub fn alpha11() {}\n".as_bytes())
+            .as_bytes()
+            .to_vec()
+    );
+    assert_eq!(stats[1].size, "pub struct Cap;\n".len() as i64);
+    assert_eq!(stats[1].mtime_ns, 20);
+    assert_eq!(stats[1].blake3.len(), 32);
+    drop(store);
+    drop(language);
+}

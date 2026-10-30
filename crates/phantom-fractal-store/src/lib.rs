@@ -17,8 +17,11 @@
 mod cochange;
 mod detail;
 mod dirs;
+mod dump;
 mod graph;
 mod impact;
+mod lock;
+mod meta;
 mod rank;
 mod rows;
 mod schema;
@@ -34,7 +37,9 @@ use rusqlite::{Connection, OpenFlags};
 pub use crate::cochange::{CochangeGroup, CochangePartner, CochangeScan, FileRow, PairRow};
 pub use crate::detail::SymbolDetail;
 pub use crate::graph::{CallHit, Package, SymbolMatch};
+pub use crate::lock::{LockState, WriterLock, lock_state};
 pub use crate::rank::{MapFile, MapRow, RankEdge, RankImportEdge, RankSymbolRow};
+pub use crate::rows::FileStat;
 
 /// Producer stamp written into `meta`.
 pub const PRODUCER: &str = "phantom-fractal";
@@ -89,6 +94,9 @@ pub enum StoreError {
     /// A store directory is owned by another uid, or the owner probe
     /// could not be written where the effective uid owns.
     NotOwnedByUs(String, String),
+    /// Another writer holds the database's `graph.db.lock` after the
+    /// 250 ms window. The CLI maps this to `lock_held`, exit 4.
+    LockHeld,
 }
 
 impl std::fmt::Display for StoreError {
@@ -127,6 +135,7 @@ impl std::fmt::Display for StoreError {
             Self::NotOwnedByUs(path, detail) => {
                 write!(f, "{path}: {detail}")
             }
+            Self::LockHeld => f.write_str("another writer holds the database lock"),
         }
     }
 }
@@ -239,6 +248,25 @@ impl Store {
     pub fn file_paths(&self) -> Result<Vec<String>, StoreError> {
         let mut statement = self.conn.prepare("SELECT path FROM files ORDER BY path")?;
         let rows = statement.query_map([], |row| row.get(0))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// One stat row per stored file, sorted by path: the size and
+    /// mtime the freshness probe compares, plus the stored blake3.
+    pub fn file_stats(&self) -> Result<Vec<rows::FileStat>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT path, size, mtime_ns, blake3 FROM files ORDER BY path")?;
+        let stat = |row: &rusqlite::Row<'_>| {
+            Ok(rows::FileStat {
+                path: row.get(0)?,
+                size: row.get(1)?,
+                mtime_ns: row.get(2)?,
+                blake3: row.get(3)?,
+            })
+        };
+        let rows = statement.query_map([], stat)?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
     }

@@ -11,6 +11,20 @@ use phantom_fractal_lang::{Caller, Extract, Item, ItemKind, RefKind, Visibility}
 
 use crate::StoreError;
 
+/// One stored file's stat row (W9): the fields the freshness probe
+/// compares first, plus the stored blake3 for the mismatch refetch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileStat {
+    /// The repo-relative path.
+    pub path: String,
+    /// The stored file size, bytes.
+    pub size: i64,
+    /// The stored mtime, nanoseconds since the epoch.
+    pub mtime_ns: i64,
+    /// The stored blake3 digest of the source.
+    pub blake3: Vec<u8>,
+}
+
 /// Deletes every stored row that belongs to `path`: the file row — with
 /// its symbols and refs by cascade — and every edge whose ref, source, or
 /// target belongs to the file. Nothing outlives the symbol it names.
