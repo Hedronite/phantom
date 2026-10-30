@@ -10,9 +10,9 @@ The crates build on unix only. There is no Windows build.
 
 The `phantom-fractal` package builds two binaries from one `main.rs`: `phantom-fractal` and `fract`. Scripts should call `phantom-fractal`, since another program named `fract` may come first on `PATH`.
 
-They have eleven commands:
+They have twelve commands:
 
-- `index PATH` walks the Rust files under PATH, extracts their items, `use` paths, and calls, and stores them in a SQLite database in the Phantom data directory. It then builds each package's module tree and resolves calls to edges, as [Calls](#calls) describes, adds `import` and `impl` edges, and stores the rank of the graph, as [Rank](#rank) describes. On a git root it also reads the history and stores which files change together, as [Co-change](#co-change) describes. PATH itself is only read. A second run over an unchanged tree and an unmoved HEAD writes nothing.
+- `index PATH` walks the Rust files under PATH, extracts their items, `use` paths, and calls, and stores them in a SQLite database in the Phantom data directory. It then builds each package's module tree and resolves calls to edges, as [Calls](#calls) describes, adds `import` and `impl` edges, and stores the rank of the graph, as [Rank](#rank) describes. On a git root it also reads the history and stores which files change together, as [Co-change](#co-change) describes. PATH itself is only read. It holds the database's writer lock while it runs, as [Freshness](#freshness) describes. A second run over an unchanged tree and an unmoved HEAD writes nothing.
 - `find NAME` returns the indexed symbols named exactly NAME as `hits`, each with its kind, visibility, path, and line, ordered by path and then line. It returns at most 100; `truncated` is true when more matched. A name that was not indexed returns no hits.
 - `callers SYMBOL` returns the resolved calls to SYMBOL.
 - `callees SYMBOL` returns the resolved calls SYMBOL makes, and `unresolved_calls`: how many calls, method calls, and macros inside SYMBOL have no edge.
@@ -21,12 +21,13 @@ They have eleven commands:
 - `rank` lists the best-ranked symbols or files of the index, as [Rank](#rank) describes.
 - `map --budget N` packs a ranked map of the repo into N estimated tokens, as [Map](#map) describes.
 - `cochange FILE` lists the files that tend to change with FILE, from the history `index` read, as [Co-change](#co-change) describes.
+- `status` says whether the index is stale and why, as [Freshness](#freshness) describes.
 - `mcp` serves the same operations to an MCP client over stdin and stdout, for the trees it is started with, as [MCP](#mcp) describes.
 - `version` prints the binary's name, version, and commit, as [Version](#version) describes. It needs no index.
 
-Run `find`, `callers`, `callees`, `impact`, `show`, `rank`, `map`, and `cochange` from the directory you indexed, or pass `--repo PATH`. `find`, `callers`, `callees`, `impact`, `show`, `rank`, and `cochange` also take `--max-tokens N`, which fits the reply into N estimated tokens, as [Budgets](#budgets) describes.
+Run `find`, `callers`, `callees`, `impact`, `show`, `rank`, `map`, `cochange`, and `status` from the directory you indexed, or pass `--repo PATH`. `find`, `callers`, `callees`, `impact`, `show`, `rank`, and `cochange` also take `--max-tokens N`, which fits the reply into N estimated tokens, as [Budgets](#budgets) describes.
 
-Each command but `mcp` prints one JSON envelope: `{"ok": …, "data": …, "error": …, "schema": 1}`. An error exits with its canon code, for example 2 when the tree has no index yet and 3 when PATH does not exist. Every command also accepts `--json`, before or after the command name. It changes nothing, since the output is always the envelope.
+Each command but `mcp` prints one JSON envelope: `{"ok": …, "data": …, "meta": …, "error": …, "schema": 1}`. `meta` is on every success of a command that reads an index, `index` included, and says whether that index is stale, as [Freshness](#freshness) describes; a failure and `version` have none. An error exits with its canon code, for example 2 when the tree has no index yet, 3 when PATH does not exist, and 4 when another writer holds the index. Every command also accepts `--json`, before or after the command name. It changes nothing, since the output is always the envelope.
 
 ```
 fract index .
@@ -39,6 +40,7 @@ fract rank --files --limit 10
 fract map --budget 1500 --focus src/lib.rs
 fract cochange src/lib.rs --limit 5
 fract impact util::helper --max-tokens 800
+fract status
 phantom-fractal version
 ```
 
@@ -397,10 +399,53 @@ Take a package of seven files, `src/a.rs` to `src/g.rs`, with this history:
 The first commit is 60 days before HEAD, and the other 22 follow one a day, the last of them HEAD. After `fract index .`, `fract cochange src/a.rs` prints:
 
 ```
-{"ok":true,"data":{"file":"src/a.rs","scan":{"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","window":{"days":365,"max_commits":5000}},"partners":[{"path":"src/b.rs","together":4.409608831523686,"lift":1.653768852502879,"conf":0.390804271509921,"last_time":1748531200},{"path":"src/c.rs","together":3.6674710638456927,"lift":1.6180491217030488,"conf":0.3250318593213367,"last_time":1748876800},{"path":"src/g.rs","together":2.8463629132931247,"lift":1.5602843906097092,"conf":0.2522606487972789,"last_time":1749136000}],"truncated":false},"error":null,"schema":1}
+{"ok":true,"data":{"file":"src/a.rs","scan":{"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","window":{"days":365,"max_commits":5000}},"partners":[{"path":"src/b.rs","together":4.409608831523686,"lift":1.653768852502879,"conf":0.390804271509921,"last_time":1748531200},{"path":"src/c.rs","together":3.6674710638456927,"lift":1.6180491217030488,"conf":0.3250318593213367,"last_time":1748876800},{"path":"src/g.rs","together":2.8463629132931247,"lift":1.5602843906097092,"conf":0.2522606487972789,"last_time":1749136000}],"truncated":false},"meta":{"stale":false,"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","rank_epoch":1},"error":null,"schema":1}
 ```
 
 `a`'s partners have lifts near 1.6, so they are listed but none reaches the map's threshold of 2. `d` and `e` only ever change with each other, so the map's line for `src/d.rs` ends `  also-changes: e.rs`.
+
+## Freshness
+
+An index describes the tree as it was at the last `index`. Every success envelope from a command that reads an index carries `meta` after `data`, so a reader knows how far to trust the answer:
+
+```
+"meta":{"stale":false,"head":"<40 hex, or null>","index_head":"<40 hex, or null>","rank_epoch":3}
+```
+
+- **`stale`** is true when an `index` pass would change the index: a `.rs` file it would add, rewrite, or remove, a changed workspace manifest or skipped file (the workspace fingerprint), or a HEAD other than the one the last pass stored. The check walks the tree with `index`'s own rules, compares each file's size and mtime with the stored ones, and hashes a file only when either differs, so a file touched with its bytes unchanged is not stale. A file `index` skips is never counted.
+- **`head`** is the tree's git HEAD now, and **`index_head`** the HEAD the last pass stored, each `null` off a git root. A commit that changes no indexed file still makes the index stale, because the co-change history moved.
+- **`rank_epoch`** is the epoch of the stored rank.
+- **Reads never re-index.** A stale index still answers, from what it holds, and nothing is written. Run `index` again to bring it up to date. A tree the check cannot read is reported stale.
+- `meta` holds exactly these four keys. It is part of the line that `--max-tokens` fits, so it counts toward the budget like any other byte.
+
+### The writer lock
+
+`index` and the MCP `index_repo` hold an exclusive lock on `graph.db.lock`, an empty `0600` file beside the database, for the whole pass. A second writer retries for 250 ms, then fails with `lock_held`, exit 4, and writes nothing. Readers never take the lock, so they answer while a pass runs. The operating system frees the lock when its holder exits or is killed.
+
+### `status`
+
+`status [--repo PATH]` says why the index is or is not stale. It reads the index, the tree, and the lock's state, and writes nothing. No index is `no_index`, exit 2. `data` holds these keys, in this order:
+
+- `key`: the index's directory under the data directory's `repos/`, such as `phantom-3f2a9c1d`;
+- `name`: the indexed tree's directory name;
+- `head`, `index_head`, and `stale`, as in `meta`;
+- `changes: {added, modified, removed}`: how many files an `index` pass would add, rewrite, and remove;
+- `fingerprint_changed`: whether the workspace fingerprint changed;
+- `counts: {files, symbols, edges}`: the stored rows, edges of every kind;
+- `versions: {schema, extractor, envelope}`: the stored store schema and extractor versions, and the envelope schema;
+- `epochs: {graph, rank}`;
+- `cochange`: the stored scan as `index` prints it, or `null`;
+- `lock`: `held` while a writer holds the index, else `free`.
+
+`status` prints no path. The MCP `repo_status` tool gives the same envelope.
+
+On the history in [`cochange`](#cochange), after `fract index .` and one line added to `src/b.rs`, `fract status` prints:
+
+```
+{"ok":true,"data":{"key":"repo-a4236502","name":"repo","head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","stale":true,"changes":{"added":0,"modified":1,"removed":0},"fingerprint_changed":false,"counts":{"files":8,"symbols":15,"edges":2},"versions":{"schema":3,"extractor":7,"envelope":1},"epochs":{"graph":1,"rank":1},"cochange":{"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","commits_seen":23,"skipped_bulk":0,"pairs":4,"window":{"days":365,"max_commits":5000}},"lock":"free"},"meta":{"stale":true,"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","rank_epoch":1},"error":null,"schema":1}
+```
+
+The key's hash comes from the tree's canonical path, so it differs on another machine. `fract find fb` still answers from the index, with the same `meta`.
 
 ## MCP
 
@@ -437,6 +482,7 @@ The server is read-only by default. It offers these tools:
 | `top_ranked` | `kind?` (`symbols` or `files`, default `symbols`), `focus?` (an array of at most 100 paths), `limit?` (1 to 100, default 20), `repo?`, `max_tokens?` | `rank` |
 | `repo_map` | `budget` (1 to 100000), `focus?` (an array of at most 100 paths), `detail?` (`files`, `symbols`, or `full`, default `symbols`), `repo?` | `map` |
 | `cochange` | `file`, `min_lift?` (at least 0, default 1.5), `limit?` (1 to 100, default 20), `repo?`, `max_tokens?` | `cochange` |
+| `repo_status` | `repo?` | `status` |
 | `index_repo` | `path`, `cochange_days?` (1 to 3650, default 365), `cochange_commits?` (1 to 50000, default 5000) | `index`, only with `--allow-index` |
 
 - **`index_repo`:** `phantom-fractal mcp --allow-index` adds it, and only then is it listed or callable. It indexes only a root (see [Roots](#roots)), and writes the database in the data directory, as `index` does, and nothing else.
@@ -444,11 +490,11 @@ The server is read-only by default. It offers these tools:
 - **Input schemas:** each tool's `inputSchema` sets `additionalProperties: false` and the ranges above. `max_tokens` is an integer from 1 to 100000, and `focus` declares `maxItems: 100`; 101 or more is a `usage` result.
 - **`repo`:** see [Roots](#roots).
 - **Results:** a `tools/call` result has three parts:
-  - `structuredContent` is the exact envelope the command line prints for the same operation and arguments on the same index;
+  - `structuredContent` is the exact envelope the command line prints for the same operation and arguments on the same index, `meta` included;
   - `content` holds one `text` item with that envelope as one line of JSON;
   - `isError` is true exactly when the envelope's `ok` is false.
 
-  `show_symbol` returns source text only when `source` is true. `top_ranked` and `repo_map` never write, as `rank` and `map` never do. No output holds an absolute path. The server opens no network connection and starts no process.
+  `show_symbol` returns source text only when `source` is true. `top_ranked`, `repo_map`, and `repo_status` never write, as `rank`, `map`, and `status` never do. `index_repo` fails `lock_held` while another writer holds the index. No output holds an absolute path. The server opens no network connection and starts no process.
 
 ### Budgets
 
@@ -462,7 +508,7 @@ The server is read-only by default. It offers these tools:
   - `show`: `source` as a whole, then the `cochange` partners, the callees' hits, the callers' hits, and the members' hits, each from the end.
 
   The target symbol, the counts, `risk`, `exact`, `reasons`, the groups themselves, and every `truncated` flag stay. `truncated` still says only whether the command's own cap cut the list.
-- **`data.tokens`:** with a budget, `data` ends with `tokens: {max, used, omitted}`. `max` is the budget, `used` is the estimate of the printed line, `tokens` included, and `omitted` counts the entries dropped. Without a budget there is no `tokens` key, and the output is byte for byte what it was.
+- **`data.tokens`:** with a budget, `data` ends with `tokens: {max, used, omitted}`. `max` is the budget, `used` is the estimate of the printed line, `tokens` and `meta` included, and `omitted` counts the entries dropped. Without a budget there is no `tokens` key, and `data` is byte for byte what it was.
 - **Too small:** when the reply does not fit even with every list empty, the result is `usage`, exit 1, with a message that starts `budget_too_small:`.
 - An error envelope, such as `not_found` or `ambiguous`, is never cut and carries no `tokens`.
 
@@ -541,6 +587,7 @@ This repository may have a Phantom index. Phantom answers questions about Rust c
 - What matters most here: `top_ranked`, by symbols or by files, with `focus` for the files you are working in.
 - An overview that fits your context: `repo_map` with a `budget` in tokens. The budget is an estimate, so leave room.
 - What else usually changes with a file: `cochange`, on a git root that was indexed. It is history, not a dependency.
+- Is the index current: every result's `meta.stale`. When it is true, the answer is from the last index; `repo_status` says what changed since. Ask the user to run `phantom-fractal index .` when it matters.
 - On `ambiguous`, pick a candidate and call `show_symbol` with its `stable_key` as `id`.
 - On `no_index`, the repo is not an indexed root of this server: ask the user to run `phantom-fractal index .`, or to start the server with `--root` for that tree.
 - Pass `max_tokens` to cap a long answer; `data.tokens.omitted` says how many entries were dropped to fit.
@@ -573,13 +620,13 @@ The answers are heuristic. Only resolved calls, trait impls, and imports are edg
 
 `version` never opens a store, reads the data directory, walks a tree, or reads `--repo`. It works in any directory, with no index and with `HOME` unset. An extra argument is usage and exits 1.
 
-The envelope keys come in the order `ok`, `data`, `error`, `schema`. `schema` is the version of the envelope itself, 1 today, the same number every command prints. A consumer reads that integer and refuses a value it does not know. More fields may be added to `data` later, and a consumer ignores keys it does not know.
+The envelope keys come in the order `ok`, `data`, `error`, `schema`. `version` reads no index, so it has no `meta`. `schema` is the version of the envelope itself, 1 today, the same number every command prints. A consumer reads that integer and refuses a value it does not know. More fields may be added to `data` later, and a consumer ignores keys it does not know.
 
 `--version` and `-V` still print the plain line `phantom-fractal 0.0.0`.
 
 ## Other
 
-`--version` prints `phantom-fractal 0.0.0`. `--help` lists the eleven commands with a usage line, and so does a run with no command. `find` matches names only. There is no other command.
+`--version` prints `phantom-fractal 0.0.0`. `--help` lists the twelve commands with a usage line, and so does a run with no command. `find` matches names only. There is no other command.
 
 ## Licence
 
