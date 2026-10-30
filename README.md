@@ -10,7 +10,7 @@ The crates build on unix only. There is no Windows build.
 
 The `phantom-fractal` package builds two binaries from one `main.rs`: `phantom-fractal` and `fract`. Scripts should call `phantom-fractal`, since another program named `fract` may come first on `PATH`.
 
-They have twelve commands:
+They have thirteen commands:
 
 - `index PATH` walks the Rust files under PATH, extracts their items, `use` paths, and calls, and stores them in a SQLite database in the Phantom data directory. It then builds each package's module tree and resolves calls to edges, as [Calls](#calls) describes, adds `import` and `impl` edges, and stores the rank of the graph, as [Rank](#rank) describes. On a git root it also reads the history and stores which files change together, as [Co-change](#co-change) describes. PATH itself is only read. It holds the database's writer lock while it runs, as [Freshness](#freshness) describes. A second run over an unchanged tree and an unmoved HEAD writes nothing.
 - `find NAME` returns the indexed symbols named exactly NAME as `hits`, each with its kind, visibility, path, and line, ordered by path and then line. It returns at most 100; `truncated` is true when more matched. A name that was not indexed returns no hits.
@@ -22,6 +22,7 @@ They have twelve commands:
 - `map --budget N` packs a ranked map of the repo into N estimated tokens, as [Map](#map) describes.
 - `cochange FILE` lists the files that tend to change with FILE, from the history `index` read, as [Co-change](#co-change) describes.
 - `status` says whether the index is stale and why, as [Freshness](#freshness) describes.
+- `watch` keeps the index fresh while you edit: it polls the tree, and after each change settles it runs the same pass `index` runs, holding the writer lock for its whole life, as [Watch](#watch) describes.
 - `mcp` serves the same operations to an MCP client over stdin and stdout, for the trees it is started with, as [MCP](#mcp) describes.
 - `version` prints the binary's name, version, and commit, as [Version](#version) describes. It needs no index.
 
@@ -626,7 +627,7 @@ The envelope keys come in the order `ok`, `data`, `error`, `schema`. `version` r
 
 ## Other
 
-`--version` prints `phantom-fractal 0.0.0`. `--help` lists the twelve commands with a usage line, and so does a run with no command. `find` matches names only. There is no other command.
+`--version` prints `phantom-fractal 0.0.0`. `--help` lists the thirteen commands with a usage line, and so does a run with no command. `find` matches names only. There is no other command.
 
 ## Licence
 

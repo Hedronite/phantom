@@ -63,7 +63,7 @@ fn other_commands_and_unknown_flags_exit_one() {
     let cases: [&[&str]; 11] = [
         &["serve"],
         &["impact"],
-        &["watch"],
+        &["watch", "--interval-ms", "1"],
         &["help"],
         &["--json"],
         &["rank", "open_ledger"],
