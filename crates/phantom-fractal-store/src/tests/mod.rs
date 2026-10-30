@@ -18,6 +18,7 @@ mod legacy;
 mod lock;
 mod meta;
 mod rank;
+mod readonly;
 mod writes;
 
 struct TempDb {
@@ -76,6 +77,11 @@ impl TempData {
 
     fn db(&self) -> PathBuf {
         self.repo_dir().join("graph.db")
+    }
+
+    /// The whole data root, as the read-only tests snapshot it.
+    fn data(&self) -> &Path {
+        &self.root
     }
 }
 
