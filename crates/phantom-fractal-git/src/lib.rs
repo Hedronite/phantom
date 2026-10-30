@@ -18,6 +18,7 @@
 //! needs features the D2 amendment bans.
 #![forbid(unsafe_code)]
 
+mod changes;
 mod history;
 mod rename;
 mod score;
@@ -27,6 +28,7 @@ use std::error::Error;
 use std::fmt;
 use std::path::Path;
 
+pub use changes::{Base, Changed, Changes, ChangesError, FileChange, MIN_OID_HEX, changes};
 pub use phantom_fractal_store::CochangeScan as Scan;
 pub use rename::{MIN_SIMILARITY_PERCENT, similarity};
 pub use score::{BULK_FILES, HALF_LIFE_DAYS, MIN_TOGETHER, TOP_PARTNERS, decay};
