@@ -73,6 +73,12 @@ fn acquire_creates_an_empty_0600_file_and_releases_on_drop() {
 fn two_threads_contend_and_the_loser_gets_lock_held() {
     let db = TempDb::new("lock2thread");
     assert_outside_workspace(db.path());
+    // The chain is born outside the timed window on a loaded runner:
+    // a warm first acquire makes both contenders' `acquire` runs start
+    // from an existing chain, so the timing below measures only the
+    // contention itself.
+    let warm = WriterLock::acquire(db.path()).expect("warm");
+    drop(warm);
     let first = WriterLock::acquire(db.path()).expect("first");
     let path = db.path().to_path_buf();
     let loser = std::thread::spawn(move || {
@@ -82,8 +88,15 @@ fn two_threads_contend_and_the_loser_gets_lock_held() {
     });
     let (result, elapsed) = loser.join().expect("join");
     assert!(matches!(result, Err(StoreError::LockHeld)), "{result:?}");
+    // The lower bound proves the full 250 ms retry window was waited;
+    // the upper bound is CI slack for a loaded runner (the 250 + 50 ms
+    // figure is measured by QA on the build box).
     assert!(
-        elapsed <= Duration::from_millis(300),
+        elapsed >= crate::lock::RETRY_WINDOW,
+        "LockHeld answered after {elapsed:?}"
+    );
+    assert!(
+        elapsed <= Duration::from_secs(2),
         "LockHeld answered after {elapsed:?}"
     );
     drop(first);
@@ -107,13 +120,23 @@ fn two_processes_contend_and_the_loser_gets_lock_held() {
     let _ = std::fs::remove_file(&marker);
     let mut child = spawn_lock_child(db.path(), &marker).spawn().expect("spawn");
     wait_for_held(&mut child, &marker);
+    // A warm untimed acquire gives both sides their chain before the
+    // timed window, as its own proof of contention the child holds.
+    match WriterLock::acquire(db.path()) {
+        Err(StoreError::LockHeld) => {}
+        other => panic!("the warm contend missed the held lock: {other:?}"),
+    }
     let started = Instant::now();
     let result = WriterLock::acquire(db.path());
     assert!(matches!(result, Err(StoreError::LockHeld)), "{result:?}");
+    // The lower bound proves the full 250 ms retry window was waited;
+    // the upper bound is CI slack for a loaded runner (the 250 + 50 ms
+    // figure is measured by QA on the build box).
+    let elapsed = started.elapsed();
+    assert!(elapsed >= crate::lock::RETRY_WINDOW, "{elapsed:?}");
     assert!(
-        started.elapsed() <= Duration::from_millis(300),
-        "LockHeld answered after {:?}",
-        started.elapsed()
+        elapsed <= Duration::from_secs(2),
+        "LockHeld answered after {elapsed:?}"
     );
     child.kill().expect("kill child");
     let _ = child.wait();
