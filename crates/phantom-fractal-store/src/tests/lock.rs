@@ -1,0 +1,264 @@
+//! The writer lock and its state probe (W9 D2): the file the acquire
+//! creates, the two contention cases, a killed holder, and a probe
+//! that never creates the file.
+//!
+//! The two-process spawn re-runs this test binary with a single gated
+//! child test and a lock path in the environment; the child holds the
+//! lock until the parent kills it. Only tests spawn processes here.
+
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+use super::{TempData, TempDb, assert_outside_workspace, file_mode};
+use crate::{LockState, Store, StoreError, WriterLock, lock_state};
+
+/// The test's own process runs the child.
+fn spawn_lock_child(db: &std::path::Path, marker: &std::path::Path) -> Command {
+    let mut command = Command::new(std::env::current_exe().expect("test binary"));
+    command
+        .args([
+            "tests::lock::spawned_child_holds_the_lock",
+            "--exact",
+            "--nocapture",
+        ])
+        .env("PHA_STORE_TEST_LOCK_DB", db)
+        .env("PHA_STORE_TEST_LOCK_MARKER", marker)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+/// Starts the child and answers once its marker shows the lock held.
+fn wait_for_held(child: &mut std::process::Child, marker: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if child.try_wait().expect("child status").is_some() {
+            panic!("child exited before the marker showed");
+        }
+        if std::fs::metadata(marker).is_ok() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("child never reported the lock");
+}
+
+#[test]
+fn acquire_creates_an_empty_0600_file_and_releases_on_drop() {
+    let db = TempDb::new("lockfile");
+    assert_outside_workspace(db.path());
+    let lock_path = crate::lock::lock_path(db.path());
+    assert!(matches!(lock_state(db.path()), Ok(LockState::Absent)));
+    assert!(!lock_path.exists(), "the probe created no lock file");
+
+    let guard = WriterLock::acquire(db.path()).expect("acquire");
+    let mut text = String::new();
+    std::fs::OpenOptions::new()
+        .read(true)
+        .open(&lock_path)
+        .map(|mut file| file.read_to_string(&mut text).expect("lock read"))
+        .expect("lock open");
+    assert_eq!(text, String::new(), "the lock file holds content");
+    assert_eq!(file_mode(&lock_path), 0o600);
+    // A probe from a second handle answers `Held` while the writer
+    // holds, and `Free` again once the guard drops.
+    assert!(matches!(lock_state(db.path()), Ok(LockState::Held)));
+    drop(guard);
+    assert!(matches!(lock_state(db.path()), Ok(LockState::Free)));
+    let _ = std::fs::remove_file(&lock_path);
+}
+
+#[test]
+fn two_threads_contend_and_the_loser_gets_lock_held() {
+    let db = TempDb::new("lock2thread");
+    assert_outside_workspace(db.path());
+    // The chain is born outside the timed window on a loaded runner:
+    // a warm first acquire makes both contenders' `acquire` runs start
+    // from an existing chain, so the timing below measures only the
+    // contention itself.
+    let warm = WriterLock::acquire(db.path()).expect("warm");
+    drop(warm);
+    let first = WriterLock::acquire(db.path()).expect("first");
+    let path = db.path().to_path_buf();
+    let loser = std::thread::spawn(move || {
+        let started = Instant::now();
+        let result = WriterLock::acquire(&path);
+        (result, started.elapsed())
+    });
+    let (result, elapsed) = loser.join().expect("join");
+    assert!(matches!(result, Err(StoreError::LockHeld)), "{result:?}");
+    // The lower bound proves the full 250 ms retry window was waited;
+    // the upper bound is CI slack for a loaded runner (the 250 + 50 ms
+    // figure is measured by QA on the build box).
+    assert!(
+        elapsed >= crate::lock::RETRY_WINDOW,
+        "LockHeld answered after {elapsed:?}"
+    );
+    assert!(
+        elapsed <= Duration::from_secs(2),
+        "LockHeld answered after {elapsed:?}"
+    );
+    drop(first);
+    let again = WriterLock::acquire(db.path()).expect("free after the holder drops");
+    drop(again);
+    let _ = std::fs::remove_file(crate::lock::lock_path(db.path()));
+}
+
+#[test]
+fn two_processes_contend_and_the_loser_gets_lock_held() {
+    let db = TempDb::new("lock2proc");
+    assert_outside_workspace(db.path());
+    let marker = std::env::temp_dir().join(format!(
+        "phantom-fractal-store-marker-{}-{}",
+        std::process::id(),
+        db.path()
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    let _ = std::fs::remove_file(&marker);
+    let mut child = spawn_lock_child(db.path(), &marker).spawn().expect("spawn");
+    wait_for_held(&mut child, &marker);
+    // A warm untimed acquire gives both sides their chain before the
+    // timed window, as its own proof of contention the child holds.
+    match WriterLock::acquire(db.path()) {
+        Err(StoreError::LockHeld) => {}
+        other => panic!("the warm contend missed the held lock: {other:?}"),
+    }
+    let started = Instant::now();
+    let result = WriterLock::acquire(db.path());
+    assert!(matches!(result, Err(StoreError::LockHeld)), "{result:?}");
+    // The lower bound proves the full 250 ms retry window was waited;
+    // the upper bound is CI slack for a loaded runner (the 250 + 50 ms
+    // figure is measured by QA on the build box).
+    let elapsed = started.elapsed();
+    assert!(elapsed >= crate::lock::RETRY_WINDOW, "{elapsed:?}");
+    assert!(
+        elapsed <= Duration::from_secs(2),
+        "LockHeld answered after {elapsed:?}"
+    );
+    child.kill().expect("kill child");
+    let _ = child.wait();
+    let _ = std::fs::remove_file(&marker);
+    let _ = std::fs::remove_file(crate::lock::lock_path(db.path()));
+}
+
+#[test]
+fn killed_holder_frees_the_lock() {
+    let db = TempDb::new("lockkill");
+    assert_outside_workspace(db.path());
+    let marker = std::env::temp_dir().join(format!(
+        "phantom-fractal-store-marker-{}-{}",
+        std::process::id(),
+        db.path()
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    ));
+    let _ = std::fs::remove_file(&marker);
+    let mut child = spawn_lock_child(db.path(), &marker).spawn().expect("spawn");
+    wait_for_held(&mut child, &marker);
+    assert!(matches!(lock_state(db.path()), Ok(LockState::Held)));
+    child.kill().expect("kill child");
+    let _ = child.wait();
+    // The OS freed the lock on the kill: a new writer takes it at once.
+    assert!(matches!(lock_state(db.path()), Ok(LockState::Free)));
+    let again = WriterLock::acquire(db.path()).expect("free after kill");
+    drop(again);
+    let _ = std::fs::remove_file(&marker);
+    let _ = std::fs::remove_file(crate::lock::lock_path(db.path()));
+}
+
+#[test]
+fn lock_state_never_creates_the_file() {
+    let db = TempDb::new("lockstate");
+    assert_outside_workspace(db.path());
+    let lock_path = crate::lock::lock_path(db.path());
+    assert!(matches!(lock_state(db.path()), Ok(LockState::Absent)));
+    assert!(!lock_path.exists(), "a probe created the lock file");
+    assert!(matches!(lock_state(db.path()), Ok(LockState::Absent)));
+    assert!(!lock_path.exists(), "a probe created the lock file");
+}
+
+/// The gated child the two-process tests spawn: holds the lock at the
+/// path the environment names, reports via the marker file, and stays
+/// held until the parent kills this whole process. A bare run without
+/// the environment answers at once.
+#[test]
+fn spawned_child_holds_the_lock() {
+    let Ok(db) = std::env::var("PHA_STORE_TEST_LOCK_DB") else {
+        return;
+    };
+    let Ok(marker) = std::env::var("PHA_STORE_TEST_LOCK_MARKER") else {
+        return;
+    };
+    let _guard = WriterLock::acquire(std::path::Path::new(&db)).expect("child acquire");
+    std::fs::write(&marker, "held").expect("marker");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn acquire_creates_the_0700_chain_and_holds() {
+    let data = TempData::new("lockchain");
+    // No chain exists yet: only the lock file is here, and the chain
+    // Store::open would have created is born around it — at `0700`,
+    // before any database file exists at all.
+    let guard = WriterLock::acquire(&data.db()).expect("acquire");
+    assert_outside_workspace(&data.db());
+    assert_eq!(file_mode(&data.root.join("repos")), 0o700);
+    assert_eq!(file_mode(&data.repo_dir()), 0o700);
+    let lock = crate::lock::lock_path(&data.db());
+    assert_eq!(file_mode(&lock), 0o600);
+    let mut text = String::new();
+    std::fs::OpenOptions::new()
+        .read(true)
+        .open(&lock)
+        .map(|mut file| file.read_to_string(&mut text).expect("lock read"))
+        .expect("lock open");
+    assert_eq!(text, String::new(), "the lock file holds content");
+    assert!(matches!(lock_state(&data.db()), Ok(LockState::Held)));
+    drop(guard);
+    // The chain the acquire made is the chain the store opens.
+    let store = Store::open(&data.db()).expect("store on the born chain");
+    assert_eq!(store.row_count("meta").expect("rows"), 2);
+    drop(store);
+    let _ = std::fs::remove_file(&lock);
+}
+
+#[test]
+fn acquire_refuses_a_broken_chain_like_the_store() {
+    use std::fs;
+    let data = TempData::new("lockshape");
+    fs::create_dir_all(data.root.join("repos")).expect("repos");
+    // The index dir is a file: the shape refusal, no chmod anywhere.
+    fs::File::create(data.repo_dir()).expect("file the repo spot");
+    let name_err = |err: StoreError| format!("{err:?}");
+    let acquired = WriterLock::acquire(&data.db())
+        .map(|_| ())
+        .map_err(name_err);
+    let opened = Store::open(&data.db()).map(|_| ()).map_err(name_err);
+    // The same refusal, from the same checks.
+    assert_eq!(acquired, opened, "{acquired:?}");
+    let refused = acquired.as_ref().expect_err("the file-refused dir");
+    assert!(refused.contains("DataDirectory"), "{refused}");
+    // and neither left a database, nor content: the refusal lands
+    // before any lock file is opened.
+    assert!(!crate::lock::lock_path(&data.db()).exists());
+    // A symlinked repos/ refrains the same way.
+    let data = TempData::new("locklink");
+    fs::create_dir_all(&data.root).expect("data root");
+    let elsewhere = TempData::new("locklink-target");
+    fs::create_dir_all(elsewhere.repo_dir()).expect("target repo");
+    std::os::unix::fs::symlink(elsewhere.repo_dir(), data.root.join("repos")).expect("symlink");
+    let acquired = WriterLock::acquire(&data.db())
+        .map(|_| ())
+        .map_err(name_err);
+    let opened = Store::open(&data.db()).map(|_| ()).map_err(name_err);
+    assert_eq!(acquired, opened, "{acquired:?}");
+    let refused = acquired.as_ref().expect_err("the symlinked dir");
+    assert!(refused.contains("DataDirectory"), "{refused}");
+}

@@ -5,9 +5,9 @@ use std::path::PathBuf;
 use phantom_fractal_store::{CallHit, Store};
 use serde::Serialize;
 
-use super::Failure;
 use super::budget::{self, Shed, Tokens, drop_last};
 use super::lookup::{Names, SymbolOut, current_index, kind_text, lookup, symbol_out};
+use super::{Failure, Reply, answer};
 
 /// Most hits one `callers` or `callees` returns.
 const CALL_CAP: usize = 100;
@@ -77,18 +77,18 @@ pub(crate) struct CallOut {
 /// The symbols whose calls resolve to the one `request.symbol` names,
 /// sorted by path and then line, at most [`CALL_CAP`] of them, fitted to
 /// `request.max_tokens`.
-pub(crate) fn callers(request: &CallsRequest) -> Result<CallResult, Failure> {
+pub(crate) fn callers(request: &CallsRequest) -> Result<Reply<CallResult>, Failure> {
     calls(Direction::Callers, request)
 }
 
 /// The symbols the calls of the one `request.symbol` names resolve to,
 /// sorted by path and then line, at most [`CALL_CAP`] of them, fitted to
 /// `request.max_tokens`.
-pub(crate) fn callees(request: &CallsRequest) -> Result<CallResult, Failure> {
+pub(crate) fn callees(request: &CallsRequest) -> Result<Reply<CallResult>, Failure> {
     calls(Direction::Callees, request)
 }
 
-fn calls(direction: Direction, request: &CallsRequest) -> Result<CallResult, Failure> {
+fn calls(direction: Direction, request: &CallsRequest) -> Result<Reply<CallResult>, Failure> {
     budget::check(request.max_tokens)?;
     let (store, names) = current_index(&request.repo)?;
     let symbol = lookup(&store, &names, &request.symbol)?;
@@ -106,7 +106,7 @@ fn calls(direction: Direction, request: &CallsRequest) -> Result<CallResult, Fai
         unresolved_calls,
         tokens: None,
     };
-    budget::fit(result, request.max_tokens)
+    answer(result, &store, &request.repo, request.max_tokens)
 }
 
 /// Every stored edge on one side of symbol `id`, declared in `file`, with

@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use phantom_fractal_lang::{Id, Language, Link, ResolveInput};
+use phantom_fractal_lang::{Extract, Id, Language, Link, ResolveInput};
 use phantom_fractal_lang_rust::{RustLanguage, links, method_owners, resolve, resolve_graph};
 use phantom_fractal_store::{Store, StoreError};
 
@@ -22,7 +22,10 @@ use crate::{EXTRACTOR_VERSION, GraphReport, IndexError, ReasonCounts};
 ///
 /// Module declarations are not stored, so each kept `.rs` file is read and
 /// extracted again here. A file that no longer reads as UTF-8 source
-/// counts as having no declarations.
+/// counts as having no declarations. The same extract gives each file's
+/// own test flags, which the store restores before it marks the symbols
+/// of test modules, so a module that stops being a test module leaves no
+/// mark behind.
 pub(crate) fn rebuild(
     manifests: &[ManifestRead],
     stamp: &Stamp,
@@ -32,13 +35,17 @@ pub(crate) fn rebuild(
 ) -> Result<GraphReport, IndexError> {
     let manifests = kept_manifests(manifests);
     let mut files = Vec::with_capacity(kept.len());
+    let mut own_tests = Vec::with_capacity(kept.len());
     for file in kept {
         let mod_decls = match Contents::read(file)? {
             Contents::Text(text) => {
-                language
-                    .extract(&text)
-                    .map_err(StoreError::Extract)?
-                    .mod_decls
+                let extract = language.extract(&text).map_err(StoreError::Extract)?;
+                // A file that changed since this pass stored it keeps its
+                // rows' flags; the next pass re-stores it.
+                if is_stored_text(store, &file.path, &text)? {
+                    own_tests.push((file.path.clone(), own_test_flags(&extract)));
+                }
+                extract.mod_decls
             }
             Contents::Unread(_) => Vec::new(),
         };
@@ -48,6 +55,9 @@ pub(crate) fn rebuild(
         });
     }
     let graph = graph::build(&manifests, &files);
+    for (path, flags) in &own_tests {
+        store.reset_symbol_test_flags(path, flags)?;
+    }
     store.write_crate_graph(
         &graph.packages,
         &graph.targets,
@@ -110,6 +120,25 @@ pub fn stored_method_owners(store: &Store, root: &Path) -> Result<Vec<(Id, Id)>,
 pub fn stored_links(store: &Store, root: &Path) -> Result<Vec<Link>, IndexError> {
     let manifests = kept_manifests(&read_manifests(&walk(root)?)?);
     Ok(links(&resolve_input(store, &manifests)?))
+}
+
+/// A file's own test flags, one per symbol in the order the store
+/// inserts them: items, then methods.
+fn own_test_flags(extract: &Extract) -> Vec<bool> {
+    extract
+        .items
+        .iter()
+        .map(|item| item.is_test)
+        .chain(extract.methods.iter().map(|method| method.is_test))
+        .collect()
+}
+
+/// True when the store holds `path` with the blake3 of `text`.
+fn is_stored_text(store: &Store, path: &str, text: &str) -> Result<bool, IndexError> {
+    let hash = blake3::hash(text.as_bytes());
+    Ok(store
+        .stored_blake3(path)?
+        .is_some_and(|stored| stored.as_slice() == hash.as_bytes()))
 }
 
 /// What the resolver reads: the store's rows, and the `deps` the walked

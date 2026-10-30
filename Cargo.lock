@@ -1353,6 +1353,7 @@ dependencies = [
  "blake3",
  "ignore",
  "libc",
+ "phantom-fractal-git",
  "phantom-fractal-lang",
  "phantom-fractal-lang-rust",
  "phantom-fractal-store",

@@ -310,3 +310,50 @@ fn cochange_partners_order_lift_then_together_then_path() {
     drop(store);
     drop(language);
 }
+
+#[test]
+fn write_cochange_without_last_oid_clears_cochange_head() {
+    let db = TempDb::new("cochangenit");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = language();
+    store
+        .put_source("src/one.rs", "pub struct One;\n", 0, &language)
+        .expect("put");
+    // A git scan stamps `meta cochange_head` with its HEAD.
+    store
+        .write_cochange(&CochangeScan {
+            last_oid: Some("aaaa1111".to_owned()),
+            oldest_oid: Some("aaaa1111".to_owned()),
+            commits_seen: 1,
+            skipped_bulk: 0,
+            window_json: "{}".to_owned(),
+            files: vec![FileRow {
+                path: "src/one.rs".to_owned(),
+                commits: 1.0,
+                last_time: 10,
+                renamed_from: None,
+            }],
+            pairs: Vec::new(),
+        })
+        .expect("git scan");
+    assert_eq!(
+        store.cochange_head().expect("head").as_deref(),
+        Some("aaaa1111")
+    );
+    // A non-git scan carries no head, so the stored key clears instead
+    // of pointing at a scan this root no longer names (the W8 Later
+    // nit).
+    store
+        .write_cochange(&CochangeScan::default())
+        .expect("non-git scan");
+    assert_eq!(store.cochange_head().expect("cleared"), None);
+    // And the clear holds over a rewrite: writing the same headless
+    // scan again leaves nothing behind.
+    store
+        .write_cochange(&CochangeScan::default())
+        .expect("rewrite");
+    assert_eq!(store.cochange_head().expect("still cleared"), None);
+    drop(store);
+    drop(language);
+}

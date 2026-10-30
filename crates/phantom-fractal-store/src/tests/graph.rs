@@ -776,3 +776,84 @@ fn write_links_second_passes_clean_individual_rounds() {
     assert!(store.edges_of_kind("impl").expect("impl").is_empty());
     drop(store);
 }
+
+#[test]
+fn reset_symbol_test_flags_restores_own_flags() {
+    use phantom_fractal_lang::Language;
+
+    let db = TempDb::new("ownflags");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = language();
+    let source = "#[test]\npub fn unit() {}\npub fn plain() {}\nimpl Holder {\n    pub fn mejr() {\n    }\n}\n";
+    store
+        .put_source("src/guard.rs", source, 0, &language)
+        .expect("put");
+    // The own flags a fresh extract carries: items first, then
+    // methods, the insert order.
+    let fresh = language.extract(source).expect("fresh extract");
+    let own = fresh
+        .items
+        .iter()
+        .map(|item| item.is_test)
+        .chain(fresh.methods.iter().map(|method| method.is_test))
+        .collect::<Vec<_>>();
+    assert_eq!(own, vec![true, false, false]);
+    let graph = store.write_crate_graph(
+        &[crate::Package {
+            name: "sample".to_owned(),
+            version: None,
+            manifest_path: "Cargo.toml".to_owned(),
+        }],
+        &[phantom_fractal_lang::Target {
+            id: 1,
+            package: "sample".to_owned(),
+            name: "sample".to_owned(),
+            kind: phantom_fractal_lang::TargetKind::Lib,
+            root: "src/guard.rs".to_owned(),
+        }],
+        &[phantom_fractal_lang::Module {
+            id: 1,
+            target: 1,
+            parent: None,
+            path: "crate".to_owned(),
+            file: "src/guard.rs".to_owned(),
+            scope: String::new(),
+        }],
+        &[1],
+    );
+    graph.expect("graph");
+    // The test-module mark lands on every symbol of the module.
+    let marked = store.read_items("src/guard.rs").expect("marked items");
+    assert!(marked.iter().all(|item| item.is_test), "{marked:?}");
+    // The reset restores each symbol to its own flag.
+    store
+        .reset_symbol_test_flags("src/guard.rs", &own)
+        .expect("reset");
+    let restored = store.read_items("src/guard.rs").expect("restored items");
+    assert_eq!(
+        restored.iter().map(|item| item.is_test).collect::<Vec<_>>(),
+        vec![true, false]
+    );
+    // A list that does not match the file's stored symbols fails
+    // before anything is written.
+    match store.reset_symbol_test_flags("src/guard.rs", &[true, false]) {
+        Err(crate::StoreError::OwnFlagCount { stored, flags }) => {
+            assert_eq!((stored, flags), (3, 2));
+        }
+        other => panic!("{other:?}"),
+    }
+    // A path with no file row stores no symbols: an empty list is a
+    // no-op, a non-empty one fails.
+    store
+        .reset_symbol_test_flags("src/ghost.rs", &[])
+        .expect("no-op for an unindexed path");
+    match store.reset_symbol_test_flags("src/ghost.rs", &[true]) {
+        Err(crate::StoreError::OwnFlagCount { stored, flags }) => {
+            assert_eq!((stored, flags), (0, 1));
+        }
+        other => panic!("{other:?}"),
+    }
+    drop(store);
+    drop(language);
+}

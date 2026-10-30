@@ -1,6 +1,8 @@
 //! `index`: store the Rust files under a tree, resolve their calls,
 //! store the rank of the graph they make, and, on a git root, store the
-//! co-change of its history (SPEC-w8 G3a).
+//! co-change of its history (SPEC-w8 G3a). The whole pass holds the
+//! database's writer lock, and it ends by storing the canonical root and
+//! HEAD (SPEC-w9 G0c).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -9,10 +11,11 @@ use phantom_fractal_extract::{GraphReport, IndexReport, ReasonCounts};
 use phantom_fractal_git::Window;
 use phantom_fractal_lang_rust::RustLanguage;
 use phantom_fractal_proto::ErrorKind;
-use phantom_fractal_store::{CochangeScan, Store, index_database_path};
+use phantom_fractal_store::{CochangeScan, Store, WriterLock, index_database_path};
 use serde::Serialize;
 
-use super::Failure;
+use super::cochange::stored_window;
+use super::{Failure, Reply, fresh};
 
 /// What `index` is asked for.
 pub(crate) struct IndexRequest {
@@ -46,10 +49,10 @@ pub(crate) struct IndexSummary {
     cochange: Option<CochangeSummary>,
 }
 
-/// `data.cochange` of `index`: the scan's HEAD, what its window walked,
-/// and how many pairs it stored.
+/// `data.cochange` of `index` and `status`: the scan's HEAD, what its
+/// window walked, and how many pairs it stored.
 #[derive(Serialize)]
-struct CochangeSummary {
+pub(crate) struct CochangeSummary {
     head: String,
     commits_seen: u64,
     skipped_bulk: u64,
@@ -128,8 +131,9 @@ impl IndexSummary {
 }
 
 /// Indexes the Rust files under `request.path` into its database in the
-/// data directory.
-pub(crate) fn index(request: &IndexRequest) -> Result<IndexSummary, Failure> {
+/// data directory, holding the database's writer lock throughout. Another
+/// writer holding it is `LockHeld`.
+pub(crate) fn index(request: &IndexRequest) -> Result<Reply<IndexSummary>, Failure> {
     if !request.window.in_range() {
         return Err(Failure::new(
             ErrorKind::Usage,
@@ -159,6 +163,11 @@ pub(crate) fn index(request: &IndexRequest) -> Result<IndexSummary, Failure> {
     }
     let language = RustLanguage::new()
         .map_err(|err| Failure::new(ErrorKind::Usage, format!("extract: {err}")))?;
+    // The lock comes first: it makes and checks the directory chain, so
+    // even a first index creates its database under the lock, and a
+    // second writer waits for it. The store is declared after the lock,
+    // so it is closed before the lock is released.
+    let _lock = WriterLock::acquire(&database)?;
     let mut store = Store::open(&database)?;
     let report = phantom_fractal_extract::index(&root, &mut store, &language)?;
     let graph = match report.graph {
@@ -166,16 +175,23 @@ pub(crate) fn index(request: &IndexRequest) -> Result<IndexSummary, Failure> {
         None => stored_graph(&store, &root)?,
     };
     store_rank(&mut store)?;
-    let cochange = store_cochange(&mut store, &root, request.window)?;
-    Ok(IndexSummary {
+    let head = phantom_fractal_git::head(&root).map_err(history_failure)?;
+    let cochange = store_cochange(&mut store, &root, head.as_deref(), request.window)?;
+    // Each writes only when its value changed.
+    store.set_root(&root.to_string_lossy())?;
+    store.set_index_head(head.as_deref())?;
+    let meta = fresh::meta(&root, &store)?;
+    let summary = IndexSummary {
         cochange,
         ..IndexSummary::new(&report, &graph)
-    })
+    };
+    Ok(Reply::with_meta(summary, meta))
 }
 
-/// Mines the co-change of the git root `root` and stores it, only when no
-/// scan is stored or the stored one has another HEAD or window. A root
-/// that is not the top of a git work tree is not mined, and gives none; a
+/// Mines the co-change of the git root `root`, whose HEAD is `head`, and
+/// stores it, only when no scan is stored or the stored one has another
+/// HEAD or window. A root that is not the top of a git work tree has no
+/// HEAD, is not mined, and gives none; a
 /// scan stored while it was one is replaced, once, by an empty scan whose
 /// HEAD is empty, so no read reports history the root no longer has. The
 /// store keeps `meta cochange_head` as it was for a scan with no HEAD at
@@ -183,9 +199,10 @@ pub(crate) fn index(request: &IndexRequest) -> Result<IndexSummary, Failure> {
 fn store_cochange(
     store: &mut Store,
     root: &Path,
+    head: Option<&str>,
     window: Window,
 ) -> Result<Option<CochangeSummary>, Failure> {
-    let Some(head) = phantom_fractal_git::head(root).map_err(history_failure)? else {
+    let Some(head) = head else {
         if store.cochange_head()?.is_some() {
             store.write_cochange(&CochangeScan {
                 last_oid: Some(String::new()),
@@ -195,9 +212,9 @@ fn store_cochange(
         return Ok(None);
     };
     let window_json = window.to_json();
-    let current = store.cochange_scan()?.filter(|scan| {
-        scan.last_oid.as_deref() == Some(head.as_str()) && scan.window_json == window_json
-    });
+    let current = store
+        .cochange_scan()?
+        .filter(|scan| scan.last_oid.as_deref() == Some(head) && scan.window_json == window_json);
     let scan = match current {
         Some(scan) => scan,
         None => {
@@ -213,6 +230,19 @@ fn store_cochange(
             store.cochange_scan()?.unwrap_or(scan)
         }
     };
+    Ok(Some(summary(&scan, head.to_owned(), window)))
+}
+
+/// The stored scan's summary, as the pass that stored it printed it, or
+/// none without a scan or with a cleared one.
+pub(crate) fn stored_cochange(store: &Store) -> Result<Option<CochangeSummary>, Failure> {
+    let Some(scan) = store.cochange_scan()? else {
+        return Ok(None);
+    };
+    let Some(head) = scan.last_oid.clone().filter(|head| !head.is_empty()) else {
+        return Ok(None);
+    };
+    let window = stored_window(&scan.window_json)?;
     Ok(Some(summary(&scan, head, window)))
 }
 

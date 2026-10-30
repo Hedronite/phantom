@@ -11,10 +11,10 @@ use phantom_fractal_proto::ErrorKind;
 use phantom_fractal_store::Store;
 use serde::{Deserialize, Serialize};
 
-use super::Failure;
 use super::budget::{self, Shed, Tokens, drop_last};
 use super::index::WindowOut;
 use super::lookup::current_store;
+use super::{Failure, Reply, answer};
 
 /// The fewest and most partners one `cochange` returns.
 pub(crate) const LIMIT_MIN: u64 = 1;
@@ -96,7 +96,7 @@ pub(crate) struct PartnerOut {
 
 /// The partners of `request.file`, best lift first, then the most changes
 /// together, then path, fitted to `request.max_tokens`.
-pub(crate) fn cochange(request: &CochangeRequest) -> Result<CochangeResult, Failure> {
+pub(crate) fn cochange(request: &CochangeRequest) -> Result<Reply<CochangeResult>, Failure> {
     if !(LIMIT_MIN..=LIMIT_MAX).contains(&request.limit) {
         return Err(Failure::new(
             ErrorKind::Usage,
@@ -128,7 +128,7 @@ pub(crate) fn cochange(request: &CochangeRequest) -> Result<CochangeResult, Fail
         truncated,
         tokens: None,
     };
-    budget::fit(result, request.max_tokens)
+    answer(result, &store, &request.repo, request.max_tokens)
 }
 
 /// True for a finite `min_lift` of at least 0.
@@ -165,20 +165,24 @@ fn scan(store: &Store) -> Result<Option<ScanOut>, Failure> {
     let Some(head) = scan.last_oid.filter(|head| !head.is_empty()) else {
         return Ok(None);
     };
-    let window: StoredWindow = serde_json::from_str(&scan.window_json).map_err(|_| {
+    Ok(Some(ScanOut {
+        head,
+        window: stored_window(&scan.window_json)?.into(),
+    }))
+}
+
+/// The window a stored scan read, from its `window_json`.
+pub(crate) fn stored_window(window_json: &str) -> Result<Window, Failure> {
+    let window: StoredWindow = serde_json::from_str(window_json).map_err(|_| {
         Failure::new(
             ErrorKind::Usage,
             "store: the co-change window could not be read",
         )
     })?;
-    Ok(Some(ScanOut {
-        head,
-        window: Window {
-            days: window.days,
-            max_commits: window.max_commits,
-        }
-        .into(),
-    }))
+    Ok(Window {
+        days: window.days,
+        max_commits: window.max_commits,
+    })
 }
 
 /// The stored partners of `path` with a lift of at least `min_lift`, at

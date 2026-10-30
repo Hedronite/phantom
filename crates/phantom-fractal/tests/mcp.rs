@@ -363,7 +363,8 @@ fn tools_list_matches_the_spec_table() {
             "impact",
             "top_ranked",
             "repo_map",
-            "cochange"
+            "cochange",
+            "repo_status"
         ]
     );
     let all = tools(&["--allow-index"]);
@@ -378,10 +379,11 @@ fn tools_list_matches_the_spec_table() {
             "top_ranked",
             "repo_map",
             "cochange",
+            "repo_status",
             "index_repo"
         ]
     );
-    assert_eq!(all[..8], read[..]);
+    assert_eq!(all[..9], read[..]);
     let properties = |tool: &Value| -> Vec<String> {
         let mut keys: Vec<String> = tool["inputSchema"]["properties"]
             .as_object()
@@ -392,7 +394,7 @@ fn tools_list_matches_the_spec_table() {
         keys.sort();
         keys
     };
-    let want: [(&str, &[&str], &[&str]); 9] = [
+    let want: [(&str, &[&str], &[&str]); 10] = [
         ("find_symbols", &["max_tokens", "query", "repo"], &["query"]),
         (
             "show_symbol",
@@ -429,6 +431,7 @@ fn tools_list_matches_the_spec_table() {
             &["file", "limit", "max_tokens", "min_lift", "repo"],
             &["file"],
         ),
+        ("repo_status", &["repo"], &[]),
         (
             "index_repo",
             &["cochange_commits", "cochange_days", "path"],

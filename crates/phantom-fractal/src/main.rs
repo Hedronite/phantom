@@ -10,9 +10,12 @@
 //! best-ranked symbols or files, and `map` packs a ranked repo map into a
 //! token budget. On a git root `index` also stores the co-change of the
 //! history, and `cochange FILE` lists the files that change with FILE.
-//! `--max-tokens` fits a read reply to a budget too. `version` says what
-//! this binary is and needs no index. Each prints the
-//! JSON envelope from `phantom-fractal-proto`. `mcp` serves the same
+//! `--max-tokens` fits a read reply to a budget too. `status` says whether
+//! the index is stale and why. `version` says what this binary is and
+//! needs no index. Each prints the JSON envelope from
+//! `phantom-fractal-proto`, whose `meta` says, on every success that read
+//! an index, whether that index is stale. `index` holds the database's
+//! writer lock while it runs. `mcp` serves the same
 //! operations to an MCP client over stdin and stdout, for the trees named
 //! by `--root` only. There are no other commands.
 //!
@@ -35,7 +38,7 @@ use serde::Serialize;
 
 use crate::ops::{
     CallsRequest, CochangeRequest, Failure, FindRequest, ImpactRequest, IndexRequest, MapRequest,
-    RankKind, RankRequest, ShowRequest, Target, VersionRequest,
+    RankKind, RankRequest, Reply, ShowRequest, StatusRequest, Target, VersionRequest,
 };
 
 /// Canon exit 1: usage or internal error.
@@ -225,6 +228,14 @@ enum Command {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
     },
+    /// Say whether the index is stale and why: what an index pass would
+    /// change, HEAD now and at the last pass, the stored counts, versions
+    /// and epochs, and whether a writer holds the index. Writes nothing.
+    Status {
+        /// Tree that was indexed. Defaults to the current directory.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
     /// Print the name, version, and commit of this binary. Needs no index.
     Version,
     /// Serve the read operations to an MCP client: JSON-RPC on stdin and
@@ -365,6 +376,7 @@ fn main() -> ExitCode {
             detail: ops::map::detail(&detail).unwrap_or_default(),
             repo,
         })),
+        Command::Status { repo } => emit(ops::status(&StatusRequest { repo })),
         Command::Version => emit(ops::version(&VersionRequest)),
         Command::Mcp { allow_index, root } => mcp::serve(allow_index, &root),
     }
@@ -404,7 +416,7 @@ fn min_confidence(text: &str) -> Result<f64, String> {
 }
 
 /// Prints the envelope for `result` and exits with its kind's code.
-fn emit<T: Serialize>(result: Result<T, Failure>) -> ExitCode {
+fn emit<T: Serialize>(result: Result<Reply<T>, Failure>) -> ExitCode {
     let (json, code) = ops::envelope(result);
     let Ok(json) = json else {
         return ExitCode::from(EXIT_ERROR);

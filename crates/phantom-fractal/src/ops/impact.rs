@@ -11,9 +11,9 @@ use phantom_fractal_analyze::{Counts, Group, Hit, ImpactOptions, ReasonCount};
 use phantom_fractal_proto::ErrorKind;
 use serde::Serialize;
 
-use super::Failure;
 use super::budget::{self, Shed, Tokens, drop_last};
 use super::lookup::{Names, SymbolOut, current_index, lookup, symbol_out};
+use super::{Failure, Reply};
 
 /// What `impact` is asked for.
 pub(crate) struct ImpactRequest {
@@ -136,7 +136,7 @@ struct OptionsOut {
 
 /// The impact of the one symbol `request.symbol` names in the index of
 /// `request.repo`, fitted to `request.max_tokens`.
-pub(crate) fn impact(request: &ImpactRequest) -> Result<ImpactResult, Failure> {
+pub(crate) fn impact(request: &ImpactRequest) -> Result<Reply<ImpactResult>, Failure> {
     if !request.options.in_range() {
         return Err(Failure::new(
             ErrorKind::Usage,
@@ -183,7 +183,7 @@ pub(crate) fn impact(request: &ImpactRequest) -> Result<ImpactResult, Failure> {
         },
         tokens: None,
     };
-    budget::fit(result, request.max_tokens)
+    super::answer(result, &store, &request.repo, request.max_tokens)
 }
 
 fn reason_out(reason: ReasonCount) -> ReasonOut {

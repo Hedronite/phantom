@@ -104,7 +104,10 @@ fn the_tool_sits_after_repo_map_with_the_cli_ranges() {
         .iter()
         .map(|tool| tool["name"].as_str().expect("name"))
         .collect();
-    assert_eq!(names[6..], ["repo_map", "cochange", "index_repo"]);
+    assert_eq!(
+        names[6..],
+        ["repo_map", "cochange", "repo_status", "index_repo"]
+    );
     let tool = &tools[7];
     assert_eq!(
         tool["annotations"],
@@ -133,14 +136,18 @@ fn the_tool_sits_after_repo_map_with_the_cli_ranges() {
         "max_tokens",
         json!({ "type": "integer", "minimum": 1, "maximum": 100_000 }),
     );
-    let index = &tools[8]["inputSchema"]["properties"];
+    let index_repo = tools
+        .iter()
+        .find(|tool| tool["name"] == "index_repo")
+        .expect("index_repo");
+    let index = &index_repo["inputSchema"]["properties"];
     assert_eq!(index["cochange_days"]["minimum"], 1);
     assert_eq!(index["cochange_days"]["maximum"], 3650);
     assert_eq!(index["cochange_days"]["default"], 365);
     assert_eq!(index["cochange_commits"]["minimum"], 1);
     assert_eq!(index["cochange_commits"]["maximum"], 50_000);
     assert_eq!(index["cochange_commits"]["default"], 5000);
-    assert_eq!(tools[8]["inputSchema"]["required"], json!(["path"]));
+    assert_eq!(index_repo["inputSchema"]["required"], json!(["path"]));
 }
 
 #[test]

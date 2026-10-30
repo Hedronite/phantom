@@ -1,6 +1,6 @@
 //! The tools: their definitions, their argument checks, and the
 //! [`crate::ops`] call behind each one (SPEC-w6 G2b, SPEC-w7 G3b, SPEC-w8
-//! G0b, G0c and G3b).
+//! G0b, G0c and G3b, SPEC-w9 G0c).
 //!
 //! A tool never does an operation's work itself. It turns its arguments
 //! into the request the command line builds for the same flags, calls the
@@ -21,7 +21,7 @@ use crate::ops::map::{BUDGET_MAX, BUDGET_MIN};
 use crate::ops::rank::{DEFAULT_LIMIT, FOCUS_MAX, LIMIT_MAX, LIMIT_MIN, focus_cap};
 use crate::ops::{
     self, CallsRequest, CochangeRequest, Failure, FindRequest, ImpactRequest, IndexRequest,
-    MapRequest, RankKind, RankRequest, ShowRequest, Target,
+    MapRequest, RankKind, RankRequest, Reply, ShowRequest, StatusRequest, Target,
 };
 
 /// One tool call's envelope line and whether it reports a failure.
@@ -258,6 +258,21 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
             ),
             "annotations": read,
         }),
+        json!({
+            "name": "repo_status",
+            "description": "Say whether the index is stale and why: how many files an index \
+                pass would add, rewrite and remove, whether the workspace manifests changed, \
+                HEAD now and at the last pass, the stored counts, versions and epochs, the \
+                co-change scan, and whether a writer holds the index. Reads only; a stale index \
+                is never re-indexed.",
+            "inputSchema": schema(
+                json!({
+                    "repo": { "type": "string", "description": REPO },
+                }),
+                &[],
+            ),
+            "annotations": read,
+        }),
     ];
     if allow_index {
         tools.push(json!({
@@ -331,6 +346,7 @@ pub(crate) fn call(
         "top_ranked" => run(rank_request(arguments, roots), ops::rank),
         "repo_map" => run(map_request(arguments, roots), ops::map),
         "cochange" => run(cochange_request(arguments, roots), ops::cochange),
+        "repo_status" => run(status_request(arguments, roots), ops::status),
         "index_repo" if allow_index => run(index_request(arguments, roots), ops::index),
         _ => return None,
     };
@@ -479,6 +495,14 @@ fn cochange_request(
     })
 }
 
+fn status_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<StatusRequest, Failure> {
+    let args = Args::new(arguments, &["repo"])?;
+    let repo = args.string("repo")?;
+    Ok(StatusRequest {
+        repo: roots.indexed(repo.as_deref())?,
+    })
+}
+
 /// `index_repo` takes a root whether or not it has an index yet.
 fn index_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<IndexRequest, Failure> {
     let args = Args::new(arguments, &["path", "cochange_days", "cochange_commits"])?;
@@ -500,7 +524,7 @@ fn index_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<IndexR
 /// bad one.
 fn run<R, T: Serialize>(
     request: Result<R, Failure>,
-    op: impl FnOnce(&R) -> Result<T, Failure>,
+    op: impl FnOnce(&R) -> Result<Reply<T>, Failure>,
 ) -> Result<Outcome, ()> {
     let (envelope, code) = match request {
         Ok(request) => ops::envelope(op(&request)),

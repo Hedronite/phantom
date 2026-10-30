@@ -2,8 +2,9 @@
 
 //! JSON envelope for Phantom.
 //!
-//! Success carries `ok`, `data`, and `schema`. Failure carries `error.kind`,
-//! `error.message`, and `error.exit`, plus `schema`. [`ErrorKind`] names
+//! Success carries `ok`, `data`, and `schema`, and, from a command that
+//! reads an index, a [`Meta`] after `data`. Failure carries `error.kind`,
+//! `error.message`, and `error.exit`, plus `schema`, and never `meta`. [`ErrorKind`] names
 //! canon exits 0 through 6. [`SCHEMA_VERSION`] is the schema number a Lapis
 //! reader checks on the `schema` field. JSON fields this crate does not
 //! define are ignored.
@@ -124,15 +125,34 @@ impl<'de> Deserialize<'de> for EnvelopeError {
     }
 }
 
-/// `{ ok, data, error, schema }`.
+/// `meta` of a success: how the index stands against its tree.
 ///
-/// Success has no error. Failure has an error. A value with `ok: true` and
-/// an error set cannot be built, and neither can a failure whose `exit`
-/// disagrees with its kind. Extra JSON fields are ignored.
+/// `stale` is true when an index pass would change the index. `head` is
+/// the tree's git HEAD now and `index_head` the HEAD the last pass stored,
+/// each null off a git root. `rank_epoch` is the stored rank's epoch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Meta {
+    pub stale: bool,
+    pub head: Option<String>,
+    pub index_head: Option<String>,
+    pub rank_epoch: u64,
+}
+
+/// `{ ok, data, meta, error, schema }`, `meta` on a success only.
+///
+/// Success has no error. Failure has an error and no `meta`. A value with
+/// `ok: true` and an error set cannot be built, and neither can a failure
+/// whose `exit` disagrees with its kind. Extra JSON fields are ignored, and
+/// so is a `meta` without the four keys of [`Meta`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Envelope<T> {
-    /// `ok` is true and `error` is absent.
-    Success { data: Option<T>, schema: u32 },
+    /// `ok` is true and `error` is absent. `meta` is absent from a command
+    /// that reads no index.
+    Success {
+        data: Option<T>,
+        meta: Option<Meta>,
+        schema: u32,
+    },
     /// `ok` is false and `error` is present. `data` may still hold
     /// candidates when the kind is [`ErrorKind::Ambiguous`].
     Failure {
@@ -147,6 +167,17 @@ impl<T> Envelope<T> {
     pub fn success(data: T) -> Self {
         Self::Success {
             data: Some(data),
+            meta: None,
+            schema: SCHEMA_VERSION,
+        }
+    }
+
+    /// A success value with `meta` after `data`. `schema` is
+    /// [`SCHEMA_VERSION`].
+    pub fn success_with_meta(data: T, meta: Meta) -> Self {
+        Self::Success {
+            data: Some(data),
+            meta: Some(meta),
             schema: SCHEMA_VERSION,
         }
     }
@@ -184,6 +215,14 @@ impl<T> Envelope<T> {
         }
     }
 
+    /// The index's standing, on a success that read an index.
+    pub const fn meta(&self) -> Option<&Meta> {
+        match self {
+            Self::Success { meta, .. } => meta.as_ref(),
+            Self::Failure { .. } => None,
+        }
+    }
+
     /// Failure body. Absent on success.
     pub const fn error(&self) -> Option<&EnvelopeError> {
         match self {
@@ -203,11 +242,12 @@ impl<T> Envelope<T> {
     fn from_parts(
         ok: bool,
         data: Option<T>,
+        meta: Option<Meta>,
         error: Option<EnvelopeError>,
         schema: u32,
     ) -> Result<Self, &'static str> {
         match (ok, error) {
-            (true, None) => Ok(Self::Success { data, schema }),
+            (true, None) => Ok(Self::Success { data, meta, schema }),
             (false, Some(error)) => Ok(Self::Failure {
                 error,
                 data,
@@ -228,9 +268,14 @@ where
         S: Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("Envelope", 4)?;
+        let meta = self.meta();
+        let mut state = serializer.serialize_struct("Envelope", 4 + usize::from(meta.is_some()))?;
         state.serialize_field("ok", &self.ok())?;
         state.serialize_field("data", &self.data())?;
+        match meta {
+            Some(meta) => state.serialize_field("meta", meta)?,
+            None => state.skip_field("meta")?,
+        }
         state.serialize_field("error", &self.error())?;
         state.serialize_field("schema", &self.schema())?;
         state.end()
@@ -249,12 +294,33 @@ where
         struct Raw<T> {
             ok: bool,
             data: Option<T>,
+            #[serde(default)]
+            meta: Option<RawMeta>,
             error: Option<EnvelopeError>,
             schema: u32,
         }
 
+        /// A `meta` read leniently: one without `stale` and `rank_epoch`
+        /// is not a [`Meta`], and is ignored like any unknown field.
+        #[derive(Deserialize)]
+        struct RawMeta {
+            stale: Option<bool>,
+            head: Option<String>,
+            index_head: Option<String>,
+            rank_epoch: Option<u64>,
+        }
+
         let raw = Raw::deserialize(deserializer)?;
-        Self::from_parts(raw.ok, raw.data, raw.error, raw.schema).map_err(de::Error::custom)
+        let meta = raw.meta.and_then(|meta| {
+            Some(Meta {
+                stale: meta.stale?,
+                head: meta.head,
+                index_head: meta.index_head,
+                rank_epoch: meta.rank_epoch?,
+            })
+        });
+        let meta = if raw.ok { meta } else { None };
+        Self::from_parts(raw.ok, raw.data, meta, raw.error, raw.schema).map_err(de::Error::custom)
     }
 }
 
@@ -293,6 +359,46 @@ mod tests {
         assert_eq!(error_json["error"]["message"], "missing");
         assert_eq!(error_json["error"]["exit"], 3);
         assert_eq!(error_json["schema"], SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn meta_follows_data_on_a_success_and_round_trips() {
+        let meta = Meta {
+            stale: true,
+            head: Some("a".repeat(40)),
+            index_head: None,
+            rank_epoch: 3,
+        };
+        let success = Envelope::success_with_meta(String::from("row"), meta.clone());
+        assert_eq!(success.meta(), Some(&meta));
+        assert_eq!(round_trip(&success), success);
+        let json = serde_json::to_string(&success).expect("json");
+        assert_eq!(
+            json,
+            format!(
+                r#"{{"ok":true,"data":"row","meta":{{"stale":true,"head":"{}","index_head":null,"rank_epoch":3}},"error":null,"schema":1}}"#,
+                "a".repeat(40)
+            )
+        );
+        let plain = serde_json::to_string(&Envelope::success(String::from("row"))).expect("json");
+        assert_eq!(plain, r#"{"ok":true,"data":"row","error":null,"schema":1}"#);
+        assert_eq!(Envelope::success(String::from("row")).meta(), None);
+    }
+
+    #[test]
+    fn a_failure_never_carries_meta() {
+        let raw = r#"{"ok":false,"data":null,"meta":{"stale":false,"head":null,"index_head":null,"rank_epoch":1},"error":{"kind":"usage","message":"no","exit":1},"schema":1}"#;
+        let parsed: Envelope<String> = serde_json::from_str(raw).expect("parse");
+        assert_eq!(parsed.meta(), None);
+        let json = serde_json::to_string(&parsed).expect("json");
+        assert!(!json.contains("meta"), "{json}");
+    }
+
+    #[test]
+    fn a_meta_without_its_keys_is_ignored() {
+        let raw = r#"{"ok":true,"data":"row","meta":{"latency_ms":4},"error":null,"schema":1}"#;
+        let parsed: Envelope<String> = serde_json::from_str(raw).expect("parse");
+        assert_eq!(parsed, Envelope::success(String::from("row")));
     }
 
     #[test]

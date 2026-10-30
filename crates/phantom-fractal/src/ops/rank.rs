@@ -14,9 +14,9 @@ use phantom_fractal_proto::ErrorKind;
 use phantom_fractal_store::{Store, StoreError};
 use serde::Serialize;
 
-use super::Failure;
 use super::budget::{self, Shed, Tokens, drop_last};
 use super::lookup::current_index;
+use super::{Failure, Reply, answer};
 
 /// The fewest and most hits one `rank` returns.
 pub(crate) const LIMIT_MIN: u64 = 1;
@@ -129,7 +129,7 @@ struct FileHit {
 
 /// The top `request.limit` symbols or files, best first, fitted to
 /// `request.max_tokens`. Ties break by path, then line.
-pub(crate) fn rank(request: &RankRequest) -> Result<RankResult, Failure> {
+pub(crate) fn rank(request: &RankRequest) -> Result<Reply<RankResult>, Failure> {
     if !(LIMIT_MIN..=LIMIT_MAX).contains(&request.limit) {
         return Err(Failure::new(
             ErrorKind::Usage,
@@ -160,7 +160,7 @@ pub(crate) fn rank(request: &RankRequest) -> Result<RankResult, Failure> {
         truncated: total > limit,
         tokens: None,
     };
-    budget::fit(result, request.max_tokens)
+    answer(result, &store, &request.repo, request.max_tokens)
 }
 
 /// `Usage` when there are more than [`FOCUS_MAX`] focus paths.

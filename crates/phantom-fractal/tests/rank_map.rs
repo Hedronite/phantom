@@ -605,7 +605,8 @@ fn reads_write_nothing_repeat_byte_for_byte_and_hold_no_absolute_path() {
     }
 
     // With the stored rank current, and then stale, every read gives the
-    // same bytes and leaves the database as it was.
+    // same bytes apart from `meta`, whose `rank_epoch` is the stored rank's,
+    // and leaves the database as it was.
     let epoch = world.store().graph_epoch().expect("graph epoch");
     for stale in [false, true] {
         if stale {
@@ -617,10 +618,28 @@ fn reads_write_nothing_repeat_byte_for_byte_and_hold_no_absolute_path() {
         let before = world.bytes();
         for bin in BINS {
             for (args, want) in reads.iter().zip(&first) {
-                assert_eq!(&world.run(bin, args).stdout, want, "{args:?} stale {stale}");
+                let out = world.run(bin, args).stdout;
+                assert_eq!(strip_meta(&out), strip_meta(want), "{args:?} stale {stale}");
+                let rank_epoch = if stale { epoch - 1 } else { epoch };
+                assert!(
+                    out.starts_with("{\"ok\":false,")
+                        || out.contains(&format!("\"rank_epoch\":{rank_epoch}}},\"error\"")),
+                    "{args:?} stale {stale}: {out}"
+                );
             }
         }
         assert_eq!(world.bytes(), before, "stale {stale}");
+    }
+}
+
+/// `line` without its top-level `meta`, which holds no nested object.
+fn strip_meta(line: &str) -> String {
+    match line.find(",\"meta\":{") {
+        Some(start) => {
+            let end = start + line[start..].find('}').expect("meta closes") + 1;
+            format!("{}{}", &line[..start], &line[end..])
+        }
+        None => line.to_owned(),
     }
 }
 

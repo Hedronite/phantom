@@ -5,10 +5,10 @@
 //! reply that does not fit drops entries one at a time, in its op's fixed
 //! order, until it does; [`Shed`] gives that order. With a budget, `data`
 //! ends with `tokens`, whose `used` is the estimate of the final line,
-//! `tokens` included. Without one nothing is added.
+//! `tokens` and `meta` included. Without one nothing is added.
 
 use phantom_fractal_analyze::{estimate_tokens, packing_budget};
-use phantom_fractal_proto::{Envelope, ErrorKind};
+use phantom_fractal_proto::{Envelope, ErrorKind, Meta};
 use serde::Serialize;
 
 use super::Failure;
@@ -48,9 +48,9 @@ pub(crate) fn check(max_tokens: Option<u64>) -> Result<(), Failure> {
 }
 
 /// `data` as is without a budget. With one, `data` after the fewest drops
-/// that fit, with `tokens` set; `Usage` `budget_too_small` when it does not
-/// fit with every entry dropped.
-pub(crate) fn fit<T: Shed>(data: T, max_tokens: Option<u64>) -> Result<T, Failure> {
+/// that fit in a line that carries `meta`, with `tokens` set; `Usage`
+/// `budget_too_small` when it does not fit with every entry dropped.
+pub(crate) fn fit<T: Shed>(data: T, max_tokens: Option<u64>, meta: &Meta) -> Result<T, Failure> {
     let Some(max) = max_tokens else {
         return Ok(data);
     };
@@ -58,7 +58,7 @@ pub(crate) fn fit<T: Shed>(data: T, max_tokens: Option<u64>) -> Result<T, Failur
     let trimmed = |count: usize| -> Result<(T, u64), Failure> {
         let mut reply = data.clone();
         reply.shed(count);
-        let used = settle(&mut reply, max, count)?;
+        let used = settle(&mut reply, max, count, meta)?;
         Ok((reply, used))
     };
     let total = data.sheddable();
@@ -88,14 +88,14 @@ pub(crate) fn fit<T: Shed>(data: T, max_tokens: Option<u64>) -> Result<T, Failur
 }
 
 /// Sets `tokens` on `reply` so that `used` is the estimate of the line it
-/// prints, and returns that estimate. Each pass can only add digits, so
-/// `used` rises until it holds still.
-fn settle<T: Shed>(reply: &mut T, max: u64, omitted: usize) -> Result<u64, Failure> {
+/// prints with `meta`, and returns that estimate. Each pass can only add
+/// digits, so `used` rises until it holds still.
+fn settle<T: Shed>(reply: &mut T, max: u64, omitted: usize, meta: &Meta) -> Result<u64, Failure> {
     let omitted = u64::try_from(omitted).unwrap_or(u64::MAX);
     let mut used = 0;
     loop {
         reply.set_tokens(Tokens { max, used, omitted });
-        let line = serde_json::to_string(&Envelope::success(&*reply))
+        let line = serde_json::to_string(&Envelope::success_with_meta(&*reply, meta.clone()))
             .map_err(|_| Failure::new(ErrorKind::Usage, "the reply could not be encoded"))?;
         let estimate = estimate_tokens(&line);
         if estimate == used {

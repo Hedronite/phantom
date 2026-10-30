@@ -4,10 +4,11 @@ use std::path::PathBuf;
 
 use phantom_fractal_lang::{Item, Visibility};
 use phantom_fractal_proto::ErrorKind;
+use phantom_fractal_store::Store;
 use serde::Serialize;
 
 use super::budget::{self, Shed, Tokens, drop_last};
-use super::{Failure, canonical_repo, open_index};
+use super::{Failure, Reply, answer, canonical_repo, open_index};
 
 /// Most hits one `find` returns.
 const FIND_CAP: usize = 100;
@@ -77,16 +78,17 @@ impl SymbolHit {
 /// Indexed symbols under `request.repo` named exactly `request.query`,
 /// ordered by path and then line, at most [`FIND_CAP`] of them, fitted
 /// to `request.max_tokens`.
-pub(crate) fn find(request: &FindRequest) -> Result<FindResult, Failure> {
+pub(crate) fn find(request: &FindRequest) -> Result<Reply<FindResult>, Failure> {
     budget::check(request.max_tokens)?;
-    budget::fit(matches(request)?, request.max_tokens)
+    let store = open_index(&request.repo)?;
+    let result = matches(request, &store)?;
+    answer(result, &store, &request.repo, request.max_tokens)
 }
 
 /// The matches before any budget. The store's bound FTS match answers an
 /// absent name without a walk. Otherwise each `.rs` file the walk keeps is read back from the store.
-fn matches(request: &FindRequest) -> Result<FindResult, Failure> {
+fn matches(request: &FindRequest, store: &Store) -> Result<FindResult, Failure> {
     let query = request.query.as_str();
-    let store = open_index(&request.repo)?;
     if query.is_empty() || store.match_count(query)? == 0 {
         return Ok(FindResult {
             hits: Vec::new(),

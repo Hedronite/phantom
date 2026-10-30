@@ -183,12 +183,17 @@ impl crate::Store {
                 ))?;
             }
         }
+        // The head stamps the scan: one with a head sets it, and a
+        // scan with none — a non-git root — clears it instead of
+        // leaving the last git scan's head stale (the W8 Later nit).
         if let Some(head) = &scan.last_oid {
             tx.execute(
                 "INSERT INTO meta(key, value) VALUES ('cochange_head', ?1)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 [head],
             )?;
+        } else {
+            tx.execute("DELETE FROM meta WHERE key = 'cochange_head'", [])?;
         }
         tx.commit()?;
         Ok(())
