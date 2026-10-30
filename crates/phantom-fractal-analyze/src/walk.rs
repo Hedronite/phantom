@@ -19,7 +19,11 @@ struct Reach {
     via: Via,
 }
 
-/// Walks level by level from `target`, which has confidence 1.0.
+/// Walks level by level from `targets`, each at confidence 1.0, given in
+/// hit order (file, line, name). With several targets, the walk starts
+/// from all of them at once, so each symbol is placed once, at its
+/// nearest depth from any target, by its best path; ties keep the first
+/// edge met, in the order below.
 ///
 /// Every symbol reached is placed at the level it is first reached, with
 /// the best product over its edges from the previous level's expanded
@@ -36,11 +40,11 @@ struct Reach {
 /// Neither a test nor a symbol below the floor is expanded.
 pub(crate) fn walk(
     source: &impl ImpactSource,
-    target: i64,
+    targets: &[SymbolFacts],
     options: &ImpactOptions,
 ) -> Result<Walked, StoreError> {
-    let mut placed: HashSet<i64> = HashSet::from([target]);
-    let mut frontier: Vec<(i64, f64)> = vec![(target, 1.0)];
+    let mut placed: HashSet<i64> = targets.iter().map(|target| target.id).collect();
+    let mut frontier: Vec<(i64, f64)> = targets.iter().map(|target| (target.id, 1.0)).collect();
     let mut out = Walked {
         groups: Vec::new(),
         tests: Vec::new(),
@@ -162,7 +166,7 @@ fn sort(hits: &mut [Hit]) {
 }
 
 /// File, then line (a missing line last), then name, then id.
-fn order(a: &SymbolFacts, b: &SymbolFacts) -> std::cmp::Ordering {
+pub(crate) fn order(a: &SymbolFacts, b: &SymbolFacts) -> std::cmp::Ordering {
     a.file
         .cmp(&b.file)
         .then_with(|| line_key(a).cmp(&line_key(b)))

@@ -191,11 +191,75 @@ pub fn impact(
             risk: Risk::Unknown,
         });
     };
-    let walked = walk::walk(source, target, options)?;
+    let walked = walk::walk(source, std::slice::from_ref(&facts), options)?;
     let reasons = risk::reasons(source, &facts)?;
     let risk = risk::risk(&walked.counts, &reasons);
     Ok(Impact {
         target: Some(facts),
+        groups: walked.groups,
+        tests: walked.tests,
+        counts: walked.counts,
+        exact: reasons.is_empty(),
+        reasons,
+        risk,
+    })
+}
+
+/// What a diff tells [`impact_many`] beyond the symbols it walks from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiffState {
+    /// The freshness probe says the index is stale: the reason
+    /// `stale_index`.
+    pub stale_index: bool,
+    /// Changed symbols the index does not hold: the reason
+    /// `unindexed_changes`, counted.
+    pub unindexed_changes: u64,
+}
+
+/// What [`impact_many`] found.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManyImpact {
+    /// The sources the walk started from, in hit order. A source with
+    /// no row is left out.
+    pub sources: Vec<SymbolFacts>,
+    /// One group per depth that reported a hit, nearest first.
+    pub groups: Vec<Group>,
+    /// Reached tests, sorted by depth, then file, line, and name.
+    pub tests: Vec<Hit>,
+    pub counts: Counts,
+    /// Why the answer may be incomplete, in the fixed order.
+    pub reasons: Vec<ReasonCount>,
+    /// True only when `reasons` is empty.
+    pub exact: bool,
+    pub risk: Risk,
+}
+
+/// What breaks if every symbol in `sources` changes, walked from all of
+/// them at once (SPEC-w9 G2a): each reached symbol is placed once, at its
+/// nearest depth from any source, by its best path. Groups, tests, counts
+/// and risk are those of [`impact`]; the reasons are [`impact`]'s summed
+/// over the sources, plus `stale_index` and `unindexed_changes` from
+/// `diff`. A source is never a hit.
+pub fn impact_many(
+    source: &impl ImpactSource,
+    sources: &[i64],
+    options: &ImpactOptions,
+    diff: &DiffState,
+) -> Result<ManyImpact, StoreError> {
+    let mut targets = Vec::new();
+    for &id in sources {
+        if let Some(facts) = source.facts(id)?
+            && !targets.iter().any(|known: &SymbolFacts| known.id == id)
+        {
+            targets.push(facts);
+        }
+    }
+    targets.sort_by(walk::order);
+    let walked = walk::walk(source, &targets, options)?;
+    let reasons = risk::reasons_of(source, &targets, diff)?;
+    let risk = risk::risk(&walked.counts, &reasons);
+    Ok(ManyImpact {
+        sources: targets,
         groups: walked.groups,
         tests: walked.tests,
         counts: walked.counts,

@@ -118,6 +118,8 @@ fn every_reason_at_once_keeps_the_fixed_order() {
             "trait_dispatch",
             "parse_skipped_files",
             "external_users_possible",
+            "stale_index",
+            "unindexed_changes",
         ]
     );
     assert!(!g.impact(1).exact);
