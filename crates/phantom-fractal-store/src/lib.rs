@@ -97,6 +97,10 @@ pub enum StoreError {
     /// Another writer holds the database's `graph.db.lock` after the
     /// 250 ms window. The CLI maps this to `lock_held`, exit 4.
     LockHeld,
+    /// A read-only open cannot proceed without creating or writing a
+    /// sidecar the `fract doctor` never writes: no `-wal`, `-shm`, or
+    /// journal, no database file. Nothing about the data dir changes.
+    ReadOnlyUnavailable,
     /// The caller's own-test-flag list does not match the file's
     /// stored symbol count.
     OwnFlagCount {
@@ -144,6 +148,9 @@ impl std::fmt::Display for StoreError {
                 write!(f, "{path}: {detail}")
             }
             Self::LockHeld => f.write_str("another writer holds the database lock"),
+            Self::ReadOnlyUnavailable => {
+                f.write_str("read-only open cannot proceed without a sidecar write")
+            }
             Self::OwnFlagCount { stored, flags } => {
                 write!(
                     f,
@@ -174,6 +181,12 @@ impl From<rusqlite::Error> for StoreError {
 /// One stamped graph database.
 pub struct Store {
     conn: Connection,
+    /// The path a read-only open serves, so [`read_only_still_valid`]
+    /// can re-check the database's state after the reads. `None` when
+    /// the store was opened for writes, which cannot go stale.
+    ///
+    /// [`read_only_still_valid`]: Self::read_only_still_valid
+    read_only_path: Option<std::path::PathBuf>,
 }
 
 impl Store {
@@ -207,7 +220,10 @@ impl Store {
         let tx = conn.transaction()?;
         schema::create(&tx)?;
         tx.commit()?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            read_only_path: None,
+        })
     }
 
     fn open_existing(path: &Path) -> Result<Self, StoreError> {
@@ -225,7 +241,105 @@ impl Store {
             schema::migrate_v2_to_v3(&mut conn)?;
         }
         enable_wal(&conn)?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            read_only_path: None,
+        })
+    }
+
+    /// Opens `path` strictly for reads (W9 G3), for a `fract doctor`
+    /// and `fract repos list` that write nothing at all.
+    ///
+    /// The gate first: when the writer lock is [`held`](lock_state), or
+    /// a `-wal` or `-shm` sits beside the database, the open answers
+    /// [`StoreError::ReadOnlyUnavailable`] before any SQLite work — the
+    /// database is in use and the guarded read must not race it.
+    ///
+    /// Past the gate the open takes `SQLITE_OPEN_READ_ONLY` over the
+    /// percent-encoded `file:` URI with `mode=ro&immutable=1` (PM
+    /// ruling 2026-10-30: the URI ban was the open contract's own, so
+    /// `immutable` reads the checkpointed database without locks, a
+    /// sidecar, or any write). No file is created — not a `-wal`, a
+    /// `-shm`, or a journal, and not the database itself — and no
+    /// directory is touched: no `0700` chain work, no owner probe, no
+    /// chmod, no migration, no `PRAGMA` that writes.
+    ///
+    /// The producer stamp and `schema_version` are checked as
+    /// [`Store::open`]'s, with the same verdicts: a stamp newer than
+    /// [`SCHEMA_VERSION`] refuses via the header preflight before
+    /// SQLite runs at all, and a stamp older than it cannot migrate
+    /// here, so it is [`StoreError::SchemaMismatch`]. The getters —
+    /// [`root`], [`index_head`], [`row_count`], [`file_stats`],
+    /// [`workspace_fingerprint`], and the epochs — all answer without a
+    /// write; a write attempt answers the SQLite refusal.
+    ///
+    /// **Callers must re-check after the reads:** the guarded snapshot
+    /// only binds while nothing else touched the index.
+    /// [`read_only_still_valid`] carries the same two-condition check
+    /// the gate made — an unlocked database and no sidecars — and a
+    /// `false` there means the reads raced a writer.
+    ///
+    /// [`root`]: Self::root
+    /// [`index_head`]: Self::index_head
+    /// [`row_count`]: Self::row_count
+    /// [`file_stats`]: Self::file_stats
+    /// [`workspace_fingerprint`]: Self::workspace_fingerprint
+    pub fn open_read_only(path: &Path) -> Result<Self, StoreError> {
+        if matches!(lock_state(path), Ok(LockState::Held)) || sidecar_present(path) {
+            return Err(StoreError::ReadOnlyUnavailable);
+        }
+        // The stamp preflight reads the database header directly,
+        // without SQLite: a stamp newer than this binary refuses here,
+        // so a read-only open of a schema-newer database touches
+        // nothing at all.
+        if let Some(user_version) = header_user_version(path)
+            && user_version > SCHEMA_VERSION
+        {
+            return Err(StoreError::SchemaNewer {
+                found: user_version,
+            });
+        }
+        let conn = Connection::open_with_flags(read_only_uri(path).as_str(), read_only_flags())
+            .map_err(read_only_open_error)?;
+        // The W2 hardening on the connection only: `PRAGMA
+        // foreign_keys = ON`, `PRAGMA trusted_schema = OFF`, the
+        // `DEFENSIVE` config. None writes the file.
+        #[cfg(test)]
+        open_trace::record("read_only_harden");
+        harden(&conn)?;
+        if !read_only_probe(schema::meta_table_exists(&conn))? {
+            return Err(StoreError::ForeignDatabase);
+        }
+        let version = read_only_probe(schema::check_stamp(&conn))?;
+        if version != SCHEMA_VERSION {
+            // A stamp this binary opens for writes migrates; a
+            // read-only open refuses the stamp instead.
+            let user_version = read_only_probe(schema::user_version(&conn))?;
+            return Err(StoreError::SchemaMismatch {
+                schema_version: version,
+                user_version,
+            });
+        }
+        Ok(Self {
+            conn,
+            read_only_path: Some(path.to_path_buf()),
+        })
+    }
+
+    /// Re-checks the guard a read-only open ran before it opened: the
+    /// database's writer lock is free and no `-wal` or `-shm` sits
+    /// beside it. `Ok(false)` means the reads may have raced a
+    /// writer — the caller answers [`StoreError::ReadOnlyUnavailable`]
+    /// for them. A store opened for writes is never stale: it answers
+    /// `Ok(true)`.
+    pub fn read_only_still_valid(&self) -> Result<bool, StoreError> {
+        let Some(path) = &self.read_only_path else {
+            return Ok(true);
+        };
+        if lock_state(path)? == LockState::Held || sidecar_present(path) {
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     /// Extracts `source` with `language` and **replaces** the rows stored
@@ -388,6 +502,95 @@ impl Store {
 }
 
 /// Flags for [`Store::open`]. `SQLITE_OPEN_URI` is never set.
+/// The database header's `user_version`, read without SQLite. `None`
+/// when the file is not a readable SQLite-form file — non-headers fall
+/// through to the stamped SQL checks.
+fn header_user_version(path: &Path) -> Option<i64> {
+    use std::io::Read;
+    let mut bytes = [0u8; 100];
+    std::fs::File::open(path)
+        .ok()?
+        .read_exact(&mut bytes)
+        .ok()?;
+    if bytes[..16] != *b"SQLite format 3\x00" {
+        return None;
+    }
+    let version = u32::from_be_bytes(bytes[60..64].try_into().ok()?);
+    Some(i64::from(version))
+}
+
+/// Percent-encodes an absolute path as one SQLite `file:` URI, with
+/// the read-only and immutable parameters appended.
+pub(crate) fn read_only_uri(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let mut out = String::from("file:");
+    for byte in text.as_bytes() {
+        match byte {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(char::from(*byte))
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out.push_str("?mode=ro&immutable=1");
+    out
+}
+
+/// Flags for [`Store::open_read_only`]: read without one, open the
+/// `file:` URI percent-encoded path, and never create.
+pub(crate) fn read_only_flags() -> OpenFlags {
+    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX
+}
+
+/// `<database>-wal` or `<database>-shm` beside the database: the
+/// sidecars the guarded read refuses on, and `read_only_still_valid`
+/// re-checks.
+pub(crate) fn sidecar_path(db_path: &Path, suffix: &str) -> std::path::PathBuf {
+    let name = db_path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "graph.db".to_owned());
+    let mut name = name;
+    name.push('-');
+    name.push_str(suffix);
+    match db_path.parent() {
+        Some(dir) => dir.join(name),
+        None => std::path::PathBuf::from(name),
+    }
+}
+
+/// True when `-wal` or `-shm` sits beside the database.
+pub(crate) fn sidecar_present(db_path: &Path) -> bool {
+    sidecar_path(db_path, "wal").exists() || sidecar_path(db_path, "shm").exists()
+}
+
+/// Maps a SQLite failure out of the read-only open: the failures that
+/// say a read cannot proceed without creating or writing a sidecar —
+/// or without a file at all — read as [`StoreError::ReadOnlyUnavailable`];
+/// anything else carries the SQLite error through.
+fn read_only_open_error(err: rusqlite::Error) -> StoreError {
+    if let Some(
+        code @ (rusqlite::ffi::ErrorCode::ReadOnly
+        | rusqlite::ffi::ErrorCode::CannotOpen
+        | rusqlite::ffi::ErrorCode::PermissionDenied),
+    ) = err.sqlite_error_code()
+    {
+        let _ = code;
+        return StoreError::ReadOnlyUnavailable;
+    }
+    StoreError::Sqlite(err)
+}
+
+/// Cooler down wrapping: a stamp verdict keeps its kind, a SQLite
+/// failure maps like the one from the open itself.
+fn read_only_probe<T>(probe: Result<T, StoreError>) -> Result<T, StoreError> {
+    match probe {
+        Ok(value) => Ok(value),
+        Err(StoreError::Sqlite(err)) => Err(read_only_open_error(err)),
+        Err(other) => Err(other),
+    }
+}
+
 pub(crate) fn open_flags(create: bool) -> OpenFlags {
     let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     if create {

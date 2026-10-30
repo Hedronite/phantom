@@ -13,8 +13,11 @@
 //! token budget. On a git root `index` also stores the co-change of the
 //! history, and `cochange FILE` lists the files that change with FILE.
 //! `--max-tokens` fits a read reply to a budget too. `status` says whether
-//! the index is stale and why. `version` says what this binary is and
-//! needs no index. Each prints the JSON envelope from
+//! the index is stale and why. `path FROM TO` finds a call path between
+//! two symbols. `repos` lists the indexes in the data directory and
+//! removes one, and `doctor` checks the install, neither printing a path.
+//! `--repo` takes an index's key as well as a path. `version` says what
+//! this binary is and needs no index. Each prints the JSON envelope from
 //! `phantom-fractal-proto`, whose `meta` says, on every success that read
 //! an index, whether that index is stale. `index` holds the database's
 //! writer lock while it runs. `watch` holds it for as long as it runs,
@@ -38,13 +41,14 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use phantom_fractal_analyze::ImpactOptions;
+use phantom_fractal_analyze::{ImpactOptions, PATH_DEFAULT_DEPTH, PATH_MAX_DEPTH, PATH_MIN_DEPTH};
 use phantom_fractal_git::Window;
 use serde::Serialize;
 
 use crate::ops::{
-    CallsRequest, CochangeRequest, DiffRequest, Failure, FindRequest, ImpactRequest, IndexRequest,
-    MapRequest, RankKind, RankRequest, Reply, ShowRequest, StatusRequest, Target, VersionRequest,
+    CallsRequest, CochangeRequest, DiffRequest, DoctorRequest, Failure, FindRequest, ImpactRequest,
+    IndexRequest, MapRequest, PathRequest, RankKind, RankRequest, Reply, ShowRequest,
+    StatusRequest, Target, VersionRequest,
 };
 
 /// Canon exit 1: usage or internal error.
@@ -262,6 +266,34 @@ enum Command {
         #[arg(long, default_value = ".")]
         repo: PathBuf,
     },
+    /// Find a call path from FROM to TO: the shortest over calls and
+    /// members, the surest among those, or the farthest symbol FROM
+    /// reaches when there is none.
+    Path {
+        /// A stable key, or a name as `show` takes it.
+        from: String,
+        /// A stable key, or a name as `show` takes it.
+        to: String,
+        /// The most edges walked, 1 to 20.
+        #[arg(long, default_value_t = PATH_DEFAULT_DEPTH,
+              value_parser = clap::value_parser!(u8).range(i64::from(PATH_MIN_DEPTH)..=i64::from(PATH_MAX_DEPTH)))]
+        max_depth: u8,
+        /// Most estimated tokens the reply may cost, 1 to 100000. No hop is
+        /// dropped: a path that does not fit is `budget_too_small`.
+        #[arg(long, value_parser = max_tokens_range())]
+        max_tokens: Option<u64>,
+        /// Tree that was indexed. Defaults to the current directory.
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
+    /// List the indexes in the data directory by key, or remove one.
+    Repos {
+        #[command(subcommand)]
+        action: Option<ReposAction>,
+    },
+    /// Check the data directory, the indexes, and this binary, without
+    /// writing or repairing anything. Always exits 0; `ok` is the verdict.
+    Doctor,
     /// Keep the index of a tree fresh while it is edited: poll it, and
     /// run an index pass each time it settles stale, one envelope line per
     /// pass. Holds the writer lock until killed or until --max-batches
@@ -300,11 +332,54 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum ReposAction {
+    /// List every index: its key, its tree's directory name, whether it is
+    /// stale, and its file and symbol counts. The default.
+    List,
+    /// Delete the index with this key, unless a writer holds it.
+    Remove {
+        /// A key, as `repos list` prints it.
+        key: String,
+    },
+}
+
+impl Command {
+    /// The command's `--repo`, when it has one.
+    fn repo_mut(&mut self) -> Option<&mut PathBuf> {
+        match self {
+            Self::Find { repo, .. }
+            | Self::Callers { repo, .. }
+            | Self::Callees { repo, .. }
+            | Self::Impact { repo, .. }
+            | Self::Show { repo, .. }
+            | Self::Rank { repo, .. }
+            | Self::Cochange { repo, .. }
+            | Self::Map { repo, .. }
+            | Self::Status { repo }
+            | Self::Path { repo, .. }
+            | Self::Watch { repo, .. } => Some(repo),
+            Self::Index { .. }
+            | Self::Repos { .. }
+            | Self::Doctor
+            | Self::Version
+            | Self::Mcp { .. } => None,
+        }
+    }
+}
+
 fn main() -> ExitCode {
-    let cli = match Cli::try_parse() {
+    let mut cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(err) => return clap_exit(&err),
     };
+    // A `--repo` that is an index's key and not a path names that index's
+    // tree.
+    if let Some(repo) = cli.command.repo_mut()
+        && let Some(root) = ops::registry::root_of_key(repo)
+    {
+        *repo = root;
+    }
     match cli.command {
         Command::Index {
             path,
@@ -458,6 +533,24 @@ fn main() -> ExitCode {
             debounce: Duration::from_millis(debounce_ms),
             max_batches,
         }),
+        Command::Path {
+            from,
+            to,
+            max_depth,
+            max_tokens,
+            repo,
+        } => emit(ops::symbol_path(&PathRequest {
+            from,
+            to,
+            max_depth,
+            repo,
+            max_tokens,
+        })),
+        Command::Repos { action } => match action {
+            None | Some(ReposAction::List) => emit(ops::registry::list()),
+            Some(ReposAction::Remove { key }) => emit(ops::registry::remove(&key)),
+        },
+        Command::Doctor => emit(ops::doctor(&DoctorRequest)),
         Command::Version => emit(ops::version(&VersionRequest)),
         Command::Mcp { allow_index, root } => mcp::serve(allow_index, &root),
     }

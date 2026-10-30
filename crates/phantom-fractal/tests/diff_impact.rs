@@ -468,7 +468,7 @@ fn diff_impact_is_the_cli_line_and_keeps_to_the_roots() {
         .expect("listed");
     assert_eq!(
         names[at - 1..=at + 1],
-        ["cochange", "diff_impact", "repo_status"]
+        ["cochange", "diff_impact", "symbol_path"]
     );
     let tool = &tools[at];
     assert_eq!(

@@ -110,7 +110,9 @@ fn the_tool_sits_after_repo_map_with_the_cli_ranges() {
             "repo_map",
             "cochange",
             "diff_impact",
+            "symbol_path",
             "repo_status",
+            "repos",
             "index_repo"
         ]
     );

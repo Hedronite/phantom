@@ -1,6 +1,6 @@
 //! The tools: their definitions, their argument checks, and the
 //! [`crate::ops`] call behind each one (SPEC-w6 G2b, SPEC-w7 G3b, SPEC-w8
-//! G0b, G0c and G3b, SPEC-w9 G0c and G2b).
+//! G0b, G0c and G3b, SPEC-w9 G0c, G2b and G3b).
 //!
 //! A tool never does an operation's work itself. It turns its arguments
 //! into the request the command line builds for the same flags, calls the
@@ -8,7 +8,9 @@
 //! `repo` is checked against the [`Roots`] last, after every other
 //! argument.
 
-use phantom_fractal_analyze::ImpactOptions;
+use std::path::PathBuf;
+
+use phantom_fractal_analyze::{ImpactOptions, PATH_DEFAULT_DEPTH, PATH_MAX_DEPTH, PATH_MIN_DEPTH};
 use phantom_fractal_git::Window;
 use phantom_fractal_proto::ErrorKind;
 use serde::Serialize;
@@ -21,7 +23,8 @@ use crate::ops::map::{BUDGET_MAX, BUDGET_MIN};
 use crate::ops::rank::{DEFAULT_LIMIT, FOCUS_MAX, LIMIT_MAX, LIMIT_MIN, focus_cap};
 use crate::ops::{
     self, CallsRequest, CochangeRequest, DiffRequest, Failure, FindRequest, ImpactRequest,
-    IndexRequest, MapRequest, RankKind, RankRequest, Reply, ShowRequest, StatusRequest, Target,
+    IndexRequest, MapRequest, PathRequest, RankKind, RankRequest, Reply, ShowRequest,
+    StatusRequest, Target,
 };
 
 /// One tool call's envelope line and whether it reports a failure.
@@ -306,6 +309,44 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
             "annotations": read,
         }),
         json!({
+            "name": "symbol_path",
+            "description": "Find a call path from one symbol to another over the stored calls and \
+                type-to-method edges: among the shortest, the one whose edge confidences have the \
+                highest product. Each hop gives the symbol reached and the edge into it. With no \
+                path within `max_depth`, `found` is false and `farthest` names the symbol `from` \
+                reaches deepest.",
+            "inputSchema": schema(
+                json!({
+                    "from": {
+                        "type": "string",
+                        "description": "Where the path starts: a stable key, or a name as \
+                            `show_symbol` takes it.",
+                    },
+                    "to": {
+                        "type": "string",
+                        "description": "Where the path ends, the same way.",
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "minimum": PATH_MIN_DEPTH,
+                        "maximum": PATH_MAX_DEPTH,
+                        "default": PATH_DEFAULT_DEPTH,
+                        "description": "The most edges walked.",
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "minimum": MAX_TOKENS_MIN,
+                        "maximum": MAX_TOKENS_MAX,
+                        "description": "The most estimated tokens the reply may cost. No hop is \
+                            dropped: a path that does not fit is a `budget_too_small` result.",
+                    },
+                    "repo": { "type": "string", "description": REPO },
+                }),
+                &["from", "to"],
+            ),
+            "annotations": read,
+        }),
+        json!({
             "name": "repo_status",
             "description": "Say whether the index is stale and why: how many files an index \
                 pass would add, rewrite and remove, whether the workspace manifests changed, \
@@ -318,6 +359,14 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
                 }),
                 &[],
             ),
+            "annotations": read,
+        }),
+        json!({
+            "name": "repos",
+            "description": "List this server's roots that have an index: each index's key, its \
+                tree's directory name, whether it is stale, and its file and symbol counts, by \
+                key. No path is given.",
+            "inputSchema": schema(json!({}), &[]),
             "annotations": read,
         }),
     ];
@@ -394,7 +443,11 @@ pub(crate) fn call(
         "repo_map" => run(map_request(arguments, roots), ops::map),
         "cochange" => run(cochange_request(arguments, roots), ops::cochange),
         "diff_impact" => run(diff_request(arguments, roots), ops::impact_diff),
+        "symbol_path" => run(path_request(arguments, roots), ops::symbol_path),
         "repo_status" => run(status_request(arguments, roots), ops::status),
+        "repos" => run(repos_request(arguments, roots), |roots: &Vec<PathBuf>| {
+            ops::registry::roots(roots)
+        }),
         "index_repo" if allow_index => run(index_request(arguments, roots), ops::index),
         _ => return None,
     };
@@ -573,6 +626,40 @@ fn diff_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<DiffReq
         summary,
         max_tokens,
     })
+}
+
+fn path_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<PathRequest, Failure> {
+    let args = Args::new(
+        arguments,
+        &["from", "to", "max_depth", "max_tokens", "repo"],
+    )?;
+    let from = args.required_string("from")?;
+    let to = args.required_string("to")?;
+    let max_depth = args
+        .integer(
+            "max_depth",
+            u64::from(PATH_MIN_DEPTH),
+            u64::from(PATH_MAX_DEPTH),
+        )?
+        // The range above fits in u8.
+        .map_or(PATH_DEFAULT_DEPTH, |depth| depth as u8);
+    let max_tokens = args.max_tokens()?;
+    let repo = args.string("repo")?;
+    Ok(PathRequest {
+        from,
+        to,
+        max_depth,
+        repo: roots.indexed(repo.as_deref())?,
+        max_tokens,
+    })
+}
+
+/// `repos` takes no argument and lists the indexed roots.
+fn repos_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<Vec<PathBuf>, Failure> {
+    if !arguments.is_empty() {
+        return Err(usage("this tool takes no arguments"));
+    }
+    Ok(roots.all().to_vec())
 }
 
 fn status_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<StatusRequest, Failure> {

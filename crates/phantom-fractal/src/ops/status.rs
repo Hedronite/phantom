@@ -128,7 +128,7 @@ fn key(database: &Path) -> String {
 
 /// The tree's directory name, from the stored root, or the key without its
 /// hash when no root is stored or the root has no name.
-fn name(store: &Store, key: &str) -> Result<String, Failure> {
+pub(crate) fn name(store: &Store, key: &str) -> Result<String, Failure> {
     let stored = store.root()?;
     let base = stored.as_deref().map(Path::new).and_then(Path::file_name);
     Ok(match base {

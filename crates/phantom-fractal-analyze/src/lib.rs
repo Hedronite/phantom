@@ -15,6 +15,7 @@
 
 mod estimate;
 mod map;
+mod path;
 mod rank;
 mod risk;
 mod walk;
@@ -25,6 +26,10 @@ pub use estimate::estimate_tokens;
 pub use map::{
     ALSO_CHANGES_MIN_LIFT, ALSO_CHANGES_PARTNERS, Detail, Map, MapError, MapRequest, MapSource,
     packing_budget, render,
+};
+pub use path::{
+    HAS_MEMBER_CONFIDENCE, Hop, PATH_DEFAULT_DEPTH, PATH_MAX_DEPTH, PATH_MIN_DEPTH, PathEdge,
+    PathEdgeKind, PathNode, PathSource, SymbolPath, path,
 };
 pub use rank::{
     Converged, EdgeKind, IMPL_WEIGHT, IMPORT_WEIGHT, Iteration, PRIOR_BOOST, RankEdge, RankNode,
