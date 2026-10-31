@@ -518,7 +518,10 @@ fn tools_list_matches_the_spec_table() {
     assert_eq!(ranked["kind"]["enum"], json!(["symbols", "files"]));
     assert_eq!(ranked["kind"]["default"], "symbols");
     assert_eq!(ranked["focus"]["type"], "array");
-    assert_eq!(ranked["focus"]["items"], json!({ "type": "string" }));
+    assert_eq!(
+        ranked["focus"]["items"],
+        json!({ "type": "string", "maxLength": 4096 })
+    );
     assert_eq!(ranked["focus"]["maxItems"], 100);
     for tool in &all[..6] {
         let max_tokens = &tool["inputSchema"]["properties"]["max_tokens"];

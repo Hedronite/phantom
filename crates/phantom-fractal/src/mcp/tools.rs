@@ -1,12 +1,13 @@
 //! The tools: their definitions, their argument checks, and the
 //! [`crate::ops`] call behind each one (SPEC-w6 G2b, SPEC-w7 G3b, SPEC-w8
-//! G0b, G0c and G3b, SPEC-w9 G0c, G2b and G3b).
+//! G0b, G0c and G3b, SPEC-w9 G0c, G2b and G3b, SPEC-w10 G0b).
 //!
 //! A tool never does an operation's work itself. It turns its arguments
 //! into the request the command line builds for the same flags, calls the
 //! operation, and returns the envelope the command line prints. Its
 //! `repo` is checked against the [`Roots`] last, after every other
-//! argument.
+//! argument. Every string argument has a [`max_length`], in its schema and
+//! in the check, so an over-long one never reaches the store.
 
 use std::path::PathBuf;
 
@@ -18,7 +19,9 @@ use serde_json::{Map, Value, json};
 
 use super::roots::Roots;
 use crate::ops::budget::{MAX_TOKENS_MAX, MAX_TOKENS_MIN};
-use crate::ops::cochange::{self as cochange, DEFAULT_MIN_LIFT, min_lift_in_range};
+use crate::ops::cochange::{
+    self as cochange, DEFAULT_MIN_LIFT, MIN_LIFT_MAX, min_lift_in_range, min_lift_usage,
+};
 use crate::ops::map::{BUDGET_MAX, BUDGET_MIN};
 use crate::ops::rank::{DEFAULT_LIMIT, FOCUS_MAX, LIMIT_MAX, LIMIT_MIN, focus_cap};
 use crate::ops::{
@@ -244,6 +247,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
                     "min_lift": {
                         "type": "number",
                         "minimum": 0,
+                        "maximum": MIN_LIFT_MAX,
                         "default": DEFAULT_MIN_LIFT,
                         "description": "The lowest lift listed.",
                     },
@@ -416,7 +420,21 @@ fn max_tokens() -> Value {
     })
 }
 
-fn schema(properties: Value, required: &[&str]) -> Value {
+/// An input schema. Each string property, and each string item of an
+/// array property, gets its [`max_length`] as `maxLength`.
+fn schema(mut properties: Value, required: &[&str]) -> Value {
+    if let Some(properties) = properties.as_object_mut() {
+        for (name, property) in properties.iter_mut() {
+            let text = if property["type"] == "array" {
+                &mut property["items"]
+            } else {
+                property
+            };
+            if text["type"] == "string" {
+                text["maxLength"] = json!(max_length(name));
+            }
+        }
+    }
     json!({
         "type": "object",
         "properties": properties,
@@ -707,6 +725,27 @@ fn usage(message: &str) -> Failure {
     Failure::new(ErrorKind::Usage, message)
 }
 
+/// The most Unicode scalar values string argument `name`, or each string
+/// of array argument `name`, may hold: 256 for a base, 4096 for a path or
+/// file, and 1024 for anything else.
+fn max_length(name: &str) -> usize {
+    match name {
+        "against" => 256,
+        "file" | "repo" | "path" | "focus" => 4096,
+        _ => 1024,
+    }
+}
+
+/// `text`, or the usage failure for one longer than [`max_length`]. The
+/// message never holds the text.
+fn bounded(name: &str, text: &str) -> Result<String, Failure> {
+    let max = max_length(name);
+    if text.chars().nth(max).is_some() {
+        return Err(usage(&format!("{name} is longer than {max} characters")));
+    }
+    Ok(text.to_owned())
+}
+
 /// A tool's arguments, checked against the names it takes. Messages name
 /// only the tool's own argument names, never a value or key the client
 /// sent.
@@ -729,7 +768,7 @@ impl<'a> Args<'a> {
     fn string(&self, name: &str) -> Result<Option<String>, Failure> {
         match self.map.get(name) {
             None => Ok(None),
-            Some(Value::String(text)) => Ok(Some(text.clone())),
+            Some(Value::String(text)) => bounded(name, text).map(Some),
             Some(_) => Err(usage(&format!("{name} must be a string"))),
         }
     }
@@ -747,20 +786,17 @@ impl<'a> Args<'a> {
         }
     }
 
-    /// An array of strings, or empty when absent.
+    /// An array of strings, each at most [`max_length`], or empty when
+    /// absent.
     fn strings(&self, name: &str) -> Result<Vec<String>, Failure> {
         let Some(value) = self.map.get(name) else {
             return Ok(Vec::new());
         };
-        value
+        let items: Vec<&str> = value
             .as_array()
-            .and_then(|items| {
-                items
-                    .iter()
-                    .map(|item| item.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .ok_or_else(|| usage(&format!("{name} must be an array of strings")))
+            .and_then(|items| items.iter().map(Value::as_str).collect())
+            .ok_or_else(|| usage(&format!("{name} must be an array of strings")))?;
+        items.into_iter().map(|item| bounded(name, item)).collect()
     }
 
     /// An integer from `min` to `max`. A number with no fraction, such as
@@ -791,15 +827,15 @@ impl<'a> Args<'a> {
         Ok(focus)
     }
 
-    /// `min_lift`: a finite number, at least 0, as the command line checks
-    /// it.
+    /// `min_lift`: a finite number from 0 to [`MIN_LIFT_MAX`], as the
+    /// command line checks it.
     fn min_lift(&self) -> Result<Option<f64>, Failure> {
         let Some(value) = self.map.get("min_lift") else {
             return Ok(None);
         };
         match value.as_f64().filter(|number| min_lift_in_range(*number)) {
             Some(number) => Ok(Some(number)),
-            None => Err(usage("min_lift must be a number at least 0")),
+            None => Err(usage(&min_lift_usage())),
         }
     }
 

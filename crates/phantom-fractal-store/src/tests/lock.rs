@@ -6,6 +6,7 @@
 //! child test and a lock path in the environment; the child holds the
 //! lock until the parent kills it. Only tests spawn processes here.
 
+use std::fs;
 use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -261,4 +262,185 @@ fn acquire_refuses_a_broken_chain_like_the_store() {
     assert_eq!(acquired, opened, "{acquired:?}");
     let refused = acquired.as_ref().expect_err("the symlinked dir");
     assert!(refused.contains("DataDirectory"), "{refused}");
+}
+
+/// The store's refusal for a non-regular or swapped lock file, named
+/// by role and never by path.
+fn assert_lock_refusal(err: &StoreError, detail: &str) {
+    match err {
+        StoreError::DataDirectory(role, text) => {
+            assert_eq!(role, "lock file");
+            assert!(text.contains(detail), "{text}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A repo dir with no database, for a bare lock path to meet.
+fn bare_repo(label: &str) -> (TempData, std::path::PathBuf) {
+    let data = TempData::new(label);
+    std::fs::create_dir_all(data.repo_dir()).expect("repo dir");
+    let lock = crate::lock::lock_path(&data.db());
+    (data, lock)
+}
+
+/// The (mtime, mode, bytes) of one plain file, for the not-touched
+/// checks.
+fn file_state(path: &std::path::Path) -> ((i64, i64), u32, Vec<u8>) {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).expect("state");
+    (
+        (meta.mtime(), meta.mtime_nsec()),
+        file_mode(path),
+        fs::read(path).expect("bytes"),
+    )
+}
+
+#[test]
+fn acquire_refuses_a_symlink_and_spares_its_target() {
+    let (data, lock) = bare_repo("roloclink");
+    let target = data.repo_dir().join("scout");
+    std::fs::write(&target, b"the target bytes").expect("target");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))
+            .expect("target mode");
+    }
+    std::os::unix::fs::symlink("scout", &lock).expect("symlink");
+    let before = file_state(&target);
+
+    let refused = WriterLock::acquire(&data.db()).expect_err("refused");
+    assert_lock_refusal(&refused, "symlink or not a regular file");
+    let probed = lock_state(&data.db()).expect_err("refused");
+    assert_lock_refusal(&probed, "symlink or not a regular file");
+
+    // The target is untouched: bytes, mode, and mtime, and the link is
+    // still a link.
+    assert_eq!(before, file_state(&target));
+    let meta = std::fs::symlink_metadata(&lock).expect("link stays");
+    assert!(meta.file_type().is_symlink(), "{meta:?}");
+}
+
+#[test]
+fn acquire_and_lock_state_refuse_a_dangling_symlink() {
+    let (data, lock) = bare_repo("roloclink-dg");
+    std::os::unix::fs::symlink("nowhere", &lock).expect("dangling");
+
+    let refused = WriterLock::acquire(&data.db()).expect_err("refused");
+    assert_lock_refusal(&refused, "symlink or not a regular file");
+    assert!(
+        matches!(lock_state(&data.db()), Err(StoreError::DataDirectory(_, _))),
+        "lock_state answered a dangling link with store refusal"
+    );
+
+    // The dangling target still does not exist, and only the link is
+    // there — nothing was created beyond the refused link itself.
+    assert!(!data.repo_dir().join("nowhere").exists());
+    let mut left: Vec<String> = std::fs::read_dir(data.repo_dir())
+        .expect("repo dir")
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(left, vec!["graph.db.lock".to_owned()], "{left:?}");
+}
+
+#[test]
+fn acquire_refuses_a_directory_at_the_lock_path() {
+    let (data, lock) = bare_repo("rolocdir");
+    std::fs::create_dir(&lock).expect("dir at the lock path");
+    let refused = WriterLock::acquire(&data.db()).expect_err("refused");
+    assert_lock_refusal(&refused, "symlink or not a regular file");
+    let probed = lock_state(&data.db()).expect_err("refused");
+    assert_lock_refusal(&probed, "symlink or not a regular file");
+    // Refused without touching the directory's content.
+    assert!(std::fs::read_dir(&lock).is_ok(), "the dir was disturbed");
+}
+
+#[test]
+fn lock_state_refuses_a_directory_and_a_link_to_one() {
+    // The FIFO case takes the same `is_file()` false a directory or a
+    // link to one takes: both are non-regular entries at the lock
+    // path, and QA plants a real FIFO against the same refusal.
+    let (data, lock) = bare_repo("rolocdir2");
+    let target = data.repo_dir().join("somedir");
+    std::fs::create_dir(&target).expect("target dir");
+    std::os::unix::fs::symlink(&target, &lock).expect("dir link");
+
+    let refused = WriterLock::acquire(&data.db()).expect_err("refused");
+    assert_lock_refusal(&refused, "symlink or not a regular file");
+    let probed = lock_state(&data.db()).expect_err("refused");
+    assert_lock_refusal(&probed, "symlink or not a regular file");
+    // The target directory and its emptiness stay as they were.
+    assert!(std::fs::metadata(&target).expect("target").is_dir());
+    assert!(
+        std::fs::read_dir(&target)
+            .expect("target walk")
+            .next()
+            .is_none(),
+        "the dir was disturbed"
+    );
+}
+
+/// A real FIFO at the lock path (SPEC-w10 G0a's case, per QA's G0-qa
+/// note): refused by `acquire` and by `lock_state` with no hang. The
+/// test's own watchdog fails at two seconds, so a hang is a failing
+/// test rather than an idle seat. The FIFO is planted by the
+/// `mkfifo` CLI in a temp dir, the way the W9 tests plant their git
+/// roots; without the tool the case skips, never fakes.
+#[test]
+fn a_real_fifo_at_the_lock_path_is_refused_without_a_hang() {
+    let (data, lock) = bare_repo("rolocfifo");
+    let planted = Command::new("mkfifo")
+        .arg(&lock)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !planted {
+        eprintln!("skipped: no mkfifo on this runner");
+        return;
+    }
+    assert!(
+        !std::fs::symlink_metadata(&lock)
+            .expect("fifo stays")
+            .is_file(),
+        "mkfifo planted something else"
+    );
+    let db = data.db();
+
+    // Both checks run on a bounded pane; a return past the timeout is
+    // the failure, and neither path may touch the FIFO.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let refused = WriterLock::acquire(&db).expect_err("refused acquire");
+            let _ = tx.send(refused);
+        });
+        let refused = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the FIFO acquire hung");
+        assert_lock_refusal(&refused, "symlink or not a regular file");
+    });
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let refused = lock_state(&db).expect_err("refused state");
+            let _ = tx.send(refused);
+        });
+        let refused = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the FIFO probe hung");
+        assert_lock_refusal(&refused, "symlink or not a regular file");
+    });
+    // The refusal never disturbed the FIFO: still a non-file, and
+    // nothing new appeared beside it.
+    assert!(
+        !std::fs::symlink_metadata(&lock)
+            .expect("fifo stays")
+            .is_file()
+    );
+    let _ = fs::remove_file(&lock);
 }
