@@ -147,7 +147,6 @@ fn an_index_pass_places_every_other_line() {
 }
 
 #[test]
-#[ignore = "needs G2b: the store carries receiver_hint and signature"]
 fn fixture_edges_and_counts_match_expected_exactly() {
     let mut s = setup(FIXTURE);
     let report = run(&mut s);

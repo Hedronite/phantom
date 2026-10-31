@@ -255,8 +255,8 @@ pub(crate) fn insert_calls(
     let mut statement = conn.prepare(
         "INSERT INTO refs(
             file_id, from_symbol, kind, text, last_segment, line, col, scope,
-            receiver, shadowed
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            receiver_hint, receiver, shadowed
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
     )?;
     for reference in &extract.refs {
         statement.execute((
@@ -268,6 +268,7 @@ pub(crate) fn insert_calls(
             i64::from(reference.line),
             i64::from(reference.col),
             &reference.scope,
+            &reference.receiver_type,
             &reference.receiver,
             i64::from(reference.shadowed),
         ))?;
