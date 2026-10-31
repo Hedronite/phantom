@@ -1,0 +1,5 @@
+# Unique-method fixture for SPEC-w10 G3a. Never built or run.
+[package]
+name = "unique"
+version = "0.1.0"
+edition = "2024"
