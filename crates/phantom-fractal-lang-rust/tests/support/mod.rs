@@ -44,7 +44,7 @@ impl Input {
         let target = self.id();
         let name = match kind {
             TargetKind::Lib => package,
-            TargetKind::Bin => root
+            TargetKind::Bin | TargetKind::Test => root
                 .rsplit('/')
                 .next()
                 .unwrap_or(root)
@@ -71,10 +71,20 @@ impl Input {
 
     /// Lets `package` call the lib of workspace package `on`.
     pub fn dep(&mut self, package: &str, on: &str) {
+        self.push_dep(package, on, false);
+    }
+
+    /// Lets the test targets of `package` call the lib of `on`.
+    pub fn dev_dep(&mut self, package: &str, on: &str) {
+        self.push_dep(package, on, true);
+    }
+
+    fn push_dep(&mut self, package: &str, on: &str, dev: bool) {
         self.input.deps.push(Dep {
             package: package.to_owned(),
             on: on.to_owned(),
             crate_name: on.replace('-', "_"),
+            dev,
         });
     }
 

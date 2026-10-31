@@ -30,8 +30,8 @@ pub struct Graph {
     pub packages: Vec<Package>,
     pub targets: Vec<Target>,
     pub modules: Vec<Module>,
-    /// Every module whose declaration carries `#[cfg(test)]`, and every
-    /// module below one, in module order.
+    /// Every module of a `test` target, every module whose declaration
+    /// carries `#[cfg(test)]`, and every module below one, in module order.
     pub test_modules: Vec<Id>,
     /// Kept `.rs` files no target reaches, in walk order.
     pub orphans: Vec<String>,
@@ -44,19 +44,23 @@ pub struct Graph {
 ///   `name = "…"` under `[package]`, or else its directory's name. A second
 ///   package with a name already taken is ignored.
 /// - A package's targets are `src/lib.rs` (lib), `src/main.rs` (bin), and
-///   each `src/bin/*.rs` (bin), when kept.
+///   each `src/bin/*.rs` (bin), when kept. Each `tests/<name>.rs` and
+///   `tests/<dir>/main.rs` is a `test` target named `<name>` or `<dir>`
+///   (SPEC-w11 G1b). Test targets come after every lib and bin, in walk
+///   order, so a lib or bin keeps its id and its modules.
 /// - `mod x;` goes to `x.rs` or `x/mod.rs`. A crate root or `mod.rs` looks
 ///   beside itself; any other `a.rs` looks in `a/`. An inline `mod` is a
 ///   module row on its own file. `#[path]` counts only when it stays inside
 ///   the root and names a kept file.
 /// - A file reached twice keeps its first module.
-/// - A module is a test module when its declaration carries `#[cfg(test)]`
-///   or its parent is a test module.
+/// - A module is a test module when it belongs to a `test` target, its
+///   declaration carries `#[cfg(test)]`, or its parent is a test module.
 pub fn build(manifests: &[Manifest], files: &[SourceFile]) -> Graph {
     let kept: HashMap<&str, &SourceFile> = files.iter().map(|f| (f.path.as_str(), f)).collect();
     let mut graph = Graph::default();
     let mut names = HashSet::new();
     let mut next_target: Id = 1;
+    let mut tests = Vec::new();
     for manifest in manifests {
         let Some(scan) = scan_manifest(&manifest.text) else {
             continue;
@@ -67,13 +71,22 @@ pub fn build(manifests: &[Manifest], files: &[SourceFile]) -> Graph {
             continue;
         }
         for (kind, target_name, root) in targets_of(dir, &name, files) {
-            if kept.contains_key(root.as_str()) {
+            if !kept.contains_key(root.as_str()) {
+                continue;
+            }
+            let target = Target {
+                id: 0,
+                package: name.clone(),
+                name: target_name,
+                kind,
+                root,
+            };
+            if kind == TargetKind::Test {
+                tests.push(target);
+            } else {
                 graph.targets.push(Target {
                     id: next_target,
-                    package: name.clone(),
-                    name: target_name,
-                    kind,
-                    root,
+                    ..target
                 });
                 next_target += 1;
             }
@@ -84,6 +97,19 @@ pub fn build(manifests: &[Manifest], files: &[SourceFile]) -> Graph {
             manifest_path: manifest.path.clone(),
         });
     }
+    for target in tests {
+        graph.targets.push(Target {
+            id: next_target,
+            ..target
+        });
+        next_target += 1;
+    }
+    let test_targets: HashSet<Id> = graph
+        .targets
+        .iter()
+        .filter(|target| target.kind == TargetKind::Test)
+        .map(|target| target.id)
+        .collect();
     let mut tree = Tree {
         kept: &kept,
         modules: Vec::new(),
@@ -97,7 +123,8 @@ pub fn build(manifests: &[Manifest], files: &[SourceFile]) -> Graph {
     // A parent is always pushed before its children.
     let mut tests: HashSet<Id> = HashSet::new();
     for module in &tree.modules {
-        if tree.cfg_test.contains(&module.id)
+        if test_targets.contains(&module.target)
+            || tree.cfg_test.contains(&module.id)
             || module.parent.is_some_and(|parent| tests.contains(&parent))
         {
             tests.insert(module.id);
@@ -161,7 +188,8 @@ fn string_value(line: &str, key: &str) -> Option<String> {
     Some(body[..end].to_owned())
 }
 
-/// The candidate targets of the package in `dir`.
+/// The candidate targets of the package in `dir`: lib, bin, the `src/bin`
+/// bins, then the `tests` targets, each group in walk order.
 fn targets_of(dir: &str, package: &str, files: &[SourceFile]) -> Vec<(TargetKind, String, String)> {
     let src = join(dir, "src");
     let mut out = vec![
@@ -180,6 +208,24 @@ fn targets_of(dir: &str, package: &str, files: &[SourceFile]) -> Vec<(TargetKind
         };
         if !name.is_empty() && !name.contains('/') {
             out.push((TargetKind::Bin, name.to_owned(), file.path.clone()));
+        }
+    }
+    let test_dir = join(dir, "tests");
+    for file in files {
+        let Some(rest) = file
+            .path
+            .strip_prefix(test_dir.as_str())
+            .and_then(|rest| rest.strip_prefix('/'))
+        else {
+            continue;
+        };
+        let name = match rest.split_once('/') {
+            None => rest.strip_suffix(".rs"),
+            Some((name, "main.rs")) => Some(name),
+            Some(_) => None,
+        };
+        if let Some(name) = name.filter(|name| !name.is_empty()) {
+            out.push((TargetKind::Test, name.to_owned(), file.path.clone()));
         }
     }
     out

@@ -86,3 +86,69 @@ fn score() {
     assert!(!no_path, "the report carries an absolute path: {report}");
     println!("{report}");
 }
+
+/// F1 per band: a hand-built export over an indexed two-file package.
+/// The export carries `src/lib.rs` only, so the `local` edge
+/// `caller -> one` is covered and corroborated, and the `path-exact`
+/// edge `two -> one` from `src/out.rs` is neither. Each band holds both
+/// edges, and its covered figure holds the one.
+#[test]
+fn each_band_carries_its_covered_figure() {
+    let temp = Temp::new("bands");
+    let repo = temp.root.join("repo");
+    std::fs::create_dir_all(repo.join("src")).expect("create src");
+    std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"bands\"\n").expect("manifest");
+    std::fs::write(
+        repo.join("src/lib.rs"),
+        "mod out;\npub fn one() {}\npub fn caller() {\n    one();\n}\n",
+    )
+    .expect("lib");
+    std::fs::write(
+        repo.join("src/out.rs"),
+        "pub fn two() {\n    crate::one();\n}\n",
+    )
+    .expect("out");
+    let mut store = Store::open(&temp.db()).expect("open store");
+    index(&repo, &mut store, &RustLanguage::new().expect("grammar")).expect("index");
+
+    let occurrence = |line, first, last, name: &str, is_definition| scip::wire::Occurrence {
+        range: scip::wire::Range {
+            start_line: line,
+            start_character: first,
+            end_line: line,
+            end_character: last,
+        },
+        symbol: format!("rust-analyzer cargo bands 0.0.0 crate#{name}()."),
+        is_definition,
+    };
+    let export = scip::wire::ScipIndex {
+        documents: vec![scip::wire::Document {
+            relative_path: "src/lib.rs".to_owned(),
+            occurrences: vec![
+                occurrence(1, 7, 10, "one", true),
+                occurrence(2, 7, 13, "caller", true),
+                occurrence(3, 4, 7, "one", false),
+            ],
+        }],
+    };
+    let report = scip::score::score(&export, &store).expect("score");
+
+    let band = "{\"edges\":2,\"corroborated\":1,\"precision\":0.5000,\
+                \"covered\":{\"edges\":1,\"corroborated\":1,\"precision\":1.0000}}";
+    let bands = format!("\"confidence\":{{\"0.5\":{band},\"0.85\":{band},\"all\":{band}}}");
+    assert!(report.contains(&bands), "{report}");
+    assert!(
+        report.contains(
+            "\"local\":{\"edges\":1,\"corroborated\":1,\"precision\":1.0000,\
+             \"covered\":{\"edges\":1,\"corroborated\":1,\"precision\":1.0000}}"
+        ),
+        "{report}"
+    );
+    assert!(
+        report.contains(
+            "\"path-exact\":{\"edges\":1,\"corroborated\":0,\"precision\":0.0000,\
+             \"covered\":{\"edges\":0,\"corroborated\":0,\"precision\":0.0000}}"
+        ),
+        "{report}"
+    );
+}

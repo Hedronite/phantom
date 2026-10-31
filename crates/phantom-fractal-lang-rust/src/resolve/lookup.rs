@@ -218,8 +218,9 @@ impl<'a> Index<'a> {
     }
 
     /// The crate names each target may call: every lib its package has a
-    /// `deps` entry for, and, for a bin, its own package's lib. A lib never
-    /// names itself.
+    /// `deps` entry for, and, for a bin or test, its own package's lib. A
+    /// dev entry counts for a test only (SPEC-w11 G1b). A lib never names
+    /// itself.
     fn crate_names(&self, input: &ResolveInput) -> HashMap<Id, HashMap<String, Option<Id>>> {
         let lib_root = |package: &str| {
             input
@@ -234,9 +235,10 @@ impl<'a> Index<'a> {
                 .deps
                 .iter()
                 .filter(|dep| dep.package == target.package && dep.on != target.package)
+                .filter(|dep| !dep.dev || target.kind == TargetKind::Test)
                 .filter_map(|dep| Some((dep.crate_name.clone(), lib_root(&dep.on)?)))
                 .collect();
-            if target.kind == TargetKind::Bin
+            if matches!(target.kind, TargetKind::Bin | TargetKind::Test)
                 && let Some(root) = lib_root(&target.package)
             {
                 callable.push((target.package.replace('-', "_"), root));

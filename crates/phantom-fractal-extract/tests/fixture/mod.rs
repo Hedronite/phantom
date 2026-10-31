@@ -9,7 +9,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 
 use phantom_fractal_extract::{GraphReport, IndexReport, ReasonCounts, index};
-use phantom_fractal_lang::{Id, Reason, ResolveInput, SymbolKind};
+use phantom_fractal_lang::{Id, Reason, ResolveInput, SymbolKind, TargetKind};
 use phantom_fractal_lang_rust::RustLanguage;
 use phantom_fractal_store::Store;
 
@@ -159,7 +159,8 @@ pub fn module_labels(input: &ResolveInput) -> HashMap<Id, String> {
 }
 
 /// Each target's root file stem, as `<package>/<stem>` with more than one
-/// package.
+/// package. A `test` target is `test-<name>`, since `tests/<dir>/main.rs`
+/// shares its stem with a bin.
 fn target_labels(input: &ResolveInput) -> HashMap<Id, String> {
     let first = input.targets.first().map(|t| t.package.as_str());
     let many = input
@@ -171,7 +172,10 @@ fn target_labels(input: &ResolveInput) -> HashMap<Id, String> {
         .iter()
         .map(|t| {
             let stem = Path::new(&t.root).file_stem().and_then(|s| s.to_str());
-            let stem = stem.unwrap_or_default();
+            let stem = match t.kind {
+                TargetKind::Test => format!("test-{}", t.name),
+                _ => stem.unwrap_or_default().to_owned(),
+            };
             let label = if many {
                 format!("{}/{stem}", t.package)
             } else {

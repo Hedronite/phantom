@@ -7,6 +7,8 @@
 #[path = "scip/mod.rs"]
 mod scip;
 
+use phantom_fractal_lang_rust::RustLanguage;
+use phantom_fractal_store::Store;
 use scip::wire::{Range, parse_index};
 
 /// A base-128 varint, per the proto spec.
@@ -240,4 +242,91 @@ fn malformed_wire_fails_never_panics() {
     let empty: Vec<u8> = Vec::new();
     let index_of_nothing = parse_index(&empty).expect("an empty index is legal");
     assert!(index_of_nothing.documents.is_empty());
+}
+
+/// The F2 case (SPEC-w11 G1a): one symbol string is defined in two
+/// documents. A reference in one of the defining documents takes that
+/// document's own mapping — one pair — while a document that defines
+/// nothing falls back to both. The pairs run through the real scorer
+/// against an indexed, three-file store.
+#[test]
+fn a_symbol_defined_in_two_documents_gives_one_pair_per_reference() {
+    use phantom_fractal_store::Store;
+
+    let db = std::env::temp_dir().join(format!("phantom-scip-reader-f2-{}.db", std::process::id()));
+    let raw = {
+        let mut store = Store::open(&db).expect("store");
+        let language = RustLanguage::new().expect("grammar");
+        store
+            .put_source(
+                "src/tee.rs",
+                "pub fn one() {}\npub fn ref_tee() { one(); }\n",
+                0,
+                &language,
+            )
+            .expect("tee");
+        store
+            .put_source("src/two.rs", "pub fn one() {}\n", 0, &language)
+            .expect("two");
+        store
+            .put_source("src/away.rs", "pub fn far() { one(); }\n", 0, &language)
+            .expect("away");
+        drop(language);
+        fixture_score(&mut store).expect("score")
+    };
+    // The scoped truth holds three pairs — tee.rs's reference maps to
+    // the tee.rs `one`, away.rs falls back to both — and every pair's
+    // two files are in the export, so the scoped denominator reads
+    // three all the way down. The buckets still split.
+    assert!(raw.contains("\"truth\":3,\"hits\":0"), "{raw}");
+    assert!(
+        raw.contains("\"unresolved path call\":{\"in_module\":"),
+        "the buckets no longer split: {raw}"
+    );
+}
+
+/// The F2 fixture's export: one symbol string defined in both
+/// `src/tee.rs` and `src/two.rs`, referenced from `src/tee.rs` (its
+/// second fn) and referenced from `src/away.rs`. The occurrence
+/// lines are theonly positions the matcher reads.
+fn fixture_score(store: &mut Store) -> Result<String, String> {
+    let sym = "rust-analyzer cargo phantom 1.0.0 crate#one().";
+    let symbol = || sym.to_owned();
+    let definition = |line: i64, first: i64, last: i64| scip::wire::Occurrence {
+        range: scip::wire::Range {
+            start_line: line,
+            start_character: first,
+            end_line: line,
+            end_character: last,
+        },
+        symbol: symbol(),
+        is_definition: true,
+    };
+    let reference = |line: i64, first: i64, last: i64| scip::wire::Occurrence {
+        range: scip::wire::Range {
+            start_line: line,
+            start_character: first,
+            end_line: line,
+            end_character: last,
+        },
+        symbol: symbol(),
+        is_definition: false,
+    };
+    let documents = scip::wire::ScipIndex {
+        documents: vec![
+            scip::wire::Document {
+                relative_path: "src/tee.rs".to_owned(),
+                occurrences: vec![definition(0, 7, 10), reference(1, 22, 25)],
+            },
+            scip::wire::Document {
+                relative_path: "src/two.rs".to_owned(),
+                occurrences: vec![definition(0, 7, 10)],
+            },
+            scip::wire::Document {
+                relative_path: "src/away.rs".to_owned(),
+                occurrences: vec![reference(0, 18, 21)],
+            },
+        ],
+    };
+    scip::score::score(&documents, store)
 }

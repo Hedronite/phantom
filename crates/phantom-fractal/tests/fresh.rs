@@ -380,7 +380,7 @@ fn status_has_the_spec_keys_and_no_path() {
         );
         assert_eq!(
             data["versions"],
-            json!({ "schema": 3, "extractor": 8, "envelope": 1 })
+            json!({ "schema": 3, "extractor": 9, "envelope": 1 })
         );
         assert_eq!(
             data["epochs"],
@@ -583,7 +583,9 @@ fn index_lists_typed_method_after_crate_path() {
 
 /// An index another extractor version wrote is `extractor_changed` and
 /// stale in `status`, which writes nothing, until the next pass stamps it
-/// again (SPEC-w10 G2c).
+/// again (SPEC-w10 G2c). A stamp-8 index, from the version before test
+/// targets, is refused by reads with the old `no_index`, and `doctor`
+/// reports it as it did a stamp-7 one (SPEC-w11 G1c).
 #[test]
 fn status_flags_an_index_from_another_extractor_version() {
     for git in [false, true] {
@@ -601,12 +603,34 @@ fn status_flags_an_index_from_another_extractor_version() {
                 "{line}"
             );
         };
-        status(false, 8);
-        world.store().set_extractor_version(7).expect("stamp 7");
-        let db = world.db();
-        status(true, 7);
-        assert_eq!(world.db(), db, "git {git}: status wrote");
-        world.index();
-        status(false, 8);
+        let doctor = || {
+            let (_, line) = world.line(&["doctor"]);
+            let env: Value = serde_json::from_str(&line).expect("envelope");
+            let checks = env["data"]["checks"].as_array().expect("checks").clone();
+            checks
+                .into_iter()
+                .filter(|check| check["name"] == "extractor" || check["name"] == "databases")
+                .collect::<Vec<_>>()
+        };
+        status(false, 9);
+        let fresh = doctor();
+        let extractor = fresh.iter().find(|check| check["name"] == "extractor");
+        assert_eq!(extractor.expect("extractor")["detail"], "9", "git {git}");
+        for stamp in [7, 8] {
+            world.store().set_extractor_version(stamp).expect("stamp");
+            let db = world.db();
+            status(true, stamp);
+            let (code, line) = world.line(&["callers", "deep"]);
+            assert_eq!(code, Some(2), "git {git} stamp {stamp}: {line}");
+            assert_eq!(
+                line,
+                r#"{"ok":false,"data":null,"error":{"kind":"no_index","message":"the index has no call edges; run index again","exit":2},"schema":1}"#,
+                "git {git} stamp {stamp}"
+            );
+            assert_eq!(doctor(), fresh, "git {git} stamp {stamp}");
+            assert_eq!(world.db(), db, "git {git} stamp {stamp}: a read wrote");
+            world.index();
+            status(false, 9);
+        }
     }
 }

@@ -87,6 +87,8 @@ impl crate::Store {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SymbolSpan {
     pub id: i64,
+    /// The file's row id, what `file_has_module` and the scorer use.
+    pub file_id: i64,
     /// The file's path, repo-relative.
     pub path: String,
     /// Lowercase stored kind: `function` for a `fn`, `method` for a
@@ -119,7 +121,8 @@ impl crate::Store {
     /// Every symbol's span, for the scorer's innermost-span matching.
     pub fn symbol_spans(&self) -> Result<Vec<SymbolSpan>, StoreError> {
         let mut statement = self.conn.prepare(
-            "SELECT s.id, f.path, s.kind, s.name, s.start_line, s.end_line, s.is_test
+            "SELECT s.id, s.file_id, f.path, s.kind, s.name, s.start_line, s.end_line,
+                    s.is_test
              FROM symbols s
              JOIN files f ON f.id = s.file_id
              ORDER BY s.id",
@@ -129,15 +132,28 @@ impl crate::Store {
         while let Some(row) = rows.next()? {
             out.push(SymbolSpan {
                 id: row.get(0)?,
-                path: row.get(1)?,
-                kind: row.get(2)?,
-                name: row.get(3)?,
-                start_line: row.get(4)?,
-                end_line: row.get(5)?,
-                is_test: row.get::<_, i64>(6)? != 0,
+                file_id: row.get(1)?,
+                path: row.get(2)?,
+                kind: row.get(3)?,
+                name: row.get(4)?,
+                start_line: row.get(5)?,
+                end_line: row.get(6)?,
+                is_test: row.get::<_, i64>(7)? != 0,
             });
         }
         Ok(out)
+    }
+
+    /// True when the `modules` table carries a row for `file_id` —
+    /// the file is claimed by some target. A file that answers false
+    /// is an orphan at the store level (SPEC-w11 G1a).
+    pub fn file_has_module(&self, file_id: i64) -> Result<bool, StoreError> {
+        let claimed: i64 = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM modules WHERE file_id = ?1)",
+            [file_id],
+            |row| row.get(0),
+        )?;
+        Ok(claimed != 0)
     }
 
     /// Every call-shaped ref named under `id`, oldest first, with

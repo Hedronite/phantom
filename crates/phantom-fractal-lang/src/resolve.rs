@@ -25,7 +25,8 @@ pub struct ResolveInput {
 }
 
 /// Package `package` may call the lib of workspace package `on`, written
-/// as `crate_name`.
+/// as `crate_name`. A dev-dependency is callable from test targets only
+/// (SPEC-w11 G1b).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dep {
     /// The calling package's name.
@@ -34,6 +35,8 @@ pub struct Dep {
     pub on: String,
     /// The first path segment a caller writes: `on` with `-` turned to `_`.
     pub crate_name: String,
+    /// True for a `[dev-dependencies]` entry.
+    pub dev: bool,
 }
 
 /// One compilation target of a package.
@@ -42,7 +45,8 @@ pub struct Target {
     pub id: Id,
     /// The package name from its `Cargo.toml`.
     pub package: String,
-    /// The target name: the package name for a lib, or the bin's name.
+    /// The target name: the package name for a lib, the bin's name, or a
+    /// test's file or directory name.
     pub name: String,
     pub kind: TargetKind,
     /// The crate root file, such as `src/lib.rs`.
@@ -54,6 +58,8 @@ pub struct Target {
 pub enum TargetKind {
     Lib,
     Bin,
+    /// An integration test: `tests/<name>.rs` or `tests/<dir>/main.rs`.
+    Test,
 }
 
 /// One module of a target: a file module or an inline `mod`.
