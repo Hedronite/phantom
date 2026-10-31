@@ -4,7 +4,13 @@ Phantom is a Rust code-graph engine.
 
 Pre-release. Version 0.0.0. Nothing here is published from this tree.
 
-The crates build on unix only. There is no Windows build.
+## Platforms
+
+Phantom is built and tested on macOS and on Linux, x86_64 and aarch64.
+
+- The writer lock's identity check, which matches the opened lock file's device and inode against the file checked before the open, applies on Unix only.
+- So do the kernel flags the lock file is opened with, `O_NOFOLLOW` and `O_NONBLOCK`, each fixed per target from its system header.
+- Windows is not supported. The crates build on Unix only, and there is no Windows build.
 
 ## What works today
 
@@ -145,7 +151,7 @@ Any other form gives no dependency: a `[dependencies.B]` table, a version-only l
 
 #### Measured
 
-On Phantom's own tree at commit `3c438e0`, against a SCIP index from rust-analyzer 1.95.0: an edge is corroborated when rust-analyzer has the same caller and callee, and recall is the share of rust-analyzer's distinct caller and callee pairs that Phantom has as an edge.
+On Phantom's own tree at commit `b4e418c`, against a SCIP index from rust-analyzer 1.95.0: an edge is corroborated when rust-analyzer has the same caller and callee, and recall is the share of rust-analyzer's distinct caller and callee pairs that Phantom has as an edge.
 
 | Measure | Edges | Corroborated | Precision |
 |---|---|---|---|
