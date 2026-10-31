@@ -89,6 +89,8 @@ pub struct Symbol {
     /// The module the symbol is declared in, or none for an orphan file.
     pub module: Option<Id>,
     pub file: String,
+    /// The stored signature text, as [`crate::Item::signature`] gives it.
+    pub signature: Option<String>,
 }
 
 /// The kinds of [`Symbol`]: every [`ItemKind`], plus methods.
@@ -147,6 +149,9 @@ pub struct CallRef {
     /// The receiver text of a method call as stored, such as `self`; none
     /// for other kinds.
     pub receiver: Option<String>,
+    /// The receiver's type hint as stored, as
+    /// [`crate::Reference::receiver_type`] gives it; none without one.
+    pub receiver_type: Option<String>,
     pub shadowed: bool,
 }
 
@@ -184,6 +189,29 @@ pub enum Reason {
     /// The first segment is the crate name of a workspace lib the caller's
     /// package may call.
     CratePath,
+    /// `x.m()` where `x` has a type hint naming one workspace struct or
+    /// enum, to the one method `m` of that type (SPEC-w10 G2a).
+    TypedMethod,
+    /// `x.m()` with no placed hint, to the one workspace method named `m`
+    /// (SPEC-w10 G3a).
+    UniqueMethod,
+}
+
+impl Reason {
+    /// The store's `edges.reason` text.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PathExact => "path-exact",
+            Self::Local => "local",
+            Self::UseAlias => "use-alias",
+            Self::Assoc => "assoc",
+            Self::SelfMethod => "self-method",
+            Self::SelfAssoc => "self-assoc",
+            Self::CratePath => "crate-path",
+            Self::TypedMethod => "typed-method",
+            Self::UniqueMethod => "unique-method",
+        }
+    }
 }
 
 /// What one resolve pass did with the call references it saw.
@@ -197,7 +225,7 @@ pub struct ResolveCounts {
     pub external: u64,
     /// Calls outside any function.
     pub no_source: u64,
-    /// Method-call references, counted and never resolved.
+    /// Method calls on a receiver other than `self` that got no edge.
     pub method_calls: u64,
     /// Macro references, counted and never resolved.
     pub macros: u64,

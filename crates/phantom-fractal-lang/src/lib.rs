@@ -87,6 +87,13 @@ pub struct Reference {
     /// The receiver expression of a [`RefKind::MethodCall`], whitespace
     /// removed.
     pub receiver: Option<String>,
+    /// The receiver's type hint (SPEC-w10 G2a), for a [`RefKind::MethodCall`]
+    /// whose receiver is a plain identifier: `type:T`, `ctor:T::f` or
+    /// `ctor?:T::f`, from the nearest binding of the identifier before the
+    /// call. `T` is the path as written, without generic arguments, with
+    /// `Self` replaced by the impl's self type. None for any other binding,
+    /// receiver or kind.
+    pub receiver_type: Option<String>,
     /// True for a single-segment [`RefKind::Call`] whose name is bound
     /// anywhere in the enclosing function: by `let`, a parameter, a closure
     /// parameter, a `match` arm, a `for`, `if let`, or `while let` pattern,

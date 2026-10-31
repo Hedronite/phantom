@@ -115,6 +115,7 @@ impl Input {
             scope: scope.to_owned(),
             module: None,
             file: file.to_owned(),
+            signature: None,
         });
         id
     }
@@ -192,6 +193,7 @@ impl Input {
             kind,
             text: text.to_owned(),
             receiver: None,
+            receiver_type: None,
             shadowed: false,
         });
         id
@@ -211,6 +213,25 @@ impl Input {
         let id = self.call_in(from, "src/lib.rs", "", name, RefKind::MethodCall);
         self.input.refs.last_mut().expect("ref").receiver = Some(receiver.to_owned());
         id
+    }
+
+    /// A method call `receiver.name()` in `src/lib.rs` with the receiver
+    /// type hint `hint`.
+    pub fn typed_call(&mut self, from: Id, receiver: &str, name: &str, hint: &str) -> Id {
+        let id = self.method_call(Some(from), receiver, name);
+        self.input.refs.last_mut().expect("ref").receiver_type = Some(hint.to_owned());
+        id
+    }
+
+    /// Sets the stored signature of symbol `id`.
+    pub fn signature(&mut self, id: Id, signature: &str) {
+        let symbol = self
+            .input
+            .symbols
+            .iter_mut()
+            .find(|symbol| symbol.id == id)
+            .expect("symbol");
+        symbol.signature = Some(signature.to_owned());
     }
 
     pub fn resolve(&self) -> (Vec<Edge>, ResolveCounts) {

@@ -379,7 +379,7 @@ fn status_has_the_spec_keys_and_no_path() {
         );
         assert_eq!(
             data["versions"],
-            json!({ "schema": 3, "extractor": 7, "envelope": 1 })
+            json!({ "schema": 3, "extractor": 8, "envelope": 1 })
         );
         assert_eq!(
             data["epochs"],

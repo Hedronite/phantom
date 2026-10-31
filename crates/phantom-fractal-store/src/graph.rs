@@ -110,6 +110,8 @@ pub(crate) fn reason_from_text(reason: &str) -> Result<Reason, StoreError> {
         "self-method" => Ok(Reason::SelfMethod),
         "self-assoc" => Ok(Reason::SelfAssoc),
         "crate-path" => Ok(Reason::CratePath),
+        "typed-method" => Ok(Reason::TypedMethod),
+        "unique-method" => Ok(Reason::UniqueMethod),
         other => Err(StoreError::UnknownReason(other.to_owned())),
     }
 }
@@ -123,6 +125,8 @@ pub(crate) fn reason_to_text(reason: Reason) -> &'static str {
         Reason::SelfMethod => "self-method",
         Reason::SelfAssoc => "self-assoc",
         Reason::CratePath => "crate-path",
+        Reason::TypedMethod => "typed-method",
+        Reason::UniqueMethod => "unique-method",
     }
 }
 
@@ -331,6 +335,7 @@ impl crate::Store {
                     scope: row.get(6)?,
                     module: row.get(7)?,
                     file: row.get(8)?,
+                    signature: None,
                 });
             }
         }
@@ -376,6 +381,7 @@ impl crate::Store {
                     kind: rows::ref_kind_from_text(&row.get::<_, String>(5)?)?,
                     text: row.get(6)?,
                     receiver: row.get(7)?,
+                    receiver_type: None,
                     shadowed: row.get::<_, i64>(8)? != 0,
                 });
             }

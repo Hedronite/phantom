@@ -133,7 +133,7 @@ fn the_line_is_the_spec_envelope() {
         phantom_fractal_proto::SCHEMA_VERSION,
     );
     assert_eq!(line, want);
-    assert_eq!(env["data"]["extractor_version"], 7, "{env}");
+    assert_eq!(env["data"]["extractor_version"], 8, "{env}");
     assert_eq!(env["data"]["store_schema"], 3, "{env}");
     assert_eq!(env["schema"], 1, "{env}");
 }

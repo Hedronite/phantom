@@ -357,6 +357,88 @@ impl<'a> Index<'a> {
         (self.target_of(candidate)? == self.target_of(method)?).then_some(*one)
     }
 
+    /// Places a method call `x.m()` by the receiver hint `hint` (SPEC-w10
+    /// G2a): the hint's type, found from the call's module by the type
+    /// lookup the `self-method` and `assoc` tiers use, must be exactly one
+    /// workspace struct or enum, and the edge goes to its one method named
+    /// `m`, inherent or trait impl, as [`Self::owner_of`] pairs them.
+    ///
+    /// `type:T` names `T`. `ctor:T::f` names `T` when `f` is the one
+    /// inherent method `T::f` and its signature returns `Self` or `T`;
+    /// `ctor?:T::f` when it returns `Result` or `Option` of `Self` or `T`.
+    /// Anything else places nothing.
+    pub(crate) fn place_typed(&self, call: &CallRef, hint: &str) -> Option<Id> {
+        let module = self.place_of(&call.file, &call.scope)?;
+        let name = segments(&call.text)?.pop()?;
+        let ty = match hint.split_once(':')? {
+            ("type", path) => self.data_type(module, &segments(path)?)?,
+            ("ctor", path) => self.constructed(module, path, false)?,
+            ("ctor?", path) => self.constructed(module, path, true)?,
+            _ => return None,
+        };
+        let methods: Vec<Id> = self
+            .by_type
+            .get(&(ty, name.as_str()))?
+            .iter()
+            .copied()
+            .filter(|method| {
+                self.symbols
+                    .get(method)
+                    .and_then(|method| self.owner_of(method))
+                    == Some(ty)
+            })
+            .collect();
+        match methods[..] {
+            [one] => Some(one),
+            _ => None,
+        }
+    }
+
+    /// The type `T` of a `ctor` hint `T::f`, when `f` is the one inherent
+    /// method of `T` so named and returns `Self` or `T`, or with `tried` a
+    /// `Result` or `Option` of one.
+    fn constructed(&self, module: Id, path: &str, tried: bool) -> Option<Id> {
+        let mut segs = segments(path)?;
+        let name = segs.pop()?;
+        let ty = self.data_type(module, &segs)?;
+        let methods: Vec<Id> = self
+            .inherent
+            .get(name.as_str())?
+            .iter()
+            .filter(|(_, owner)| *owner == ty)
+            .map(|(method, _)| *method)
+            .collect();
+        let [one] = methods[..] else {
+            return None;
+        };
+        let method = self.symbols.get(&one)?;
+        let returned = return_type(method.signature.as_deref()?)?;
+        let returned = if tried { ok_type(&returned)? } else { returned };
+        if returned == "Self" {
+            return Some(ty);
+        }
+        let home = self.place_of(&method.file, &method.scope)?;
+        (self.data_type(home, &segments(&returned)?)? == ty).then_some(ty)
+    }
+
+    /// The one struct or enum `segs` names from `module`, by the walk
+    /// [`Self::owner_type`] uses.
+    fn data_type(&self, module: Id, segs: &[String]) -> Option<Id> {
+        let walked = self.walk(module, segs, 0, false).ok()?;
+        let types: Vec<Id> = walked
+            .entities
+            .iter()
+            .filter_map(|entity| match entity {
+                Entity::Symbol(id) if self.is_type(*id) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        match types[..] {
+            [ty] if self.is_data_type(ty) => Some(ty),
+            _ => None,
+        }
+    }
+
     /// The struct or enum `method` belongs to: the one type its impl self
     /// type resolves to, as [`Self::place_self`] finds it, when that type is
     /// declared in the method's own target. No method is picked by name.
@@ -642,6 +724,58 @@ fn bound_name(binding: &UseBinding) -> Option<&str> {
 
 fn last_segment(path: &str) -> &str {
     path.rsplit("::").next().unwrap_or(path)
+}
+
+/// The return type in a stored signature, whitespace removed: the text
+/// after the first `->` outside brackets, up to a `where` clause. None
+/// without one.
+fn return_type(signature: &str) -> Option<String> {
+    let mut depth = 0_usize;
+    let mut chars = signature.char_indices().peekable();
+    while let Some((at, ch)) = chars.next() {
+        match ch {
+            '-' if chars.peek().is_some_and(|(_, next)| *next == '>') => {
+                chars.next();
+                if depth == 0 {
+                    let rest = &signature[at + 2..];
+                    let rest = rest.split(" where ").next().unwrap_or(rest);
+                    let text: String = rest.split_whitespace().collect();
+                    return (!text.is_empty()).then_some(text);
+                }
+            }
+            '(' | '[' | '<' => depth += 1,
+            ')' | ']' | '>' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `X` for `Result<X, ..>` or `Option<X>`, by the outer type's last path
+/// segment.
+fn ok_type(returned: &str) -> Option<String> {
+    let (outer, inner) = returned.split_once('<')?;
+    let inner = inner.strip_suffix('>')?;
+    let mut depth = 0_usize;
+    let mut arguments = vec![String::new()];
+    for ch in inner.chars() {
+        match ch {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                arguments.push(String::new());
+                continue;
+            }
+            _ => {}
+        }
+        if let Some(last) = arguments.last_mut() {
+            last.push(ch);
+        }
+    }
+    match (last_segment(outer), &arguments[..]) {
+        ("Result", [ok, ..]) | ("Option", [ok]) if !ok.is_empty() => Some(ok.clone()),
+        _ => None,
+    }
 }
 
 /// Unresolved beats external: a binding that names the workspace but

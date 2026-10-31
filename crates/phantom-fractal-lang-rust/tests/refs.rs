@@ -30,6 +30,7 @@ struct Want<'a> {
     scope: &'a str,
     from: Option<Caller>,
     receiver: Option<&'a str>,
+    receiver_type: Option<&'a str>,
     shadowed: bool,
 }
 
@@ -44,6 +45,7 @@ impl Want<'_> {
             scope: self.scope.to_owned(),
             from: self.from.clone(),
             receiver: self.receiver.map(str::to_owned),
+            receiver_type: self.receiver_type.map(str::to_owned),
             shadowed: self.shadowed,
         }
     }
@@ -58,6 +60,7 @@ fn call<'a>(text: &'a str, last: &'a str, at: (u32, u32), from: Option<Caller>) 
         scope: "",
         from,
         receiver: None,
+        receiver_type: None,
         shadowed: false,
     }
 }

@@ -68,7 +68,7 @@ pub(crate) fn collect(function: Node<'_>, src: &[u8]) -> HashSet<String> {
 /// Adds the identifiers a pattern binds. Paths and the type of a struct or
 /// tuple-struct pattern bind nothing. A bare identifier always counts, even
 /// when it names a unit variant or a constant.
-fn bind_pattern(pattern: Node<'_>, src: &[u8], names: &mut HashSet<String>) {
+pub(crate) fn bind_pattern(pattern: Node<'_>, src: &[u8], names: &mut HashSet<String>) {
     let mut stack = vec![pattern];
     while let Some(node) = stack.pop() {
         match node.kind() {

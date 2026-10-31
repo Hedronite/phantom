@@ -30,7 +30,7 @@ use fingerprint::{Unread, read_manifests, stamp};
 pub use diff::{ChangedSymbol, Diff, DiffError, FileOnly, diff, symbol_keys};
 pub use fresh::{Freshness, probe};
 pub use read::{Source, read_source};
-pub use rebuild::{stored_graph, stored_links, stored_method_owners};
+pub use rebuild::{stored_graph, stored_input, stored_links, stored_method_owners};
 pub use walk::{Candidate, MAX_FILE_BYTES, SkipReason, Skipped, Walk, is_secret, walk};
 
 /// Version of the extraction this walker writes, stored after each graph
@@ -40,8 +40,9 @@ pub use walk::{Candidate, MAX_FILE_BYTES, SkipReason, Skipped, Walk, is_secret, 
 /// `self-method` and `self-assoc` edges; version 4 adds `crate-path` edges;
 /// version 5 adds `macro_arg` refs and test marking; version 6 adds the
 /// end line, signature, and doc summary of items and methods; version 7
-/// adds the `import` and `impl` links.
-pub const EXTRACTOR_VERSION: u32 = 7;
+/// adds the `import` and `impl` links; version 8 adds receiver type hints
+/// and the `typed-method` edges.
+pub const EXTRACTOR_VERSION: u32 = 8;
 
 /// What one [`index`] pass did, by repo-relative path, in walk order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -72,7 +73,7 @@ pub struct GraphReport {
     pub edges_by_reason: ReasonCounts,
 }
 
-/// Edges placed for each of the seven reasons, zero included.
+/// Edges placed for each of the nine reasons, zero included.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReasonCounts {
     pub path_exact: u64,
@@ -82,11 +83,13 @@ pub struct ReasonCounts {
     pub self_method: u64,
     pub self_assoc: u64,
     pub crate_path: u64,
+    pub typed_method: u64,
+    pub unique_method: u64,
 }
 
 impl ReasonCounts {
     /// Every reason in declaration order.
-    pub const REASONS: [Reason; 7] = [
+    pub const REASONS: [Reason; 9] = [
         Reason::PathExact,
         Reason::Local,
         Reason::UseAlias,
@@ -94,6 +97,8 @@ impl ReasonCounts {
         Reason::SelfMethod,
         Reason::SelfAssoc,
         Reason::CratePath,
+        Reason::TypedMethod,
+        Reason::UniqueMethod,
     ];
 
     /// The count of each reason among `edges`.
@@ -120,6 +125,8 @@ impl ReasonCounts {
             Reason::SelfMethod => &mut self.self_method,
             Reason::SelfAssoc => &mut self.self_assoc,
             Reason::CratePath => &mut self.crate_path,
+            Reason::TypedMethod => &mut self.typed_method,
+            Reason::UniqueMethod => &mut self.unique_method,
         }
     }
 }
