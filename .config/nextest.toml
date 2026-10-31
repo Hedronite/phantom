@@ -21,3 +21,9 @@ exclusive-fs = { max-threads = 1 }
 # [[profile.ci.overrides]]
 # filter = 'test(exclusive_fs)'
 # group = "exclusive-fs"
+
+# The 20,000-statement receiver-hint bound test (SPEC-w11 G0b) asserts its
+# own 25 s guard; give it room past that on a shared CI runner.
+[[profile.ci.overrides]]
+filter = 'binary(hint_bound) & test(=a_20000_statement_function_keeps_the_walk_bounded)'
+slow-timeout = { period = "30s", terminate-after = 2 }
