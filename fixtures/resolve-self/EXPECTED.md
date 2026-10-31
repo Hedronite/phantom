@@ -33,12 +33,15 @@ before a method's name. The only target is `lib` (`src/lib.rs`). Each line is
 - `lib:crate::Counter::bump -> lib:crate::Counter::check self-method`
 - `lib:crate::Counter::bump -> lib:crate::Counter::describe self-method`
 - `lib:crate::Counter::bump -> lib:crate::Counter::new self-assoc`
+- `lib:crate::Counter::bump -> lib:crate::Inner::tick unique-method`
+- `lib:crate::Counter::bump -> lib:crate::Inner::tick unique-method`
 - `lib:crate::Counter::describe -> lib:crate::Counter::check self-method`
 - `lib:crate::Counter::unclear -> lib:crate::Counter::check self-method`
 - `lib:crate::Wrap::peek -> lib:crate::Wrap::get self-method`
 - `lib:crate::entry -> lib:crate::Counter::new assoc`
 - `lib:crate::entry -> lib:crate::Counter::new assoc`
 - `lib:crate::entry -> lib:crate::Counter::check typed-method`
+- `lib:crate::entry -> lib:crate::Counter::bump unique-method`
 - `lib:crate::shapes::Shape::describe -> lib:crate::shapes::Shape::area self-method`
 - `lib:crate::shapes::Plot::describe -> lib:crate::shapes::Plot::area self-method`
 - `lib:crate::shapes::Plot::describe -> lib:crate::shapes::Plot::area self-assoc`
@@ -59,13 +62,15 @@ The edges above cover these cases:
 - **Generic impl:** `impl<T> Wrap<T>` resolves to `Wrap`.
 - **W3 assoc:** the two `Counter::new()` calls in `entry` keep their W3 `assoc` edge.
 - **Typed method (W10):** `counter.check()` in `entry` reaches `Counter::check` at 0.8, through `let counter = Counter::new();`, whose `new` returns `Self`.
+- **Unique method (W10),** each at 0.5 by `unique-method`: the receiver has no hint, the name is defined by one workspace method, and it is not on `STD_METHOD_NAMES`:
+  - `self.inner.tick()` in `Counter::bump` reaches `Inner::tick`: a field receiver has no hint.
+  - `other.tick()` in `Counter::bump` reaches `Inner::tick`: `let other = Inner;` is a unit-struct value, no hint row.
+  - `Counter::new().bump()` in `entry` reaches `Counter::bump`: a call receiver has no hint.
 
 ## No edge
 
 | Call | In | Why |
 |---|---|---|
-| `self.inner.tick()` | `Counter::bump` | `self.field.m()`: a method call on a value. |
-| `other.tick()` | `Counter::bump` | `x.m()`: a method call on a value. |
 | `self.describe()` | trait default `Describe::provided` | A trait default body has no symbol: unresolved. |
 | `self.both()` | `Counter::unclear` | An inherent `both` and `impl Describe`'s `both`: two candidates. |
 | `self.provided()` | `Counter::unclear` | Only the trait's provided default has it: no candidate. |
@@ -74,15 +79,14 @@ The edges above cover these cases:
 | `Self::Circle(1.0)` | `Shape::unit` | A variant, not a method: unresolved. |
 | `self.m()` | `twins::Gate::open` | Two `#[cfg]` impls of `m`: two candidates. |
 | `Self::m(self)` | `twins::Gate::open` | The same two candidates. |
-| `Counter::new().bump()` | `entry` | A method call on a value. |
 
 ## Counts
 
-- edges: 14
+- edges: 17
 - unresolved: 7
 - external: 1
 - no_source: 0
-- method_calls: 3
+- method_calls: 0
 - macros: 0
 - modules: 3
 - orphans: 0

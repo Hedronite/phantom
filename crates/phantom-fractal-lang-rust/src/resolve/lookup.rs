@@ -16,6 +16,7 @@ use phantom_fractal_lang::{
 };
 
 use super::segments;
+use crate::STD_METHOD_NAMES;
 
 /// How deep `use` chains are followed before a lookup gives up.
 const MAX_DEPTH: u32 = 8;
@@ -127,6 +128,8 @@ pub(crate) struct Index<'a> {
     /// `(struct or enum, name)` to every method, inherent or trait impl,
     /// whose owner resolves to that one type.
     by_type: HashMap<(Id, &'a str), Vec<Id>>,
+    /// Method name to every method of that name in the workspace.
+    by_name: HashMap<&'a str, Vec<Id>>,
     /// Target to the crate names it may call, each to that lib's root
     /// module, or none when two libs share the name.
     crates: HashMap<Id, HashMap<String, Option<Id>>>,
@@ -144,6 +147,7 @@ impl<'a> Index<'a> {
             uses: HashMap::new(),
             inherent: HashMap::new(),
             by_type: HashMap::new(),
+            by_name: HashMap::new(),
             crates: HashMap::new(),
         };
         for module in &input.modules {
@@ -164,6 +168,11 @@ impl<'a> Index<'a> {
         }
         for symbol in &input.symbols {
             if symbol.kind == SymbolKind::Method {
+                index
+                    .by_name
+                    .entry(symbol.name.as_str())
+                    .or_default()
+                    .push(symbol.id);
                 continue;
             }
             if let Some(module) = index.place_of(&symbol.file, &symbol.scope) {
@@ -390,6 +399,20 @@ impl<'a> Index<'a> {
             .collect();
         match methods[..] {
             [one] => Some(one),
+            _ => None,
+        }
+    }
+
+    /// Places a method call `x.m()` that has no receiver hint (SPEC-w10
+    /// G3a, D6): `m` must be the name of exactly one method in the whole
+    /// workspace, and not on [`STD_METHOD_NAMES`].
+    pub(crate) fn place_unique(&self, call: &CallRef) -> Option<Id> {
+        let name = segments(&call.text)?.pop()?;
+        if STD_METHOD_NAMES.binary_search(&name.as_str()).is_ok() {
+            return None;
+        }
+        match self.by_name.get(name.as_str())?.as_slice() {
+            [one] => Some(*one),
             _ => None,
         }
     }

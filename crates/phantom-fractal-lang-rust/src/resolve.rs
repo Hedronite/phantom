@@ -16,10 +16,11 @@
 //! | `SelfAssoc` | 0.9 | `Self::m()` in an impl method to the one `m` of its self type. |
 //! | `CratePath` | 0.95 | The path enters a workspace lib the caller may call by crate name. |
 //! | `TypedMethod` | 0.8 | `x.m()` whose receiver hint names one workspace type, to its one `m`. |
+//! | `UniqueMethod` | 0.5 | `x.m()` with no hint, to the one workspace method `m`, unless `m` is a common standard name. |
 //!
-//! A method call on a receiver other than `self` is placed only through its
-//! receiver hint (SPEC-w10 G2a); one with no hint, or a hint that places
-//! nothing, is counted. Trait dispatch, glob imports, and calls into
+//! A method call on a receiver other than `self` is placed through its
+//! receiver hint (SPEC-w10 G2a), or, with no hint, by its name alone
+//! (SPEC-w10 G3a); one that neither places is counted. Trait dispatch, glob imports, and calls into
 //! crates outside the workspace are never resolved.
 
 mod lookup;
@@ -60,11 +61,15 @@ pub fn resolve(input: &ResolveInput) -> (Vec<Edge>, ResolveCounts) {
     for call in &input.refs {
         let (source, placed) = match call.kind {
             RefKind::MethodCall if call.receiver.as_deref() != Some("self") => {
-                let typed = call.from.zip(call.receiver_type.as_deref());
-                match typed
-                    .and_then(|(source, hint)| Some((source, index.place_typed(call, hint)?)))
-                {
-                    Some((source, target)) => (source, Placed::Edge(target, Reason::TypedMethod)),
+                let placed = call.from.and_then(|source| {
+                    let placed = match call.receiver_type.as_deref() {
+                        Some(hint) => (index.place_typed(call, hint)?, Reason::TypedMethod),
+                        None => (index.place_unique(call)?, Reason::UniqueMethod),
+                    };
+                    Some((source, placed))
+                });
+                match placed {
+                    Some((source, (target, reason))) => (source, Placed::Edge(target, reason)),
                     None => {
                         counts.method_calls += 1;
                         continue;

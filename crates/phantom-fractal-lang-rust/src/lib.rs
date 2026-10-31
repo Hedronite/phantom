@@ -19,10 +19,12 @@ mod macro_args;
 mod receivers;
 mod resolve;
 mod scan;
+mod std_methods;
 
 use phantom_fractal_lang::{Extract, ExtractError, Item, ItemKind, Language, Visibility};
 
 pub use resolve::{confidence, links, method_owners, resolve, resolve_graph};
+pub use std_methods::STD_METHOD_NAMES;
 use tree_sitter::{Node, Parser, Query, QueryCursor, QueryMatch, StreamingIterator};
 
 const QUERY: &str = include_str!("../queries/extract.scm");

@@ -94,7 +94,7 @@ fn a_deleted_file_loses_its_rows_and_edges() {
     let edges = stored_edges(&s.store);
     assert!(!edges.iter().any(|edge| edge.contains("sink")), "{edges:?}");
     let graph = graph(&report);
-    assert_eq!(graph.counts.edges, 20);
+    assert_eq!(graph.counts.edges, 21);
     assert_eq!(graph.modules, 10);
     // `deep::sink()` in `util::helper` now names a module with no file.
     assert_eq!(graph.counts.unresolved, 9);
