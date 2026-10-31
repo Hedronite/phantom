@@ -13,7 +13,7 @@ use phantom_fractal_lang::{Caller, Extract, Method, ModDecl, RefKind, Reference,
 use tree_sitter::Node;
 
 use crate::macro_args::call_shapes;
-use crate::{at_module_scope, attrs, bindings, compact, detail, start_line, visibility};
+use crate::{at_module_scope, attrs, bindings, compact, detail, receivers, start_line, visibility};
 
 /// What a node inherits from its ancestors.
 struct Context {
@@ -111,6 +111,7 @@ fn visit(node: Node<'_>, src: &[u8], context: Rc<Context>, out: &mut Extract) ->
                     last_segment: shape.last_segment,
                     at: shape.at,
                     receiver: None,
+                    receiver_type: None,
                     single_segment: false,
                 };
                 out.refs.push(reference(callee, false, &context));
@@ -129,6 +130,8 @@ struct Callee<'tree> {
     /// The node whose start is the reference's position.
     at: Node<'tree>,
     receiver: Option<String>,
+    /// See [`Reference::receiver_type`].
+    receiver_type: Option<String>,
     single_segment: bool,
 }
 
@@ -177,6 +180,7 @@ fn path_callee<'tree>(
         last_segment: compact(last, src),
         at: written,
         receiver: None,
+        receiver_type: None,
         single_segment,
     })
 }
@@ -193,14 +197,14 @@ fn method_callee<'tree>(
         Some(arguments) => format!("{name}::{}", compact(arguments, src)),
         None => name.clone(),
     };
+    let value = field_expression.child_by_field_name("value");
     Some(Callee {
         kind: RefKind::MethodCall,
         text,
         last_segment: name,
         at: field,
-        receiver: field_expression
-            .child_by_field_name("value")
-            .map(|value| compact(value, src)),
+        receiver: value.map(|value| compact(value, src)),
+        receiver_type: value.and_then(|value| receivers::hint(value, src)),
         single_segment: false,
     })
 }
@@ -226,6 +230,7 @@ fn reference(callee: Callee<'_>, shadowed: bool, context: &Context) -> Reference
             .as_ref()
             .map(|function| function.caller.clone()),
         receiver: callee.receiver,
+        receiver_type: callee.receiver_type,
         shadowed,
     }
 }

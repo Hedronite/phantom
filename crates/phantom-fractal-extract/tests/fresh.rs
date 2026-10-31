@@ -14,7 +14,9 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use common::{FixtureRepo, TempDir, rust_bytes, write};
-use phantom_fractal_extract::{Freshness, IndexReport, MAX_FILE_BYTES, index, probe};
+use phantom_fractal_extract::{
+    EXTRACTOR_VERSION, Freshness, IndexReport, MAX_FILE_BYTES, index, probe,
+};
 use phantom_fractal_lang_rust::RustLanguage;
 use phantom_fractal_store::Store;
 
@@ -91,6 +93,7 @@ fn stale(f: &Freshness) -> bool {
         && f.modified.is_empty()
         && f.removed.is_empty()
         && !f.fingerprint_changed
+        && !f.extractor_changed
         && f.head == f.index_head)
 }
 
@@ -158,6 +161,44 @@ fn the_indexer_fixture_is_fresh_after_its_index() {
     let repo = FixtureRepo::new();
     let s = Probed::new(repo.root());
     assert_eq!(s.probe(), fresh());
+}
+
+#[test]
+fn an_older_extractor_stamp_is_extractor_changed_until_the_next_pass() {
+    let dir = workspace();
+    let mut s = Probed::new(dir.path());
+    assert!(!s.probe().extractor_changed);
+    s.store
+        .set_extractor_version(EXTRACTOR_VERSION - 1)
+        .expect("stamp an older extractor");
+    let got = s.probe();
+    assert_eq!(
+        got,
+        Freshness {
+            extractor_changed: true,
+            ..fresh()
+        }
+    );
+    assert!(got.stale());
+    // The pass re-extracts every file and rebuilds; the next writes nothing.
+    let report = s.index();
+    let stored = s.store.file_paths().expect("paths");
+    assert_eq!(report.written.len(), stored.len());
+    assert!(report.graph.is_some());
+    assert_eq!(s.probe(), fresh());
+    let again = s.index();
+    assert!(again.written.is_empty(), "{:?}", again.written);
+    assert_eq!(again.graph, None);
+}
+
+#[test]
+fn a_store_never_indexed_is_extractor_changed() {
+    let dir = workspace();
+    let db_dir = TempDir::new("fresh-db");
+    let store = Store::open(&db_dir.path().join("graph.db")).expect("open store");
+    let got = probe(dir.path(), &store).expect("probe");
+    assert!(got.extractor_changed);
+    assert!(got.stale());
 }
 
 #[test]

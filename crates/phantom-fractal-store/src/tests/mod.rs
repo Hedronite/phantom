@@ -14,6 +14,7 @@ mod detail;
 mod dirs;
 mod dump;
 mod graph;
+mod hints;
 mod legacy;
 mod lock;
 mod meta;

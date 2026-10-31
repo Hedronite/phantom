@@ -72,6 +72,8 @@ pub fn reason_text(reason: Reason) -> (&'static str, f64) {
         Reason::SelfMethod => ("self-method", 0.9),
         Reason::SelfAssoc => ("self-assoc", 0.9),
         Reason::CratePath => ("crate-path", 0.95),
+        Reason::TypedMethod => ("typed-method", 0.8),
+        Reason::UniqueMethod => ("unique-method", 0.5),
     }
 }
 

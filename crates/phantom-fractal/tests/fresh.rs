@@ -324,6 +324,7 @@ fn status_has_the_spec_keys_and_no_path() {
                 "stale",
                 "changes",
                 "fingerprint_changed",
+                "extractor_changed",
                 "counts",
                 "versions",
                 "epochs",
@@ -379,7 +380,7 @@ fn status_has_the_spec_keys_and_no_path() {
         );
         assert_eq!(
             data["versions"],
-            json!({ "schema": 3, "extractor": 7, "envelope": 1 })
+            json!({ "schema": 3, "extractor": 8, "envelope": 1 })
         );
         assert_eq!(
             data["epochs"],
@@ -553,4 +554,58 @@ fn status_gives_the_stored_versions_where_reads_refuse_the_index() {
     );
     let (code, line) = world.line(&["callers", "deep"]);
     assert_eq!(code, Some(2), "{line}");
+}
+
+/// `edges_by_reason` lists `typed-method` after `crate-path` (SPEC-w10
+/// G2c).
+#[test]
+fn index_lists_typed_method_after_crate_path() {
+    let world = World::fixture();
+    let (code, line) = world.line(&["index", "."]);
+    assert_eq!(code, Some(0), "{line}");
+    let at = value_at(&line, "edges_by_reason", value_at(&line, "data", 0));
+    assert_eq!(
+        raw_keys(&line, at),
+        [
+            "path-exact",
+            "local",
+            "use-alias",
+            "assoc",
+            "self-method",
+            "self-assoc",
+            "crate-path",
+            "typed-method"
+        ],
+        "{line}"
+    );
+}
+
+/// An index another extractor version wrote is `extractor_changed` and
+/// stale in `status`, which writes nothing, until the next pass stamps it
+/// again (SPEC-w10 G2c).
+#[test]
+fn status_flags_an_index_from_another_extractor_version() {
+    for git in [false, true] {
+        let world = if git { World::git() } else { World::fixture() };
+        world.index();
+        let status = |want_changed: bool, want_extractor: u32| {
+            let (code, line) = world.line(&["status"]);
+            assert_eq!(code, Some(0), "git {git}: {line}");
+            let env: Value = serde_json::from_str(&line).expect("envelope");
+            assert_eq!(env["data"]["extractor_changed"], want_changed, "{line}");
+            assert_eq!(env["data"]["stale"], want_changed, "{line}");
+            assert_eq!(env["meta"]["stale"], want_changed, "{line}");
+            assert_eq!(
+                env["data"]["versions"]["extractor"], want_extractor,
+                "{line}"
+            );
+        };
+        status(false, 8);
+        world.store().set_extractor_version(7).expect("stamp 7");
+        let db = world.db();
+        status(true, 7);
+        assert_eq!(world.db(), db, "git {git}: status wrote");
+        world.index();
+        status(false, 8);
+    }
 }

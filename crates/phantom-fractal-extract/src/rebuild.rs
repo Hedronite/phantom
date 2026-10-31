@@ -114,6 +114,14 @@ pub fn stored_method_owners(store: &Store, root: &Path) -> Result<Vec<(Id, Id)>,
     Ok(method_owners(&resolve_input(store, &manifests)?))
 }
 
+/// The resolver input of the tree at `root` as last indexed into `store`,
+/// read without writing: the store's rows and the `deps` its manifests
+/// allow, as [`rebuild`] reads them.
+pub fn stored_input(store: &Store, root: &Path) -> Result<ResolveInput, IndexError> {
+    let manifests = kept_manifests(&read_manifests(&walk(root)?)?);
+    resolve_input(store, &manifests)
+}
+
 /// The `import` and `impl` links of the tree at `root` as last indexed
 /// into `store`, read without writing: the links [`rebuild`] passes to
 /// `write_links`, from the same resolver input (SPEC-w7 G0a).

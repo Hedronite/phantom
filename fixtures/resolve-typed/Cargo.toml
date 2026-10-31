@@ -1,0 +1,4 @@
+# Typed-receiver fixture for SPEC-w10 G2a. Never built or run.
+[workspace]
+resolver = "3"
+members = ["typed", "geo"]

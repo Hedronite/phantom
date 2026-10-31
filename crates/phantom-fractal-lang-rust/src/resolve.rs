@@ -15,10 +15,12 @@
 //! | `SelfMethod` | 0.9 | `self.m()` in an impl method to the one `m` of its self type. |
 //! | `SelfAssoc` | 0.9 | `Self::m()` in an impl method to the one `m` of its self type. |
 //! | `CratePath` | 0.95 | The path enters a workspace lib the caller may call by crate name. |
+//! | `TypedMethod` | 0.8 | `x.m()` whose receiver hint names one workspace type, to its one `m`. |
 //!
-//! Method calls on any other receiver, trait dispatch, glob imports, and
-//! calls into crates outside the workspace are counted and never resolved;
-//! no receiver but `self` is typed.
+//! A method call on a receiver other than `self` is placed only through its
+//! receiver hint (SPEC-w10 G2a); one with no hint, or a hint that places
+//! nothing, is counted. Trait dispatch, glob imports, and calls into
+//! crates outside the workspace are never resolved.
 
 mod lookup;
 
@@ -36,6 +38,8 @@ pub fn confidence(reason: Reason) -> f64 {
         Reason::PathExact => 1.0,
         Reason::Local | Reason::UseAlias | Reason::CratePath => 0.95,
         Reason::Assoc | Reason::SelfMethod | Reason::SelfAssoc => 0.9,
+        Reason::TypedMethod => 0.8,
+        Reason::UniqueMethod => 0.5,
     }
 }
 
@@ -46,7 +50,8 @@ pub fn confidence(reason: Reason) -> f64 {
 /// glob could supply, a call in an orphan file, and a `self.m()` with no
 /// edge; `external` when the first segment is `std`, `core`, `alloc`, or not
 /// found, including a workspace lib the caller may not call; `no_source` for a `Call` outside any function symbol;
-/// `method_calls` for method calls on any receiver but `self`, and `macros`.
+/// `method_calls` for method calls on any receiver but `self` that got no
+/// edge, and `macros`.
 /// A [`RefKind::MacroArg`] gets no edge and no count.
 pub fn resolve(input: &ResolveInput) -> (Vec<Edge>, ResolveCounts) {
     let index = Index::new(input);
@@ -55,8 +60,16 @@ pub fn resolve(input: &ResolveInput) -> (Vec<Edge>, ResolveCounts) {
     for call in &input.refs {
         let (source, placed) = match call.kind {
             RefKind::MethodCall if call.receiver.as_deref() != Some("self") => {
-                counts.method_calls += 1;
-                continue;
+                let typed = call.from.zip(call.receiver_type.as_deref());
+                match typed
+                    .and_then(|(source, hint)| Some((source, index.place_typed(call, hint)?)))
+                {
+                    Some((source, target)) => (source, Placed::Edge(target, Reason::TypedMethod)),
+                    None => {
+                        counts.method_calls += 1;
+                        continue;
+                    }
+                }
             }
             RefKind::MethodCall => {
                 let name = segments(&call.text).and_then(|segs| segs.last().cloned());

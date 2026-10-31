@@ -110,6 +110,8 @@ pub(crate) fn reason_from_text(reason: &str) -> Result<Reason, StoreError> {
         "self-method" => Ok(Reason::SelfMethod),
         "self-assoc" => Ok(Reason::SelfAssoc),
         "crate-path" => Ok(Reason::CratePath),
+        "typed-method" => Ok(Reason::TypedMethod),
+        "unique-method" => Ok(Reason::UniqueMethod),
         other => Err(StoreError::UnknownReason(other.to_owned())),
     }
 }
@@ -123,6 +125,8 @@ pub(crate) fn reason_to_text(reason: Reason) -> &'static str {
         Reason::SelfMethod => "self-method",
         Reason::SelfAssoc => "self-assoc",
         Reason::CratePath => "crate-path",
+        Reason::TypedMethod => "typed-method",
+        Reason::UniqueMethod => "unique-method",
     }
 }
 
@@ -315,7 +319,7 @@ impl crate::Store {
         {
             let mut statement = self.conn.prepare(
                 "SELECT s.id, s.kind, s.name, s.owner, s.owner_path, s.trait_name,
-                        s.scope, s.module_id, f.path
+                        s.scope, s.module_id, s.signature, f.path
                  FROM symbols s JOIN files f ON f.id = s.file_id
                  ORDER BY s.id",
             )?;
@@ -330,7 +334,8 @@ impl crate::Store {
                     trait_name: row.get(5)?,
                     scope: row.get(6)?,
                     module: row.get(7)?,
-                    file: row.get(8)?,
+                    signature: row.get(8)?,
+                    file: row.get(9)?,
                 });
             }
         }
@@ -361,7 +366,7 @@ impl crate::Store {
             let mut statement = self.conn.prepare(
                 "SELECT r.id, r.from_symbol,
                         (SELECT m.id FROM modules m WHERE m.file_id = r.file_id AND m.scope = ''),
-                        r.scope, f.path, r.kind, r.text, r.receiver, r.shadowed
+                        r.scope, f.path, r.kind, r.text, r.receiver_hint, r.receiver, r.shadowed
                  FROM refs r JOIN files f ON f.id = r.file_id
                  WHERE r.kind IN ('call', 'method_call', 'macro', 'macro_arg') ORDER BY r.id",
             )?;
@@ -375,8 +380,9 @@ impl crate::Store {
                     file: row.get(4)?,
                     kind: rows::ref_kind_from_text(&row.get::<_, String>(5)?)?,
                     text: row.get(6)?,
-                    receiver: row.get(7)?,
-                    shadowed: row.get::<_, i64>(8)? != 0,
+                    receiver_type: row.get(7)?,
+                    receiver: row.get(8)?,
+                    shadowed: row.get::<_, i64>(9)? != 0,
                 });
             }
         }

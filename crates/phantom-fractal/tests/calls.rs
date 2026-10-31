@@ -175,6 +175,7 @@ fn confidence(reason: &str) -> f64 {
         "path-exact" => 1.0,
         "local" | "use-alias" | "crate-path" => 0.95,
         "assoc" | "self-method" | "self-assoc" => 0.9,
+        "typed-method" => 0.8,
         other => panic!("unknown reason {other}"),
     }
 }
@@ -397,7 +398,8 @@ fn check_cases(fixture: &Fixture, cases: &[Case]) -> Vec<String> {
 }
 
 /// `self.m()` and `Self::m()` edges of `fixtures/resolve-self/EXPECTED.md`
-/// at 0.9, and none for its no-edge cases.
+/// at 0.9, its one `typed-method` edge at 0.8, and none for its no-edge
+/// cases.
 #[test]
 fn self_method_and_self_assoc_edges() {
     let fixture = Fixture::of(RESOLVE_SELF_FIXTURE);
@@ -455,10 +457,11 @@ fn self_method_and_self_assoc_edges() {
             "crate::entry",
             "src/lib.rs",
             &[
+                ("crate::Counter::check", "typed-method"),
                 ("crate::Counter::new", "assoc"),
                 ("crate::Counter::new", "assoc"),
             ],
-            Some(2),
+            Some(1),
         ),
         (
             "callers",
@@ -469,6 +472,7 @@ fn self_method_and_self_assoc_edges() {
                 ("crate::Counter::bump", "self-method"),
                 ("crate::Counter::describe", "self-method"),
                 ("crate::Counter::unclear", "self-method"),
+                ("crate::entry", "typed-method"),
                 ("crate::shapes::Counter::from_shapes", "self-method"),
             ],
             None,
@@ -491,7 +495,7 @@ fn self_method_and_self_assoc_edges() {
         ),
     ];
     let seen = check_cases(&fixture, &cases);
-    assert_eq!(seen, ["assoc", "self-assoc", "self-method"]);
+    assert_eq!(seen, ["assoc", "self-assoc", "self-method", "typed-method"]);
 }
 
 /// `crate-path` edges of `fixtures/workspace/EXPECTED.md` at 0.95, across
