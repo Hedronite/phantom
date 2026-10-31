@@ -26,7 +26,7 @@ mod rank;
 mod rows;
 mod schema;
 
-pub use crate::impact::SymbolFacts;
+pub use crate::impact::{SymbolCallRef, SymbolFacts, SymbolSpan};
 
 use std::path::Path;
 
@@ -36,7 +36,7 @@ use rusqlite::{Connection, OpenFlags};
 
 pub use crate::cochange::{CochangeGroup, CochangePartner, CochangeScan, FileRow, PairRow};
 pub use crate::detail::SymbolDetail;
-pub use crate::graph::{CallHit, Package, SymbolMatch};
+pub use crate::graph::{CallHit, EdgeRow, Package, SymbolMatch};
 pub use crate::lock::{LockState, WriterLock, lock_state};
 pub use crate::rank::{MapFile, MapRow, RankEdge, RankImportEdge, RankSymbolRow};
 pub use crate::rows::FileStat;
