@@ -382,3 +382,65 @@ fn lock_state_refuses_a_directory_and_a_link_to_one() {
         "the dir was disturbed"
     );
 }
+
+/// A real FIFO at the lock path (SPEC-w10 G0a's case, per QA's G0-qa
+/// note): refused by `acquire` and by `lock_state` with no hang. The
+/// test's own watchdog fails at two seconds, so a hang is a failing
+/// test rather than an idle seat. The FIFO is planted by the
+/// `mkfifo` CLI in a temp dir, the way the W9 tests plant their git
+/// roots; without the tool the case skips, never fakes.
+#[test]
+fn a_real_fifo_at_the_lock_path_is_refused_without_a_hang() {
+    let (data, lock) = bare_repo("rolocfifo");
+    let planted = Command::new("mkfifo")
+        .arg(&lock)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !planted {
+        eprintln!("skipped: no mkfifo on this runner");
+        return;
+    }
+    assert!(
+        !std::fs::symlink_metadata(&lock)
+            .expect("fifo stays")
+            .is_file(),
+        "mkfifo planted something else"
+    );
+    let db = data.db();
+
+    // Both checks run on a bounded pane; a return past the timeout is
+    // the failure, and neither path may touch the FIFO.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let refused = WriterLock::acquire(&db).expect_err("refused acquire");
+            let _ = tx.send(refused);
+        });
+        let refused = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the FIFO acquire hung");
+        assert_lock_refusal(&refused, "symlink or not a regular file");
+    });
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let refused = lock_state(&db).expect_err("refused state");
+            let _ = tx.send(refused);
+        });
+        let refused = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the FIFO probe hung");
+        assert_lock_refusal(&refused, "symlink or not a regular file");
+    });
+    // The refusal never disturbed the FIFO: still a non-file, and
+    // nothing new appeared beside it.
+    assert!(
+        !std::fs::symlink_metadata(&lock)
+            .expect("fifo stays")
+            .is_file()
+    );
+    let _ = fs::remove_file(&lock);
+}
