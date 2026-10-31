@@ -117,8 +117,11 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
     }
 
     // The truth set: a reference's caller is the span around it; its
-    // callees are whatever the referenced symbol mapped to.
+    // callees are whatever the referenced symbol mapped to. The W10
+    // fan-out truth (`truth_wide`) keeps the fallback pair the
+    // document scope narrows away, for `recall_unscoped`.
     let mut truth: BTreeSet<(i64, i64)> = BTreeSet::new();
+    let mut truth_wide: BTreeSet<(i64, i64)> = BTreeSet::new();
     for document in &index.documents {
         for occurrence in &document.occurrences {
             if occurrence.is_definition {
@@ -142,6 +145,15 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
             };
             for callee in callees {
                 truth.insert((caller.id, *callee));
+            }
+            // The W10 fan-out: the document claim dropped, every mapped
+            // callee stays a truth pair — the `recall_unscoped` set.
+            for callee in every
+                .get(&occurrence.symbol)
+                .map(|set| set.iter().collect::<Vec<_>>())
+                .unwrap_or_default()
+            {
+                truth_wide.insert((caller.id, *callee));
             }
         }
     }
@@ -264,7 +276,10 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
     out.push_str("},\"recall\":");
     out.push_str(&recall(&truth, &hits, &cross, &test_callers, &covered_pair));
     out.push_str(",\"recall_unscoped\":");
-    out.push_str(&split(truth.len(), hits.intersection(&truth).count()));
+    out.push_str(&split(
+        truth_wide.len(),
+        hits.intersection(&truth_wide).count(),
+    ));
     out.push_str(",\"misses\":{");
     for (position, (bucket, count)) in misses.iter().enumerate() {
         if position > 0 {
