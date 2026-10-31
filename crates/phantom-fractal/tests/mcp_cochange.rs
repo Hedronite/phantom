@@ -130,16 +130,16 @@ fn the_tool_sits_after_repo_map_with_the_cli_ranges() {
         assert!(want["description"].is_string(), "{name}");
         assert_eq!(properties[name], want, "{name}");
     };
-    described("file", json!({ "type": "string" }));
+    described("file", json!({ "type": "string", "maxLength": 4096 }));
     described(
         "min_lift",
-        json!({ "type": "number", "minimum": 0, "default": 1.5 }),
+        json!({ "type": "number", "minimum": 0, "maximum": 1000, "default": 1.5 }),
     );
     described(
         "limit",
         json!({ "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }),
     );
-    described("repo", json!({ "type": "string" }));
+    described("repo", json!({ "type": "string", "maxLength": 4096 }));
     described(
         "max_tokens",
         json!({ "type": "integer", "minimum": 1, "maximum": 100_000 }),
@@ -267,11 +267,11 @@ fn bad_cochange_arguments_are_usage() {
         (json!({ "file": 1 }), "file must be a string"),
         (
             json!({ "file": "src/a.rs", "min_lift": -1 }),
-            "min_lift must be a number at least 0",
+            "min_lift must be a number from 0 to 1000",
         ),
         (
             json!({ "file": "src/a.rs", "min_lift": "2" }),
-            "min_lift must be a number at least 0",
+            "min_lift must be a number from 0 to 1000",
         ),
         (
             json!({ "file": "src/a.rs", "limit": 0 }),
@@ -291,7 +291,7 @@ fn bad_cochange_arguments_are_usage() {
         ),
         (
             json!({ "file": "src/a.rs", "min_lift": -1, "repo": "missing" }),
-            "min_lift must be a number at least 0",
+            "min_lift must be a number from 0 to 1000",
         ),
     ];
     let calls: Vec<(&str, Value)> = cases

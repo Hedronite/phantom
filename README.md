@@ -412,7 +412,7 @@ On a git root, `index`'s `data` ends with `cochange: {head, commits_seen, skippe
 
 `cochange FILE [--min-lift X] [--limit N] [--repo PATH] [--max-tokens N]` lists FILE's partners.
 
-- **Arguments.** FILE is an indexed file, relative to the indexed tree; a leading `./` is allowed. `--min-lift` is a number of at least 0, 1.5 by default. `--limit` is 1 to 100, 20 by default.
+- **Arguments.** FILE is an indexed file, relative to the indexed tree; a leading `./` is allowed. `--min-lift` is a number from 0 to 1000, 1.5 by default. `--limit` is 1 to 100, 20 by default.
 - **Errors.** Any other value is usage, exit 1. A FILE that is not indexed is `not_found`, exit 3, and no index is `no_index`, exit 2.
 - **It never writes.** The same index and arguments always give the same bytes.
 
@@ -599,7 +599,7 @@ The server is read-only by default. It offers these tools:
 | `impact` | `symbol`, `repo?`, `depth?` (1 to 5, default 3), `min_confidence?` (above 0 and at most 1, default 0.2), `include_tests?` (default true), `summary?` (default false), `max_tokens?` | `impact` |
 | `top_ranked` | `kind?` (`symbols` or `files`, default `symbols`), `focus?` (an array of at most 100 paths), `limit?` (1 to 100, default 20), `repo?`, `max_tokens?` | `rank` |
 | `repo_map` | `budget` (1 to 100000), `focus?` (an array of at most 100 paths), `detail?` (`files`, `symbols`, or `full`, default `symbols`), `repo?` | `map` |
-| `cochange` | `file`, `min_lift?` (at least 0, default 1.5), `limit?` (1 to 100, default 20), `repo?`, `max_tokens?` | `cochange` |
+| `cochange` | `file`, `min_lift?` (0 to 1000, default 1.5), `limit?` (1 to 100, default 20), `repo?`, `max_tokens?` | `cochange` |
 | `diff_impact` | `against?` (a branch, a tag, or a commit id of at least 7 hex digits), `depth?`, `min_confidence?` and `include_tests?` as for `impact`, `summary_only?` (default false), `max_tokens?`, `repo?` | `impact --diff`, or `--against` |
 | `symbol_path` | `from`, `to`, `max_depth?` (1 to 20, default 10), `max_tokens?`, `repo?` | `path` |
 | `repo_status` | `repo?` | `status` |
@@ -609,6 +609,7 @@ The server is read-only by default. It offers these tools:
 - **`index_repo`:** `phantom-fractal mcp --allow-index` adds it, and only then is it listed or callable. It indexes only a root (see [Roots](#roots)), and writes the database in the data directory, as `index` does, and nothing else.
 - **Annotations:** the read tools are annotated `readOnlyHint: true` and `idempotentHint: true`. `index_repo` is annotated `readOnlyHint: false` and `destructiveHint: false`.
 - **Input schemas:** each tool's `inputSchema` sets `additionalProperties: false` and the ranges above. `max_tokens` is an integer from 1 to 100000, and `focus` declares `maxItems: 100`; 101 or more is a `usage` result.
+- **String bounds:** every string argument declares `maxLength`, counted in Unicode characters and checked before the index is read: `against` 256; `file`, `repo`, `path` and each `focus` entry 4096; `query`, `symbol`, `id`, `from`, `to`, `kind` and `detail` 1024. A longer one is a `usage` result, `NAME is longer than N characters`, that never repeats the value.
 - **`repo`:** see [Roots](#roots).
 - **Results:** a `tools/call` result has three parts:
   - `structuredContent` is the exact envelope the command line prints for the same operation and arguments on the same index, `meta` included;

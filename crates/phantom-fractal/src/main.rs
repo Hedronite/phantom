@@ -224,7 +224,7 @@ enum Command {
     Cochange {
         /// An indexed file, relative to the repo.
         file: String,
-        /// Lowest lift listed, a number at least 0.
+        /// Lowest lift listed, a number from 0 to 1000.
         #[arg(long, default_value_t = ops::cochange::DEFAULT_MIN_LIFT, value_parser = min_lift)]
         min_lift: f64,
         /// Most partners returned, 1 to 100.
@@ -561,7 +561,7 @@ fn max_tokens_range() -> clap::builder::RangedU64ValueParser<u64> {
     clap::value_parser!(u64).range(ops::budget::MAX_TOKENS_MIN..=ops::budget::MAX_TOKENS_MAX)
 }
 
-/// `--min-lift`: a finite number, at least 0.
+/// `--min-lift`: a finite number from 0 to 1000.
 fn min_lift(text: &str) -> Result<f64, String> {
     let value: f64 = text
         .parse()
@@ -569,7 +569,7 @@ fn min_lift(text: &str) -> Result<f64, String> {
     if ops::cochange::min_lift_in_range(value) {
         Ok(value)
     } else {
-        Err(format!("{text} is not a finite number at least 0"))
+        Err(ops::cochange::min_lift_usage())
     }
 }
 

@@ -23,6 +23,8 @@ pub(crate) const LIMIT_MAX: u64 = 100;
 pub(crate) const DEFAULT_LIMIT: u64 = 20;
 /// The lowest lift `cochange` and `show` list when none is given.
 pub(crate) const DEFAULT_MIN_LIFT: f64 = 1.5;
+/// The highest `min_lift` the command line and MCP take (SPEC-w10 G0b).
+pub(crate) const MIN_LIFT_MAX: u32 = 1000;
 
 /// What `cochange` is asked for.
 pub(crate) struct CochangeRequest {
@@ -104,10 +106,7 @@ pub(crate) fn cochange(request: &CochangeRequest) -> Result<Reply<CochangeResult
         ));
     }
     if !min_lift_in_range(request.min_lift) {
-        return Err(Failure::new(
-            ErrorKind::Usage,
-            "min_lift must be a number at least 0",
-        ));
+        return Err(Failure::new(ErrorKind::Usage, min_lift_usage()));
     }
     budget::check(request.max_tokens)?;
     let store = current_store(&request.repo)?;
@@ -131,9 +130,15 @@ pub(crate) fn cochange(request: &CochangeRequest) -> Result<Reply<CochangeResult
     answer(result, &store, &request.repo, request.max_tokens)
 }
 
-/// True for a finite `min_lift` of at least 0.
+/// True for a finite `min_lift` from 0 to [`MIN_LIFT_MAX`].
 pub(crate) fn min_lift_in_range(min_lift: f64) -> bool {
-    min_lift.is_finite() && min_lift >= 0.0
+    min_lift.is_finite() && (0.0..=f64::from(MIN_LIFT_MAX)).contains(&min_lift)
+}
+
+/// The usage message for a `min_lift` out of range, the same in the
+/// command line and MCP.
+pub(crate) fn min_lift_usage() -> String {
+    format!("min_lift must be a number from 0 to {MIN_LIFT_MAX}")
 }
 
 /// `path` as the store holds it, with any leading `./` removed, or
