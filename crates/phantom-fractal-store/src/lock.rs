@@ -104,15 +104,8 @@ fn lock_open_flags() -> i32 {
 /// `libc` link: the number is the header's. macOS numbers it 62
 /// (`<sys/errno.h>`); Linux numbers it 40 on both pinned
 /// architectures (`asm-generic/errno-base.h`, exposed by
-/// `<errno.h>`). The same module pins value, header, and the
-/// mapping's own per-open caller.
-#[cfg(any(
-    target_os = "macos",
-    all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ),
-))]
+/// `<errno.h>`).
+#[cfg(target_os = "macos")]
 const ELOOP_NUMBER: i32 = 62;
 #[cfg(all(
     target_os = "linux",
@@ -120,22 +113,14 @@ const ELOOP_NUMBER: i32 = 62;
 ))]
 const ELOOP_NUMBER: i32 = 40;
 
-#[cfg(any(
-    target_os = "macos",
-    all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ),
+#[cfg(target_os = "macos")]
+const _: () = assert!(ELOOP_NUMBER == 62);
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
-const _: () = {
-    #[cfg(target_os = "macos")]
-    assert!(ELOOP_NUMBER == 62);
-    #[cfg(all(
-        target_os = "linux",
-        any(target_arch = "x86_64", target_arch = "aarch64")
-    ))]
-    assert!(ELOOP_NUMBER == 40);
-};
+const _: () = assert!(ELOOP_NUMBER == 40);
 
 #[cfg(unix)]
 fn refusal_for_open(err: std::io::Error) -> StoreError {
