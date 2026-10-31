@@ -20,13 +20,23 @@
 //! `impl Trait`, `dyn Trait`, a tuple or a primitive. So does a `T` that is
 //! a generic parameter of the enclosing function or impl. Nothing is
 //! resolved here.
+//!
+//! The walk for one call stops after [`MAX_HINT_VISITS`] visits, and the
+//! call then gets no hint (SPEC-w11 G0b).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use tree_sitter::Node;
 
 use crate::bindings::bind_pattern;
 use crate::compact;
+
+/// The most nodes the walk for one call visits (SPEC-w11 G0b). Each
+/// ancestor of the receiver counts one, as does each statement of an
+/// enclosing block before the call, nearest first, and each parameter of
+/// the enclosing function. Past it the call gets no hint, so a long
+/// function costs at most this much per call rather than its length.
+pub const MAX_HINT_VISITS: usize = 4096;
 
 /// The smart pointers a binding's type may wrap `T` in, one level deep.
 const WRAPPERS: [&str; 3] = ["Box", "Rc", "Arc"];
@@ -37,18 +47,109 @@ enum Binding {
     Binds(Option<String>),
     /// It does not bind the name.
     Other,
+    /// The walk ran past [`MAX_HINT_VISITS`].
+    Spent,
+}
+
+/// The visits left to one call's walk.
+struct Budget(usize);
+
+impl Budget {
+    /// Counts one visit: false once the walk is past [`MAX_HINT_VISITS`].
+    fn visit(&mut self) -> bool {
+        self.0 += 1;
+        self.0 <= MAX_HINT_VISITS
+    }
+}
+
+/// The statements of each block a walk has entered, read once per file so
+/// that a visit to a statement is a name comparison.
+#[derive(Default)]
+pub(crate) struct Blocks<'tree> {
+    seen: HashMap<usize, Block<'tree>>,
+}
+
+/// One block's named children, in order.
+struct Block<'tree> {
+    statements: Vec<Statement<'tree>>,
+    /// Each statement's position in `statements`, by node id.
+    position: HashMap<usize, usize>,
+}
+
+/// What one statement of a block binds.
+struct Statement<'tree> {
+    node: Node<'tree>,
+    /// The name a `let` with a plain identifier pattern binds.
+    plain: Option<String>,
+    /// The names it binds that clear a hint: those of any other `let`
+    /// pattern, or a local `const` or `static`'s name.
+    clears: HashSet<String>,
+}
+
+impl<'tree> Blocks<'tree> {
+    fn block(&mut self, block: Node<'tree>, src: &[u8]) -> &Block<'tree> {
+        self.seen.entry(block.id()).or_insert_with(|| {
+            let mut cursor = block.walk();
+            let statements: Vec<Statement<'tree>> = block
+                .named_children(&mut cursor)
+                .map(|node| statement(node, src))
+                .collect();
+            let position = statements
+                .iter()
+                .enumerate()
+                .map(|(at, statement)| (statement.node.id(), at))
+                .collect();
+            Block {
+                statements,
+                position,
+            }
+        })
+    }
+}
+
+fn statement<'tree>(node: Node<'tree>, src: &[u8]) -> Statement<'tree> {
+    let mut plain = None;
+    let mut clears = HashSet::new();
+    match node.kind() {
+        "let_declaration" => match node.child_by_field_name("pattern") {
+            Some(pattern) if pattern.kind() == "identifier" => {
+                plain = Some(compact(pattern, src));
+            }
+            Some(pattern) => bind_pattern(pattern, src, &mut clears),
+            None => {}
+        },
+        "const_item" | "static_item" => {
+            if let Some(item) = node.child_by_field_name("name") {
+                clears.insert(compact(item, src));
+            }
+        }
+        _ => {}
+    }
+    Statement {
+        node,
+        plain,
+        clears,
+    }
 }
 
 /// The hint for a method call whose receiver is the identifier `receiver`.
-pub(crate) fn hint(receiver: Node<'_>, src: &[u8]) -> Option<String> {
+pub(crate) fn hint<'tree>(
+    receiver: Node<'tree>,
+    src: &[u8],
+    blocks: &mut Blocks<'tree>,
+) -> Option<String> {
     if receiver.kind() != "identifier" {
         return None;
     }
     let name = compact(receiver, src);
+    let mut budget = Budget(0);
     let mut child = receiver;
     while let Some(node) = child.parent() {
+        if !budget.visit() {
+            return None;
+        }
         let binding = match node.kind() {
-            "block" => in_block(node, child, &name, src),
+            "block" => in_block(blocks.block(node, src), child, &name, src, &mut budget),
             "closure_expression" if is_field(node, "body", child) => node
                 .child_by_field_name("parameters")
                 .map_or(Binding::Other, |params| {
@@ -66,68 +167,73 @@ pub(crate) fn hint(receiver: Node<'_>, src: &[u8]) -> Option<String> {
             "match_arm" => node
                 .child_by_field_name("pattern")
                 .map_or(Binding::Other, |pattern| in_arm(pattern, &name, src)),
-            "function_item" => return in_parameters(node, &name, src),
+            "function_item" => return in_parameters(node, &name, src, &mut budget),
             "impl_item" | "trait_item" | "mod_item" | "source_file" | "const_item"
             | "static_item" => return None,
             _ => Binding::Other,
         };
-        if let Binding::Binds(hint) = binding {
-            return hint;
+        match binding {
+            Binding::Binds(hint) => return hint,
+            Binding::Spent => return None,
+            Binding::Other => child = node,
         }
-        child = node;
     }
     None
 }
 
 /// The statements of `block` before the one holding `child`, nearest first.
-fn in_block(block: Node<'_>, child: Node<'_>, name: &str, src: &[u8]) -> Binding {
-    let mut cursor = block.walk();
-    let before: Vec<Node<'_>> = block
-        .named_children(&mut cursor)
-        .take_while(|statement| statement.id() != child.id())
-        .collect();
-    for statement in before.into_iter().rev() {
-        let binding = match statement.kind() {
-            "let_declaration" => in_let(statement, name, src),
-            "const_item" | "static_item" => cleared_if(
-                statement
-                    .child_by_field_name("name")
-                    .is_some_and(|item| compact(item, src) == name),
-            ),
-            _ => Binding::Other,
-        };
-        if let Binding::Binds(_) = binding {
-            return binding;
+fn in_block(
+    block: &Block<'_>,
+    child: Node<'_>,
+    name: &str,
+    src: &[u8],
+    budget: &mut Budget,
+) -> Binding {
+    let before = block
+        .position
+        .get(&child.id())
+        .copied()
+        .unwrap_or(block.statements.len());
+    for statement in block.statements[..before].iter().rev() {
+        if !budget.visit() {
+            return Binding::Spent;
+        }
+        if statement.plain.as_deref() == Some(name) {
+            return Binding::Binds(let_hint(statement.node, src));
+        }
+        if statement.clears.contains(name) {
+            return Binding::Binds(None);
         }
     }
     Binding::Other
 }
 
-/// A `let`: a plain identifier pattern takes the type or value's hint; any
-/// other pattern that binds the name clears it.
-fn in_let(statement: Node<'_>, name: &str, src: &[u8]) -> Binding {
-    let Some(pattern) = statement.child_by_field_name("pattern") else {
-        return Binding::Other;
-    };
-    if !is_name(pattern, name, src) {
-        return cleared_if(binds(pattern, name, src));
-    }
-    let hint = match (
+/// The hint of a `let` whose pattern is a plain identifier: from its type,
+/// or else from its value.
+fn let_hint(statement: Node<'_>, src: &[u8]) -> Option<String> {
+    match (
         statement.child_by_field_name("type"),
         statement.child_by_field_name("value"),
     ) {
         (Some(ty), _) => type_hint(ty, statement, src),
         (None, Some(value)) => value_hint(value, statement, src),
         (None, None) => None,
-    };
-    Binding::Binds(hint)
+    }
 }
 
 /// The parameters of the enclosing function, the last scope searched.
-fn in_parameters(function: Node<'_>, name: &str, src: &[u8]) -> Option<String> {
+fn in_parameters(
+    function: Node<'_>,
+    name: &str,
+    src: &[u8],
+    budget: &mut Budget,
+) -> Option<String> {
     let parameters = function.child_by_field_name("parameters")?;
     let mut cursor = parameters.walk();
     for parameter in parameters.named_children(&mut cursor) {
+        if !budget.visit() {
+            return None;
+        }
         if parameter.kind() != "parameter" {
             continue;
         }

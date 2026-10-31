@@ -13,6 +13,7 @@ use phantom_fractal_lang::{Caller, Extract, Method, ModDecl, RefKind, Reference,
 use tree_sitter::Node;
 
 use crate::macro_args::call_shapes;
+use crate::receivers::Blocks;
 use crate::{at_module_scope, attrs, bindings, compact, detail, receivers, start_line, visibility};
 
 /// What a node inherits from its ancestors.
@@ -30,6 +31,7 @@ struct Function {
 
 /// Appends refs, methods, and module declarations under `root` to `out`.
 pub(crate) fn scan(root: Node<'_>, src: &[u8], out: &mut Extract) {
+    let mut blocks = Blocks::default();
     let top = Rc::new(Context {
         scope: String::new(),
         function: None,
@@ -39,7 +41,7 @@ pub(crate) fn scan(root: Node<'_>, src: &[u8], out: &mut Extract) {
         if node.kind() == "token_tree" {
             continue;
         }
-        let context = visit(node, src, context, out);
+        let context = visit(node, src, context, &mut blocks, out);
         let mut cursor = node.walk();
         let children: Vec<Node<'_>> = node.named_children(&mut cursor).collect();
         for child in children.into_iter().rev() {
@@ -51,7 +53,13 @@ pub(crate) fn scan(root: Node<'_>, src: &[u8], out: &mut Extract) {
 }
 
 /// Records what `node` is, and returns the context its children inherit.
-fn visit(node: Node<'_>, src: &[u8], context: Rc<Context>, out: &mut Extract) -> Rc<Context> {
+fn visit<'tree>(
+    node: Node<'tree>,
+    src: &[u8],
+    context: Rc<Context>,
+    blocks: &mut Blocks<'tree>,
+    out: &mut Extract,
+) -> Rc<Context> {
     match node.kind() {
         "mod_item" => {
             let name = node
@@ -95,7 +103,7 @@ fn visit(node: Node<'_>, src: &[u8], context: Rc<Context>, out: &mut Extract) ->
             })
         }
         "call_expression" => {
-            if let Some(reference) = call(node, src, &context) {
+            if let Some(reference) = call(node, src, &context, blocks) {
                 out.refs.push(reference);
             }
             context
@@ -137,18 +145,26 @@ struct Callee<'tree> {
 
 /// A `Call` or `MethodCall` reference, or none for a callee that is neither
 /// a path nor a field: `(f)()`, `f()()`, `fns[0]()`.
-fn call(node: Node<'_>, src: &[u8], context: &Context) -> Option<Reference> {
+fn call<'tree>(
+    node: Node<'tree>,
+    src: &[u8],
+    context: &Context,
+    blocks: &mut Blocks<'tree>,
+) -> Option<Reference> {
     let function = node.child_by_field_name("function")?;
     let callee = match function.kind() {
         "identifier" | "scoped_identifier" => path_callee(function, function, src),
-        "field_expression" => method_callee(function, None, src),
+        "field_expression" => method_callee(function, None, src, blocks),
         "generic_function" => {
             let inner = function.child_by_field_name("function")?;
             match inner.kind() {
                 "identifier" | "scoped_identifier" => path_callee(function, inner, src),
-                "field_expression" => {
-                    method_callee(inner, function.child_by_field_name("type_arguments"), src)
-                }
+                "field_expression" => method_callee(
+                    inner,
+                    function.child_by_field_name("type_arguments"),
+                    src,
+                    blocks,
+                ),
                 _ => None,
             }
         }
@@ -190,6 +206,7 @@ fn method_callee<'tree>(
     field_expression: Node<'tree>,
     type_arguments: Option<Node<'tree>>,
     src: &[u8],
+    blocks: &mut Blocks<'tree>,
 ) -> Option<Callee<'tree>> {
     let field = field_expression.child_by_field_name("field")?;
     let name = compact(field, src);
@@ -204,7 +221,7 @@ fn method_callee<'tree>(
         last_segment: name,
         at: field,
         receiver: value.map(|value| compact(value, src)),
-        receiver_type: value.and_then(|value| receivers::hint(value, src)),
+        receiver_type: value.and_then(|value| receivers::hint(value, src, blocks)),
         single_segment: false,
     })
 }
