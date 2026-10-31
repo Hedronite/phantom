@@ -557,7 +557,7 @@ fn status_gives_the_stored_versions_where_reads_refuse_the_index() {
 }
 
 /// `edges_by_reason` lists `typed-method` after `crate-path` (SPEC-w10
-/// G2c).
+/// G2c), and `unique-method` after it (G3b).
 #[test]
 fn index_lists_typed_method_after_crate_path() {
     let world = World::fixture();
@@ -574,7 +574,8 @@ fn index_lists_typed_method_after_crate_path() {
             "self-method",
             "self-assoc",
             "crate-path",
-            "typed-method"
+            "typed-method",
+            "unique-method"
         ],
         "{line}"
     );

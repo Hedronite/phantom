@@ -40,6 +40,7 @@ same module has the same owner and name. The targets are `lib` (`src/lib.rs`), `
 - `lib:crate::entry -> lib:crate::Counter::new@47 assoc`
 - `lib:crate::entry -> lib:crate::placed::from_path local`
 - `lib:crate::entry -> lib:crate::Counter::new@47 assoc`
+- `lib:crate::entry -> lib:crate::Counter::bump unique-method`
 - `lib:crate::tests::check -> lib:crate::local_fn path-exact`
 - `lib:crate::util::helper -> lib:crate::util::deep::sink local`
 - `lib:crate::util::helper -> lib:crate::local_fn path-exact`
@@ -66,6 +67,10 @@ have no symbol row, so their calls have no source; they never become
 edges from `Guest::greet` or the module-level `inner`. The two `#[cfg]`
 `twin`s are told apart by their start lines, 30 and 35.
 
+## Cases
+
+- **Unique method (W10):** `Counter::new().bump()` in `entry` reaches `Counter::bump` at 0.5 by `unique-method`: its receiver is a call, so it has no hint, `bump` is defined by one workspace method, and it is not on `STD_METHOD_NAMES`.
+
 ## No edge
 
 | Call | In | Why |
@@ -76,7 +81,6 @@ edges from `Guest::greet` or the module-level `inner`. The two `#[cfg]`
 | `twin()` | `entry` | Two `#[cfg]` functions: two candidates. |
 | `shadow(2)` | `entry` | Shadowed by `let shadow`. |
 | `escaped::nothing()` | `entry` | `#[path = "../../outside.rs"]` leaves the root, so `escaped` has no module. |
-| `Counter::new().bump()` | `entry` | A method call on a value. |
 | `println!` | `entry` | A macro. |
 | `start_value()` | `static START` | Outside any function. |
 | `local_fn()` | `tests::check` | Only the glob `use super::*` supplies it. |
@@ -96,11 +100,11 @@ counts above are unchanged.
 
 ## Counts
 
-- edges: 22
+- edges: 23
 - unresolved: 8
 - external: 2
 - no_source: 3
-- method_calls: 1
+- method_calls: 0
 - macros: 1
 - modules: 11
 - orphans: 1

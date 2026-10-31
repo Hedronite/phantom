@@ -52,7 +52,7 @@ The `index` envelope holds counts only, never a path:
 
 - files: `written`, `unchanged`, `not_utf8`, and `skipped`;
 - the graph: `modules`, `orphans` (`.rs` files no target reaches), and `edges`, the call edges only;
-- `edges_by_reason`: the edges for each of the eight [reasons](#resolution), keyed by reason, every key present even when it is 0;
+- `edges_by_reason`: the edges for each of the nine [reasons](#resolution), keyed by reason, every key present even when it is 0;
 - calls left without an edge: `unresolved`, `external`, `no_source`, `method_calls` (method calls on a receiver other than `self` that got no edge), and `macros`;
 - on a git root only, `cochange`: the stored scan's `head`, `commits_seen`, `skipped_bulk`, `pairs`, and `window`, as [Co-change](#co-change) describes. On any other tree the key is absent.
 
@@ -103,7 +103,7 @@ That output is cut to one hit.
 
 ### Resolution
 
-A call inside a function is a candidate when it is a path call, such as `f()`, `a::f()`, `Type::new()`, or `Self::new()`, a method call on `self`, such as `self.m()`, or a method call on a plain identifier with a [type hint](#type-hints), such as `x.m()`. A single-segment name that the function binds with `let`, a parameter, a closure parameter, or a pattern is shadowed and not resolved. A call gets an edge only when exactly one symbol fits. Otherwise it gets no edge and is counted instead.
+A call inside a function is a candidate when it is a path call, such as `f()`, `a::f()`, `Type::new()`, or `Self::new()`, a method call on `self`, such as `self.m()`, a method call on a plain identifier with a [type hint](#type-hints), such as `x.m()`, or, by its name alone, a method call on any other receiver with no hint. A single-segment name that the function binds with `let`, a parameter, a closure parameter, or a pattern is shadowed and not resolved. A call gets an edge only when exactly one symbol fits. Otherwise it gets no edge and is counted instead.
 
 | Reason | Confidence | When |
 |---|---|---|
@@ -115,6 +115,7 @@ A call inside a function is a candidate when it is a path call, such as `f()`, `
 | `self-assoc` | 0.9 | `Self::m()`, exactly two segments, in a method of an `impl` block, by the same rule as `self-method`: the self type resolves by the path rows, `crate-path` included, and the method is the only candidate across the whole index. |
 | `crate-path` | 0.95 | The first segment is the crate name of a workspace lib that the caller's package may call, as below, and the rest walks from that lib's root to one item or method. The path may be written in the call or reached through a `use`. A local item, child module, or `use` with that name wins. |
 | `typed-method` | 0.8 | `x.m()`, where `x` is a plain identifier other than `self` with a [type hint](#type-hints). The hinted type resolves, by the type lookup `self-method` and `assoc` use, to one workspace struct or enum, and exactly one method named `m` belongs to it, inherent or in an `impl Trait for` it. |
+| `unique-method` | 0.5 | `x.m()` on a receiver other than `self` with no [type hint](#type-hints), where exactly one method in the whole workspace is named `m`, counting inherent and trait-impl methods of every type in every target, and `m` is not on `STD_METHOD_NAMES`, the sorted list of `core`, `alloc`, and `std` method names written out in the source. A free function of that name does not count. A call with a hint never takes this rule, even when its hint places nothing. |
 
 So an inherent and a trait method with the same name, or two `#[cfg]` impls of one method, give `self.m()` no edge. A trait's own default body is not in an `impl` block, so its `self.m()` gets no edge either.
 
@@ -142,9 +143,22 @@ Any other form gives no dependency: a `[dependencies.B]` table, a version-only l
 
 `index` rebuilds the crate graph and its edges when a `.rs` file is written or removed, when the index was written by another extractor version, or when the workspace fingerprint changes. The fingerprint is a blake3 hash, stored in the database, over every walked `Cargo.toml` (its path and its bytes, or that the read skipped it or found it not UTF-8) and over every `.rs` file the pass skipped or found not UTF-8 (its path and which of the two). So a `Cargo.toml`-only edit rebuilds, even one that changes only whitespace, and so does a `.rs` file that starts or stops being skipped. A pass where none of these changed writes nothing.
 
+#### Measured
+
+On Phantom's own tree at commit `3c438e0`, against a SCIP index from rust-analyzer 1.95.0: an edge is corroborated when rust-analyzer has the same caller and callee, and recall is the share of rust-analyzer's distinct caller and callee pairs that Phantom has as an edge.
+
+| Measure | Edges | Corroborated | Precision |
+|---|---|---|---|
+| `typed-method` | 414 | 387 | 0.9348 |
+| `unique-method` | 461 | 454 | 0.9848 |
+| Confidence 0.85 and up | 1593 | 1513 | 0.9498 |
+| Confidence 0.5 and up | 2468 | 2354 | 0.9538 |
+
+Recall is 0.2394: 1775 of 7415 pairs.
+
 ### Never resolved
 
-- **Receivers:** `x.m()` where `x` has no [type hint](#type-hints); a receiver typed only by a field's type, a free function's return type, or a closure or iterator element; chained calls such as `a.b().m()`; `self.field.m()`, `(*self).m()`, and deref and autoref chains.
+- **Receivers:** a method call on a receiver other than `self` with no [type hint](#type-hints), such as `self.field.m()`, `a.b().m()`, `(*self).m()`, or an unhinted `x.m()`, is placed only by `unique-method`, so it stays unresolved when two or more workspace methods share its name or the name is on `STD_METHOD_NAMES`. A call whose hint places nothing stays unresolved. No receiver is typed by a field's type, a free function's return type, or a closure or iterator element.
 - **Dispatch:** a method that only a trait's provided default supplies, `<T as Trait>::f`, blanket impls, and dispatch on `dyn` or a generic.
 - **Crates:** `std`, `core`, `alloc`, registry and git crates, renamed dependencies (`package = "…"`), `[target.…].dependencies`, `[dev-dependencies]`, `extern crate … as …`, and `[lib] path` and `[[bin]] path`. The targets are `src/lib.rs`, `src/main.rs`, and `src/bin/*.rs`.
 - **Other edges:** edges for paths that are not calls, for types, and for struct literals, and names that only a glob import such as `use a::*` supplies.
