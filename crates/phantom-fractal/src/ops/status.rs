@@ -30,6 +30,8 @@ pub(crate) struct StatusResult {
     stale: bool,
     changes: Changes,
     fingerprint_changed: bool,
+    /// True when the index was written by another extractor version.
+    extractor_changed: bool,
     counts: Counts,
     versions: Versions,
     epochs: Epochs,
@@ -94,6 +96,7 @@ pub(crate) fn status(request: &StatusRequest) -> Result<Reply<StatusResult>, Fai
             removed: freshness.removed.len(),
         },
         fingerprint_changed: freshness.fingerprint_changed,
+        extractor_changed: freshness.extractor_changed,
         counts: Counts {
             files: store.row_count("files")?,
             symbols: store.row_count("symbols")?,

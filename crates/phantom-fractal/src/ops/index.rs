@@ -92,6 +92,8 @@ struct EdgesByReason {
     self_assoc: u64,
     #[serde(rename = "crate-path")]
     crate_path: u64,
+    #[serde(rename = "typed-method")]
+    typed_method: u64,
 }
 
 impl From<ReasonCounts> for EdgesByReason {
@@ -104,6 +106,7 @@ impl From<ReasonCounts> for EdgesByReason {
             self_method: counts.self_method,
             self_assoc: counts.self_assoc,
             crate_path: counts.crate_path,
+            typed_method: counts.typed_method,
         }
     }
 }

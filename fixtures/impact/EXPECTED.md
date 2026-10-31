@@ -47,7 +47,7 @@ Every group's `total` is its number of `hit:` lines, and no group is truncated.
 - **Products.**
   - `crate-path` (0.95) into the lib from `app::run`.
   - `self-method` (0.9) from `Square::doubled` into `Square::area`.
-  - `area` reaches `run` at 0.9 × 0.95 = 0.855 and `main` at 0.81225.
+  - `area` reaches `run` directly at 0.8 by `typed-method`, and `main` at 0.8 × 0.95 = 0.76; the 0.855 path through `doubled` is depth 2, so it is not the one reported.
 - **A cycle and a self-call.** `ping` → `pong` → `ping`, and `again` calls itself. Neither reappears.
 - **Tests.**
   - `direct_test` has `#[test]`.
@@ -55,7 +55,7 @@ Every group's `total` is its number of `hit:` lines, and no group is truncated.
   - `tests.rs` `helper` and `t_root` sit in a `#[cfg(test)] mod tests;` file module.
   - Tests are listed apart and not expanded, so `inline_tests::outer`, which calls `helper`, is never reached.
 - **Macros.** `used_in_macros` appears inside `assert!(…)` and `vec![…]` in `checks`, two `macro_arg` refs with no edge.
-- **Unresolved.** `square.area()` in `run` is a method call on a value, with no edge.
+- **Typed method (W10).** `square.area()` in `run` reaches `Square::area` at 0.8 by `typed-method`, through `let square = engine::shapes::Square::new(3);`, whose `new` returns `Self`.
 - **Targets.**
   - `Square::area` is a trait-impl method.
   - `root_fn` is a `pub` lib function.
@@ -107,13 +107,13 @@ Every group's `total` is its number of `hit:` lines, and no group is truncated.
 
 ## Target area
 
-- risk: unknown
+- risk: low
 - exact: false
-- reasons: unresolved_refs=1, trait_dispatch
-- counts: direct 1, total 3, packages 2, tests 0, below_floor 0
+- reasons: trait_dispatch
+- counts: direct 2, total 3, packages 2, tests 0, below_floor 0
+- hit: 1 app/src/main.rs:9 run 0.8 typed-method app/src/main.rs:12
 - hit: 1 engine/src/shapes.rs:20 doubled 0.9 self-method engine/src/shapes.rs:21
-- hit: 2 app/src/main.rs:9 run 0.855 crate-path app/src/main.rs:11
-- hit: 3 app/src/main.rs:5 main 0.81225 local app/src/main.rs:6
+- hit: 2 app/src/main.rs:5 main 0.76 local app/src/main.rs:6
 
 ## Target doubled
 

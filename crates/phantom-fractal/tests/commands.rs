@@ -25,7 +25,7 @@ const RESOLVE_SELF_FIXTURE: &str =
 const WORKSPACE_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/workspace");
 
 /// The keys of `edges_by_reason`: every reason `callers` and `callees` print.
-const REASONS: [&str; 7] = [
+const REASONS: [&str; 8] = [
     "path-exact",
     "local",
     "use-alias",
@@ -33,6 +33,7 @@ const REASONS: [&str; 7] = [
     "self-method",
     "self-assoc",
     "crate-path",
+    "typed-method",
 ];
 
 /// The graph counts `index` adds, in `fixtures/resolve/EXPECTED.md` order.
@@ -265,7 +266,7 @@ fn index_json_holds_no_absolute_path() {
     }
 }
 
-/// `data.edges_by_reason`, after checking it has exactly the seven
+/// `data.edges_by_reason`, after checking it has exactly the eight
 /// [`REASONS`] keys, each a count.
 fn reason_counts(env: &Value) -> BTreeMap<&str, u64> {
     let object = env["data"]["edges_by_reason"]

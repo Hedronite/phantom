@@ -38,6 +38,7 @@ before a method's name. The only target is `lib` (`src/lib.rs`). Each line is
 - `lib:crate::Wrap::peek -> lib:crate::Wrap::get self-method`
 - `lib:crate::entry -> lib:crate::Counter::new assoc`
 - `lib:crate::entry -> lib:crate::Counter::new assoc`
+- `lib:crate::entry -> lib:crate::Counter::check typed-method`
 - `lib:crate::shapes::Shape::describe -> lib:crate::shapes::Shape::area self-method`
 - `lib:crate::shapes::Plot::describe -> lib:crate::shapes::Plot::area self-method`
 - `lib:crate::shapes::Plot::describe -> lib:crate::shapes::Plot::area self-assoc`
@@ -57,6 +58,7 @@ The edges above cover these cases:
 - **Impl reached by path:** `impl super::Counter` in `src/shapes.rs` resolves to `crate::Counter`, so its `self.check()` reaches `Counter::check`.
 - **Generic impl:** `impl<T> Wrap<T>` resolves to `Wrap`.
 - **W3 assoc:** the two `Counter::new()` calls in `entry` keep their W3 `assoc` edge.
+- **Typed method (W10):** `counter.check()` in `entry` reaches `Counter::check` at 0.8, through `let counter = Counter::new();`, whose `new` returns `Self`.
 
 ## No edge
 
@@ -73,15 +75,14 @@ The edges above cover these cases:
 | `self.m()` | `twins::Gate::open` | Two `#[cfg]` impls of `m`: two candidates. |
 | `Self::m(self)` | `twins::Gate::open` | The same two candidates. |
 | `Counter::new().bump()` | `entry` | A method call on a value. |
-| `counter.check()` | `entry` | A method call on a value. |
 
 ## Counts
 
-- edges: 13
+- edges: 14
 - unresolved: 7
 - external: 1
 - no_source: 0
-- method_calls: 4
+- method_calls: 3
 - macros: 0
 - modules: 3
 - orphans: 0

@@ -52,8 +52,8 @@ The `index` envelope holds counts only, never a path:
 
 - files: `written`, `unchanged`, `not_utf8`, and `skipped`;
 - the graph: `modules`, `orphans` (`.rs` files no target reaches), and `edges`, the call edges only;
-- `edges_by_reason`: the edges for each of the seven [reasons](#how-a-call-is-placed), keyed by reason, every key present even when it is 0;
-- calls left without an edge: `unresolved`, `external`, `no_source`, `method_calls` (method calls on a receiver other than `self`), and `macros`;
+- `edges_by_reason`: the edges for each of the eight [reasons](#resolution), keyed by reason, every key present even when it is 0;
+- calls left without an edge: `unresolved`, `external`, `no_source`, `method_calls` (method calls on a receiver other than `self` that got no edge), and `macros`;
 - on a git root only, `cochange`: the stored scan's `head`, `commits_seen`, `skipped_bulk`, `pairs`, and `window`, as [Co-change](#co-change) describes. On any other tree the key is absent.
 
 A pass that rebuilds nothing reads the graph counts back from the stored graph.
@@ -101,9 +101,9 @@ $ fract callers util::helper
 
 That output is cut to one hit.
 
-### How a call is placed
+### Resolution
 
-A call inside a function is a candidate when it is a path call, such as `f()`, `a::f()`, `Type::new()`, or `Self::new()`, or a method call on `self`, such as `self.m()`. A single-segment name that the function binds with `let`, a parameter, a closure parameter, or a pattern is shadowed and not resolved. A call gets an edge only when exactly one symbol fits. Otherwise it gets no edge and is counted instead.
+A call inside a function is a candidate when it is a path call, such as `f()`, `a::f()`, `Type::new()`, or `Self::new()`, a method call on `self`, such as `self.m()`, or a method call on a plain identifier with a [type hint](#type-hints), such as `x.m()`. A single-segment name that the function binds with `let`, a parameter, a closure parameter, or a pattern is shadowed and not resolved. A call gets an edge only when exactly one symbol fits. Otherwise it gets no edge and is counted instead.
 
 | Reason | Confidence | When |
 |---|---|---|
@@ -114,8 +114,23 @@ A call inside a function is a candidate when it is a path call, such as `f()`, `
 | `self-method` | 0.9 | `self.m()` in a method of an `impl` block. The impl's self type resolves by the path rows (`path-exact`, `local`, `use-alias`, and `crate-path`) to one struct or enum, so `impl Show for core_lib::Thing` counts. Exactly one method named `m` belongs to an impl of that type, inherent or trait, across the whole index, not only in the caller's target: a method of that name for the same type in another target means no edge. |
 | `self-assoc` | 0.9 | `Self::m()`, exactly two segments, in a method of an `impl` block, by the same rule as `self-method`: the self type resolves by the path rows, `crate-path` included, and the method is the only candidate across the whole index. |
 | `crate-path` | 0.95 | The first segment is the crate name of a workspace lib that the caller's package may call, as below, and the rest walks from that lib's root to one item or method. The path may be written in the call or reached through a `use`. A local item, child module, or `use` with that name wins. |
+| `typed-method` | 0.8 | `x.m()`, where `x` is a plain identifier other than `self` with a [type hint](#type-hints). The hinted type resolves, by the type lookup `self-method` and `assoc` use, to one workspace struct or enum, and exactly one method named `m` belongs to it, inherent or in an `impl Trait for` it. |
 
 So an inherent and a trait method with the same name, or two `#[cfg]` impls of one method, give `self.m()` no edge. A trait's own default body is not in an `impl` block, so its `self.m()` gets no edge either.
+
+#### Type hints
+
+A hint for `x` comes from the nearest binding of `x` before the call, in an enclosing block of the same function. A nested `fn` is its own scope; a closure body sees the bindings of the function around it.
+
+| Binding of `x` | Hint |
+|---|---|
+| a parameter `x: T`, `&T`, `&mut T`, `Box<T>`, `Rc<T>`, or `Arc<T>` | `T` |
+| `let x: T = …`, with the same wrappers | `T` |
+| `let x = T { … }` | `T` |
+| `let x = T::f(…)` | `T`, when `T::f` resolves as `assoc` does and its signature returns `Self` or `T` |
+| `let x = T::f(…)?` | `T`, when `T::f` resolves as `assoc` does and its signature returns `Result<Self, _>`, `Result<T, _>`, `Option<Self>`, or `Option<T>` |
+
+`T` is the path as written, without generic arguments, and `Self` in an `impl` body stands for the impl's self type. Any other binding of `x` clears the hint: a `let` with no type to read, such as `let x = f()` or `let x: _`, a pattern in `match`, `if let`, `while let`, or `for`, a closure parameter, a tuple or struct pattern, `impl Trait`, `dyn Trait`, or `_`. A hint that names no workspace struct or enum, a constructor that returns something else, or a type with no method `m` or more than one gives no edge. The hint is stored with the call's reference, so a later pass reads it back.
 
 For `crate-path`, the crate name is the package name with `-` turned to `_`. Package A depends on workspace package B only when one of these holds:
 
@@ -129,7 +144,7 @@ Any other form gives no dependency: a `[dependencies.B]` table, a version-only l
 
 ### Never resolved
 
-- **Receivers:** `x.m()` for any receiver but `self`, `self.field.m()`, `(*self).m()`, and deref and autoref chains.
+- **Receivers:** `x.m()` where `x` has no [type hint](#type-hints); a receiver typed only by a field's type, a free function's return type, or a closure or iterator element; chained calls such as `a.b().m()`; `self.field.m()`, `(*self).m()`, and deref and autoref chains.
 - **Dispatch:** a method that only a trait's provided default supplies, `<T as Trait>::f`, blanket impls, and dispatch on `dyn` or a generic.
 - **Crates:** `std`, `core`, `alloc`, registry and git crates, renamed dependencies (`package = "…"`), `[target.…].dependencies`, `[dev-dependencies]`, `extern crate … as …`, and `[lib] path` and `[[bin]] path`. The targets are `src/lib.rs`, `src/main.rs`, and `src/bin/*.rs`.
 - **Other edges:** edges for paths that are not calls, for types, and for struct literals, and names that only a glob import such as `use a::*` supplies.
@@ -137,7 +152,7 @@ Any other form gives no dependency: a `[dependencies.B]` table, a version-only l
 
 ### Nothing runs
 
-Phantom reads source text only. Macros are never expanded: they are counted by name, and a call-shaped name in a macro's tokens (`f(…)`, `a::f(…)`, or `.m(…)`, nested macros included, `macro_rules!` bodies not) is recorded as a fact with no edge. There is no type inference, so no receiver other than `self` is typed. Phantom never runs cargo, rustc, rust-analyzer, git, a build script, a proc macro, or any other code or command from the indexed repo.
+Phantom reads source text only. Macros are never expanded: they are counted by name, and a call-shaped name in a macro's tokens (`f(…)`, `a::f(…)`, or `.m(…)`, nested macros included, `macro_rules!` bodies not) is recorded as a fact with no edge. There is no type inference: a receiver other than `self` is typed only by the binding text that [Type hints](#type-hints) lists. Phantom never runs cargo, rustc, rust-analyzer, git, a build script, a proc macro, or any other code or command from the indexed repo.
 
 ## Impact
 
@@ -446,7 +461,7 @@ An index describes the tree as it was at the last `index`. Every success envelop
 "meta":{"stale":false,"head":"<40 hex, or null>","index_head":"<40 hex, or null>","rank_epoch":3}
 ```
 
-- **`stale`** is true when an `index` pass would change the index: a `.rs` file it would add, rewrite, or remove, a changed workspace manifest or skipped file (the workspace fingerprint), or a HEAD other than the one the last pass stored. The check walks the tree with `index`'s own rules, compares each file's size and mtime with the stored ones, and hashes a file only when either differs, so a file touched with its bytes unchanged is not stale. A file `index` skips is never counted.
+- **`stale`** is true when an `index` pass would change the index: a `.rs` file it would add, rewrite, or remove, a changed workspace manifest or skipped file (the workspace fingerprint), an index written by another extractor version, or a HEAD other than the one the last pass stored. The check walks the tree with `index`'s own rules, compares each file's size and mtime with the stored ones, and hashes a file only when either differs, so a file touched with its bytes unchanged is not stale. A file `index` skips is never counted.
 - **`head`** is the tree's git HEAD now, and **`index_head`** the HEAD the last pass stored, each `null` off a git root. A commit that changes no indexed file still makes the index stale, because the co-change history moved.
 - **`rank_epoch`** is the epoch of the stored rank.
 - **Reads never re-index.** A stale index still answers, from what it holds, and nothing is written. Run `index` again to bring it up to date. A tree the check cannot read is reported stale.
@@ -465,6 +480,7 @@ An index describes the tree as it was at the last `index`. Every success envelop
 - `head`, `index_head`, and `stale`, as in `meta`;
 - `changes: {added, modified, removed}`: how many files an `index` pass would add, rewrite, and remove;
 - `fingerprint_changed`: whether the workspace fingerprint changed;
+- `extractor_changed`: whether the index was written by another extractor version, which makes it stale;
 - `counts: {files, symbols, edges}`: the stored rows, edges of every kind;
 - `versions: {schema, extractor, envelope}`: the stored store schema and extractor versions, and the envelope schema;
 - `epochs: {graph, rank}`;
@@ -476,7 +492,7 @@ An index describes the tree as it was at the last `index`. Every success envelop
 On the history in [`cochange`](#cochange), after `fract index .` and one line added to `src/b.rs`, `fract status` prints:
 
 ```
-{"ok":true,"data":{"key":"repo-a4236502","name":"repo","head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","stale":true,"changes":{"added":0,"modified":1,"removed":0},"fingerprint_changed":false,"counts":{"files":8,"symbols":15,"edges":2},"versions":{"schema":3,"extractor":7,"envelope":1},"epochs":{"graph":1,"rank":1},"cochange":{"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","commits_seen":23,"skipped_bulk":0,"pairs":4,"window":{"days":365,"max_commits":5000}},"lock":"free"},"meta":{"stale":true,"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","rank_epoch":1},"error":null,"schema":1}
+{"ok":true,"data":{"key":"repo-a4236502","name":"repo","head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","stale":true,"changes":{"added":0,"modified":1,"removed":0},"fingerprint_changed":false,"extractor_changed":false,"counts":{"files":8,"symbols":15,"edges":2},"versions":{"schema":3,"extractor":8,"envelope":1},"epochs":{"graph":1,"rank":1},"cochange":{"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","commits_seen":23,"skipped_bulk":0,"pairs":4,"window":{"days":365,"max_commits":5000}},"lock":"free"},"meta":{"stale":true,"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","rank_epoch":1},"error":null,"schema":1}
 ```
 
 The key's hash comes from the tree's canonical path, so it differs on another machine. `fract find fb` still answers from the index, with the same `meta`.
@@ -556,7 +572,7 @@ Each index is a directory under the data directory's `repos/`, named `<name>-<ha
 1. `data_dir`: `repos/` and each index directory are private (no group or other bits, and not a link), the data directory is not writable by group or others, and every one of them, and every database file, is owned by the data directory's owner. No data directory yet is fine.
 2. `databases`: each `graph.db`, and its WAL and shared memory when present, is `0600`. Its schema, read from the SQLite header without opening the database, is not newer than this binary's. An older schema is noted, since `index` migrates it.
 3. `locks`: whether a writer holds each index. A held lock is not a fault.
-4. `extractor`: the extractor version this binary writes, 7.
+4. `extractor`: the extractor version this binary writes, 8.
 5. `grammar`: the tree-sitter-rust version the binary was built with.
 6. `network`: `none: Phantom has no network code`.
 7. `git`: for each index, whether HEAD reads at its stored tree, or why it was not checked. Only a HEAD that cannot be read is a fault.
@@ -727,7 +743,7 @@ The answers are heuristic. Only resolved calls, trait impls, and imports are edg
 `phantom-fractal version` prints one line and exits 0:
 
 ```
-{"ok":true,"data":{"name":"phantom-fractal","version":"0.0.0","git_sha":"<40 lowercase hex, or null>","extractor_version":7,"store_schema":3},"error":null,"schema":1}
+{"ok":true,"data":{"name":"phantom-fractal","version":"0.0.0","git_sha":"<40 lowercase hex, or null>","extractor_version":8,"store_schema":3},"error":null,"schema":1}
 ```
 
 `phantom-fractal --json version`, `phantom-fractal version --json`, and `fract version` print the same line. `data` holds these fields, in this order:
@@ -737,7 +753,7 @@ The answers are heuristic. Only resolved calls, trait impls, and imports are edg
 | `name` | `phantom-fractal`, under `fract` too |
 | `version` | the CLI crate's version, `0.0.0` |
 | `git_sha` | the commit the binary was built from, as 40 lowercase hex characters, or `null` when unknown |
-| `extractor_version` | the extractor version the binary writes, 7 |
+| `extractor_version` | the extractor version the binary writes, 8 |
 | `store_schema` | the store schema version the binary writes, 3 |
 
 `git_sha` is fixed at build time. `PHANTOM_FRACTAL_GIT_SHA`, when it holds 40 hex characters, sets it, for packagers. Otherwise it is the output of `git rev-parse HEAD` in the CLI crate's directory. With no git, no `.git` (as in a crates.io tarball), or a refused repository, it is `null`, and the build still succeeds.
