@@ -98,27 +98,100 @@ pub(crate) fn lock_path(db_path: &Path) -> PathBuf {
     }
 }
 
-/// Opens the lock file without creating one: `Absent`, `Held`, or
-/// `Free` — never a new file.
-pub(crate) fn open_existing(path: &Path) -> Result<Option<std::fs::File>, StoreError> {
-    match std::fs::OpenOptions::new().read(true).open(path) {
-        Ok(file) => Ok(Some(file)),
+/// The lock path's role in the store's errors: never a path.
+pub(crate) const LOCK_ROLE: &str = "lock file";
+
+/// Refuses the lock path when it exists but is anything but a regular
+/// file — a symlink (dangling or not), a directory, a FIFO, a device
+/// node — with the store's existing unsafe-data-dir error, whose
+/// message carries the role, not a path. Nothing is opened or created
+/// through the refused shape. Answers the pre-open metadata used for
+/// the `(dev, ino)` match, `None` when the path is absent.
+fn verified_lock_meta(path: &Path) -> Result<Option<std::fs::Metadata>, StoreError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => Ok(Some(meta)),
+        Ok(_) => Err(StoreError::DataDirectory(
+            LOCK_ROLE.to_owned(),
+            "is a symlink or not a regular file".to_owned(),
+        )),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(StoreError::Io(err)),
     }
 }
 
-/// Opens the lock file for a writer: a new one is created empty at mode
-/// `0600`; an existing one opens without touching its content.
+/// True when the opened file is the pre-checked one: same `dev` and
+/// `ino`. A shape that raced in between the check and the open is
+/// refused, so a link can never make the store read or chmod its
+/// target. `unix` metadata only — the `fstat` identity is the only
+/// cross-platform-honest std pair.
+#[cfg(unix)]
+fn same_file(opened: &std::fs::File, pre: &std::fs::Metadata) -> Result<bool, StoreError> {
+    use std::os::unix::fs::MetadataExt;
+    let now = opened.metadata().map_err(StoreError::Io)?;
+    Ok(now.dev() == pre.dev() && now.ino() == pre.ino())
+}
+
+#[cfg(unix)]
+fn identity_refusal() -> StoreError {
+    StoreError::DataDirectory(
+        LOCK_ROLE.to_owned(),
+        "changed between the check and the open".to_owned(),
+    )
+}
+
+/// Opens the lock file without creating one: `Absent`, `Held`, or
+/// `Free` — never a new file. A symlink or any non-regular entry at
+/// the path is refused before the open, and the opened file is
+/// identity-matched against that check.
+pub(crate) fn open_existing(path: &Path) -> Result<Option<std::fs::File>, StoreError> {
+    let Some(pre) = verified_lock_meta(path)? else {
+        return Ok(None);
+    };
+    let file = match std::fs::OpenOptions::new().read(true).open(path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(StoreError::Io(err)),
+    };
+    #[cfg(unix)]
+    if !same_file(&file, &pre)? {
+        return Err(identity_refusal());
+    }
+    Ok(Some(file))
+}
+
+/// Opens the lock file for a writer: a new one is created empty at
+/// mode `0600`; an existing one opens without touching its content.
+/// The pre-open shape check refuses a symlink or any non-regular
+/// entry, and the exclusively-created open re-verifies any racing
+/// entry, identity-matched, before anything is locked or tightened.
 fn open_lock_file(path: &Path) -> Result<std::fs::File, StoreError> {
+    verified_lock_meta(path)?;
     let mut options = std::fs::OpenOptions::new();
-    options.read(true).write(true).create(true);
+    options.read(true).write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    options.open(path).map_err(StoreError::Io)
+    match options.open(path) {
+        Ok(file) => Ok(file),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            // Something raced in after the check: re-verify the shape,
+            // open the verified regular file, and match its identity.
+            let Some(pre) = verified_lock_meta(path)? else {
+                return Err(identity_refusal());
+            };
+            let mut reopen = std::fs::OpenOptions::new();
+            reopen.read(true).write(true);
+            let file = reopen.open(path).map_err(StoreError::Io)?;
+            #[cfg(unix)]
+            if !same_file(&file, &pre)? {
+                return Err(identity_refusal());
+            }
+            Ok(file)
+        }
+        Err(err) => Err(StoreError::Io(err)),
+    }
 }
 
 /// Narrows an existing lock file's mode to `0600` when it carries group
