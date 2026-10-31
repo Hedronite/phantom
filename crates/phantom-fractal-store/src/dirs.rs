@@ -39,13 +39,16 @@ pub(crate) const DIR_MODE: u32 = 0o700;
         any(target_arch = "x86_64", target_arch = "aarch64")
     ),
 ))]
-mod checked_flags {
+pub(crate) mod checked_flags {
     /// `O_DIRECTORY` for Linux x86_64 (`bits/fcntl-linux.h`: `0o200000`).
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     pub(crate) const O_DIRECTORY: i32 = 0o200000;
     /// `O_NOFOLLOW` for Linux x86_64 (`bits/fcntl-linux.h`: `0o400000`).
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     pub(crate) const O_NOFOLLOW: i32 = 0o400000;
+    /// `O_NONBLOCK` for Linux x86_64 (`bits/fcntl-linux.h`: `0o4000`).
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    pub(crate) const O_NONBLOCK: i32 = 0o4000;
     /// `O_DIRECTORY` for Linux aarch64
     /// (`arch/arm64/include/uapi/asm/fcntl.h`: `0o40000`).
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
@@ -53,24 +56,41 @@ mod checked_flags {
     /// `O_NOFOLLOW` for Linux aarch64 (`0o100000`).
     #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
     pub(crate) const O_NOFOLLOW: i32 = 0o100000;
+    /// `O_NONBLOCK` for Linux aarch64 (`0o4000`).
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    pub(crate) const O_NONBLOCK: i32 = 0o4000;
     /// `O_DIRECTORY` for macOS (`<sys/fcntl.h>`: `0x00100000`).
     #[cfg(target_os = "macos")]
     pub(crate) const O_DIRECTORY: i32 = 0x00100000;
     /// `O_NOFOLLOW` for macOS (`0x00000100`).
     #[cfg(target_os = "macos")]
     pub(crate) const O_NOFOLLOW: i32 = 0x00000100;
+    /// `O_NONBLOCK` for macOS (`<sys/fcntl.h>`: `0x0004`).
+    #[cfg(target_os = "macos")]
+    pub(crate) const O_NONBLOCK: i32 = 0x0004;
 
     const _: () = {
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         assert!(
-            O_DIRECTORY == 0o200000_i32 && O_NOFOLLOW == 0o400000_i32 && O_DIRECTORY != O_NOFOLLOW
+            O_DIRECTORY == 0o200000_i32
+                && O_NOFOLLOW == 0o400000_i32
+                && O_NONBLOCK == 0o4000_i32
+                && O_DIRECTORY != O_NOFOLLOW
         );
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
         assert!(
-            O_DIRECTORY == 0o40000_i32 && O_NOFOLLOW == 0o100000_i32 && O_DIRECTORY != O_NOFOLLOW
+            O_DIRECTORY == 0o40000_i32
+                && O_NOFOLLOW == 0o100000_i32
+                && O_NONBLOCK == 0o4000_i32
+                && O_DIRECTORY != O_NOFOLLOW
         );
         #[cfg(target_os = "macos")]
-        assert!(O_DIRECTORY == 0x00100000 && O_NOFOLLOW == 0x00000100 && O_DIRECTORY != O_NOFOLLOW);
+        assert!(
+            O_DIRECTORY == 0x00100000
+                && O_NOFOLLOW == 0x00000100
+                && O_NONBLOCK == 0x0004
+                && O_DIRECTORY != O_NOFOLLOW
+        );
     };
 }
 

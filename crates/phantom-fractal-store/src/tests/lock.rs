@@ -444,3 +444,48 @@ fn a_real_fifo_at_the_lock_path_is_refused_without_a_hang() {
     );
     let _ = fs::remove_file(&lock);
 }
+
+/// The W11 G0a race: the FIFO lands between the pre-open shape check
+/// and the open. The hook in `open_lock_file` fires at exactly that
+/// seam, plants the FIFO, and clears itself; the refused shape still
+/// answers within the W10 bound, and the FIFO's `O_NONBLOCK` open
+/// means no thread holds off either side. The named hook is also what
+/// QA uses to plant its own between-checks shapes.
+#[test]
+fn a_fifo_racing_the_open_is_refused_without_a_hang() {
+    let (data, lock) = bare_repo("rolockrace");
+    let db = data.db();
+    let lock_for_hook = lock.clone();
+    let raced = std::sync::atomic::AtomicBool::new(false);
+    let raced_hook = std::sync::Arc::new(raced);
+    let raced_once = raced_hook.clone();
+    let hook: Box<dyn Fn(&std::path::Path) + Send> = Box::new(move |_| {
+        if !raced_once.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let _ = Command::new("mkfifo")
+                .arg(&lock_for_hook)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    });
+    crate::lock::race_lock_window(Some(hook));
+    let refused = std::thread::scope(|scope| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        scope.spawn(move || {
+            let _ = tx.send(WriterLock::acquire(&db).err());
+        });
+        rx.recv_timeout(Duration::from_secs(2))
+    });
+    crate::lock::race_lock_window(None);
+    let refused = refused
+        .expect("the race test hung past two seconds")
+        .expect("refused");
+    assert_lock_refusal(&refused, "symlink or not a regular file");
+    // The refused shape never became a lock file by the other side.
+    assert!(
+        !std::fs::symlink_metadata(&lock)
+            .expect("fifo stays")
+            .is_file()
+    );
+    let _ = fs::remove_file(&lock);
+}
