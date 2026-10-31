@@ -489,3 +489,52 @@ fn a_fifo_racing_the_open_is_refused_without_a_hang() {
     );
     let _ = fs::remove_file(&lock);
 }
+
+/// The W11 G0 fix's second shape: the hook plants a SYMLINK between
+/// the pre-open shape check and the open. On the flagged targets the
+/// open fails with `ELOOP` — mapped to the store lock-file refusal,
+/// never a raw `Io` error — and on the others the shape re-check
+/// refuses the same way. Either way the caller sees the store's own
+/// refusal, never an absolute path and never a follow.
+#[test]
+fn a_symlink_racing_the_open_is_refused_as_a_lock_file() {
+    use crate::StoreError;
+
+    let (data, lock) = bare_repo("rolocelink");
+    let db_path = data.db();
+    let raced = std::sync::atomic::AtomicBool::new(false);
+    let raced_once = std::sync::Arc::new(raced);
+    let raced_hook = raced_once.clone();
+    let hook_target = lock.clone();
+    let repo = data.repo_dir();
+    let hook: Box<dyn Fn(&std::path::Path) + Send> = Box::new(move |_| {
+        if !raced_hook.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let target = repo.join("target.rs");
+            let _ = std::fs::write(&target, b"raced");
+            let _ = std::os::unix::fs::symlink(&target, &hook_target);
+        }
+    });
+    crate::lock::race_lock_window(Some(hook));
+    std::thread::scope(|scope| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        scope.spawn(move || {
+            let _ = tx.send(WriterLock::acquire(&db_path).err());
+        });
+        let refused = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the symlink race hung past two seconds")
+            .expect("refused");
+        assert!(
+            matches!(refused, StoreError::DataDirectory(..)),
+            "{refused:?}"
+        );
+    });
+    crate::lock::race_lock_window(None);
+    // The refused link left its target untouched.
+    assert!(
+        std::fs::read_to_string(data.repo_dir().join("target.rs")).is_ok(),
+        "the target was disturbed"
+    );
+    let _ = std::fs::remove_file(&lock);
+    let _ = std::fs::remove_file(data.repo_dir().join("target.rs"));
+}

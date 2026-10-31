@@ -100,10 +100,42 @@ fn lock_open_flags() -> i32 {
     crate::dirs::checked_flags::O_NOFOLLOW | crate::dirs::checked_flags::O_NONBLOCK
 }
 
-/// The raw `ELOOP` number, macOS and Linux Unix targets alike. No
-/// `libc` link: the number is the header value.
-#[cfg(unix)]
+/// The raw `ELOOP` number, per target from its errno table — no
+/// `libc` link: the number is the header's. macOS numbers it 62
+/// (`<sys/errno.h>`); Linux numbers it 40 on both pinned
+/// architectures (`asm-generic/errno-base.h`, exposed by
+/// `<errno.h>`). The same module pins value, header, and the
+/// mapping's own per-open caller.
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+))]
 const ELOOP_NUMBER: i32 = 62;
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const ELOOP_NUMBER: i32 = 40;
+
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+))]
+const _: () = {
+    #[cfg(target_os = "macos")]
+    assert!(ELOOP_NUMBER == 62);
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    assert!(ELOOP_NUMBER == 40);
+};
 
 #[cfg(unix)]
 fn refusal_for_open(err: std::io::Error) -> StoreError {
