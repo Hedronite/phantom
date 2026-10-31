@@ -143,30 +143,39 @@ For `crate-path`, the crate name is the package name with `-` turned to `_`. Pac
 
 - A's `[dependencies]` has one line `B = { … path = "…" … }` whose path, inside the indexed tree, is B's directory.
 - A's `[dependencies]` has `B.workspace = true` or `B = { workspace = true … }`, and the root `Cargo.toml`'s `[workspace.dependencies]` has one line `B = { … path = "…" … }` whose path, inside the indexed tree, is B's directory.
-- A is B and the call is in one of A's bins: a bin may call its own package's lib.
+- A is B and the call is in one of A's bins or tests: a bin or a test may call its own package's lib.
 
-Any other form gives no dependency: a `[dependencies.B]` table, a version-only line, an inline table split over lines, or the forms under [Never resolved](#never-resolved). A lib that calls its own crate by name gets no edge.
+A's `[dev-dependencies]` is read in the same two forms, and those entries count for A's test targets only. A lib or a bin ignores them.
+
+**Test targets.** Each `tests/NAME.rs` directly under a package's directory, and each `tests/DIR/main.rs`, is a `test` target named `NAME` or `DIR`. Its root finds `mod x;` beside itself, as any crate root does, so `mod common;` reaches `tests/common.rs` or `tests/common/mod.rs`, and a file reached from two test roots keeps the first one's module. A test target calls by the same rows as a lib or a bin, and may also call its own package's lib and every workspace lib its package names in `[dependencies]` or `[dev-dependencies]`. Every module of a test target is a test module. `benches/` and `examples/` files have no target and stay orphans, and a lib's `#[cfg(test)]` modules do not gain its dev-dependencies.
+
+Any other form gives no dependency: a `[dependencies.B]` or `[dev-dependencies.B]` table, a version-only line, an inline table split over lines, or the forms under [Never resolved](#never-resolved). A lib that calls its own crate by name gets no edge.
 
 `index` rebuilds the crate graph and its edges when a `.rs` file is written or removed, when the index was written by another extractor version, or when the workspace fingerprint changes. The fingerprint is a blake3 hash, stored in the database, over every walked `Cargo.toml` (its path and its bytes, or that the read skipped it or found it not UTF-8) and over every `.rs` file the pass skipped or found not UTF-8 (its path and which of the two). So a `Cargo.toml`-only edit rebuilds, even one that changes only whitespace, and so does a `.rs` file that starts or stops being skipped. A pass where none of these changed writes nothing.
 
 #### Measured
 
-On Phantom's own tree at commit `b4e418c`, against a SCIP index from rust-analyzer 1.95.0: an edge is corroborated when rust-analyzer has the same caller and callee, and recall is the share of rust-analyzer's distinct caller and callee pairs that Phantom has as an edge.
+On Phantom's own tree at commit `9fd0827`, against a SCIP index from rust-analyzer 1.95.0. These are the provisional figures of the contract run, and the review run's figures replace them. An edge is corroborated when rust-analyzer has the same caller and callee.
 
 | Measure | Edges | Corroborated | Precision |
 |---|---|---|---|
-| `typed-method` | 414 | 387 | 0.9348 |
-| `unique-method` | 461 | 454 | 0.9848 |
-| Confidence 0.85 and up | 1593 | 1513 | 0.9498 |
-| Confidence 0.5 and up | 2468 | 2354 | 0.9538 |
+| `typed-method` | 1022 | 995 | 0.9736 |
+| `unique-method` | 468 | 461 | 0.9850 |
+| Confidence 0.85 and up | 3155 | 3075 | 0.9746 |
+| Confidence 0.5 and up | 4645 | 4531 | 0.9755 |
 
-Recall is 0.2394: 1775 of 7415 pairs.
+Recall is the share of rust-analyzer's distinct caller and callee pairs that Phantom has as an edge. The graded figure is document-scoped: a reference takes the callee defined in its own document when its symbol has a definition there. The unscoped figure lets a symbol defined in several documents count a pair for each, as the earlier scorer did, and is kept for comparison.
+
+| Recall | Pairs | Hits | Ratio |
+|---|---|---|---|
+| Document-scoped (graded) | 5127 | 3300 | 0.6437 |
+| Unscoped (the earlier comparison) | 7518 | 3300 | 0.4389 |
 
 ### Never resolved
 
 - **Receivers:** a method call on a receiver other than `self` with no [type hint](#type-hints), such as `self.field.m()`, `a.b().m()`, `(*self).m()`, or an unhinted `x.m()`, is placed only by `unique-method`, so it stays unresolved when two or more workspace methods share its name or the name is on `STD_METHOD_NAMES`. A call whose hint places nothing stays unresolved. No receiver is typed by a field's type, a free function's return type, or a closure or iterator element.
 - **Dispatch:** a method that only a trait's provided default supplies, `<T as Trait>::f`, blanket impls, and dispatch on `dyn` or a generic.
-- **Crates:** `std`, `core`, `alloc`, registry and git crates, renamed dependencies (`package = "…"`), `[target.…].dependencies`, `[dev-dependencies]`, `extern crate … as …`, and `[lib] path` and `[[bin]] path`. The targets are `src/lib.rs`, `src/main.rs`, and `src/bin/*.rs`.
+- **Crates:** `std`, `core`, `alloc`, registry and git crates, renamed dependencies (`package = "…"`), `[target.…].dependencies` and `[target.…].dev-dependencies`, `[build-dependencies]`, `[dev-dependencies]` from a lib or a bin, a lib's `#[cfg(test)]` modules included, `extern crate … as …`, and `[lib] path`, `[[bin]] path`, and `[[test]] path`. The targets are `src/lib.rs`, `src/main.rs`, `src/bin/*.rs`, `tests/*.rs`, and `tests/*/main.rs`; `benches/` and `examples/` have none.
 - **Other edges:** edges for paths that are not calls, for types, and for struct literals, and names that only a glob import such as `use a::*` supplies.
 - **Macros:** calls inside a macro invocation, such as `f(x)` in `assert!(f(x))` or `.m()` in `vec![a.m()]`, are stored as facts for [`macro_boundary`](#completeness), never as edges.
 
@@ -202,7 +211,8 @@ A symbol is a test when any of these holds:
 - it has `#[test]`, or an attribute whose path ends in `test`, such as `#[tokio::test]`;
 - it has `#[cfg(test)]`, exactly;
 - it sits inside an inline `mod` that has `#[cfg(test)]`;
-- its module is declared with `#[cfg(test)]`, as in `#[cfg(test)] mod tests;`, or sits below such a module.
+- its module is declared with `#[cfg(test)]`, as in `#[cfg(test)] mod tests;`, or sits below such a module;
+- its module belongs to a [test target](#resolution), an integration test under `tests/`.
 
 `#[cfg(all(test, …))]`, `#[cfg(any(test, …))]`, `#[cfg_attr(…)]`, and every other form are not recognised.
 
@@ -512,7 +522,7 @@ An index describes the tree as it was at the last `index`. Every success envelop
 On the history in [`cochange`](#cochange), after `fract index .` and one line added to `src/b.rs`, `fract status` prints:
 
 ```
-{"ok":true,"data":{"key":"repo-a4236502","name":"repo","head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","stale":true,"changes":{"added":0,"modified":1,"removed":0},"fingerprint_changed":false,"extractor_changed":false,"counts":{"files":8,"symbols":15,"edges":2},"versions":{"schema":3,"extractor":8,"envelope":1},"epochs":{"graph":1,"rank":1},"cochange":{"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","commits_seen":23,"skipped_bulk":0,"pairs":4,"window":{"days":365,"max_commits":5000}},"lock":"free"},"meta":{"stale":true,"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","rank_epoch":1},"error":null,"schema":1}
+{"ok":true,"data":{"key":"repo-a4236502","name":"repo","head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","stale":true,"changes":{"added":0,"modified":1,"removed":0},"fingerprint_changed":false,"extractor_changed":false,"counts":{"files":8,"symbols":15,"edges":2},"versions":{"schema":3,"extractor":9,"envelope":1},"epochs":{"graph":1,"rank":1},"cochange":{"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","commits_seen":23,"skipped_bulk":0,"pairs":4,"window":{"days":365,"max_commits":5000}},"lock":"free"},"meta":{"stale":true,"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","rank_epoch":1},"error":null,"schema":1}
 ```
 
 The key's hash comes from the tree's canonical path, so it differs on another machine. `fract find fb` still answers from the index, with the same `meta`.
@@ -592,7 +602,7 @@ Each index is a directory under the data directory's `repos/`, named `<name>-<ha
 1. `data_dir`: `repos/` and each index directory are private (no group or other bits, and not a link), the data directory is not writable by group or others, and every one of them, and every database file, is owned by the data directory's owner. No data directory yet is fine.
 2. `databases`: each `graph.db`, and its WAL and shared memory when present, is `0600`. Its schema, read from the SQLite header without opening the database, is not newer than this binary's. An older schema is noted, since `index` migrates it.
 3. `locks`: whether a writer holds each index. A held lock is not a fault.
-4. `extractor`: the extractor version this binary writes, 8.
+4. `extractor`: the extractor version this binary writes, 9.
 5. `grammar`: the tree-sitter-rust version the binary was built with.
 6. `network`: `none: Phantom has no network code`.
 7. `git`: for each index, whether HEAD reads at its stored tree, or why it was not checked. Only a HEAD that cannot be read is a fault.
@@ -763,7 +773,7 @@ The answers are heuristic. Only resolved calls, trait impls, and imports are edg
 `phantom-fractal version` prints one line and exits 0:
 
 ```
-{"ok":true,"data":{"name":"phantom-fractal","version":"0.0.0","git_sha":"<40 lowercase hex, or null>","extractor_version":8,"store_schema":3},"error":null,"schema":1}
+{"ok":true,"data":{"name":"phantom-fractal","version":"0.0.0","git_sha":"<40 lowercase hex, or null>","extractor_version":9,"store_schema":3},"error":null,"schema":1}
 ```
 
 `phantom-fractal --json version`, `phantom-fractal version --json`, and `fract version` print the same line. `data` holds these fields, in this order:
@@ -773,7 +783,7 @@ The answers are heuristic. Only resolved calls, trait impls, and imports are edg
 | `name` | `phantom-fractal`, under `fract` too |
 | `version` | the CLI crate's version, `0.0.0` |
 | `git_sha` | the commit the binary was built from, as 40 lowercase hex characters, or `null` when unknown |
-| `extractor_version` | the extractor version the binary writes, 8 |
+| `extractor_version` | the extractor version the binary writes, 9 |
 | `store_schema` | the store schema version the binary writes, 3 |
 
 `git_sha` is fixed at build time. `PHANTOM_FRACTAL_GIT_SHA`, when it holds 40 hex characters, sets it, for packagers. Otherwise it is the output of `git rev-parse HEAD` in the CLI crate's directory. With no git, no `.git` (as in a crates.io tarball), or a refused repository, it is `null`, and the build still succeeds.
