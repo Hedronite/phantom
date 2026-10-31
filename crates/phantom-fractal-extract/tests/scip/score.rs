@@ -183,21 +183,23 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
         )
     };
 
-    // Per-reason and per-band edge-carry counts, full and covered.
+    // Per-reason and per-band edge-carry counts, full and covered. The
+    // covered counts are kept per reason and per band, as F1 asks.
     let mut reasons: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     let mut bands: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     let mut covered: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    let mut covered_bands: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for edge in &edges {
+        let is_covered = covered_pair((edge.src_id, edge.dst_id));
         pair_into(&mut reasons, edge.reason.clone(), &truth, edge);
-        if edge.confidence >= 0.85 {
-            pair_into(&mut bands, "0.85".to_owned(), &truth, edge);
-        }
-        if edge.confidence >= 0.5 {
-            pair_into(&mut bands, "0.5".to_owned(), &truth, edge);
-        }
-        pair_into(&mut bands, "all".to_owned(), &truth, edge);
-        if covered_pair((edge.src_id, edge.dst_id)) {
+        if is_covered {
             pair_into(&mut covered, edge.reason.clone(), &truth, edge);
+        }
+        for band in bands_of(edge.confidence) {
+            pair_into(&mut bands, band.to_owned(), &truth, edge);
+            if is_covered {
+                pair_into(&mut covered_bands, band.to_owned(), &truth, edge);
+            }
         }
     }
 
@@ -268,7 +270,7 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
         if position > 0 {
             out.push(',');
         }
-        let carried = covered.get(band).copied().unwrap_or((0, 0));
+        let carried = covered_bands.get(band).copied().unwrap_or((0, 0));
         out.push_str(&json(band));
         out.push(':');
         out.push_str(&triple_full(count, &carried));
@@ -464,6 +466,18 @@ fn json(text: &str) -> String {
     }
     out.push('"');
     out
+}
+
+/// The confidence bands an edge counts in: `0.85` and `0.5` at or above
+/// those confidences, and `all`.
+fn bands_of(confidence: f64) -> impl Iterator<Item = &'static str> {
+    [
+        ("0.85", confidence >= 0.85),
+        ("0.5", confidence >= 0.5),
+        ("all", true),
+    ]
+    .into_iter()
+    .filter_map(|(band, counts)| counts.then_some(band))
 }
 
 /// One group's `{edges, corroborated}` pair, keyed by text.
