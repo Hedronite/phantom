@@ -1,7 +1,7 @@
 //! Receiver type hints on method calls (SPEC-w10 G2a, D5).
 
 use phantom_fractal_lang::{Language, RefKind};
-use phantom_fractal_lang_rust::RustLanguage;
+use phantom_fractal_lang_rust::{MAX_HINT_VISITS, RustLanguage};
 
 /// The hint of the one method call named `m` in `source`.
 fn hint(source: &str) -> Option<String> {
@@ -362,4 +362,47 @@ fn a_method_call_in_a_macro_has_no_hint() {
         "{:?}",
         extract.refs
     );
+}
+
+/// `n` statements that bind other names.
+fn filler(n: usize) -> String {
+    (0..n).map(|i| format!("let a{i} = 0;\n")).collect()
+}
+
+#[test]
+fn the_walk_stops_after_4096_visits() {
+    assert_eq!(MAX_HINT_VISITS, 4096);
+    // The call visits its field expression, call, statement and block, the
+    // n statements before it, then `f` and the parameter: n + 6 visits.
+    let parameter = |n| hint(&format!("fn f(x: T) {{\n{}x.m();\n}}", filler(n)));
+    assert_eq!(parameter(4090).as_deref(), Some("type:T"));
+    assert_eq!(parameter(4091), None);
+    // Here the `let` is the last visit: n + 5.
+    let binding = |n| {
+        hint(&format!(
+            "fn f() {{\nlet x = T {{}};\n{}x.m();\n}}",
+            filler(n)
+        ))
+    };
+    assert_eq!(binding(4091).as_deref(), Some("type:T"));
+    assert_eq!(binding(4092), None);
+}
+
+#[test]
+fn a_near_binding_late_in_a_long_function_keeps_its_hint() {
+    let source = format!(
+        "fn f(x: U) {{\n{}let x = T {{}};\nx.m();\n}}",
+        filler(10_000)
+    );
+    assert_eq!(hint(&source).as_deref(), Some("type:T"));
+    let nested = format!(
+        "fn f() {{\nlet x = T {{}};\n{}{{ x.m(); }}\n}}",
+        filler(4089)
+    );
+    assert_eq!(hint(&nested).as_deref(), Some("type:T"));
+    let past = format!(
+        "fn f() {{\nlet x = T {{}};\n{}{{ x.m(); }}\n}}",
+        filler(4090)
+    );
+    assert_eq!(hint(&past), None);
 }

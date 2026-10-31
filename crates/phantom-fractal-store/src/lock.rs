@@ -85,6 +85,78 @@ impl Drop for WriterLock {
 
 /// `graph.db.lock` beside `db_path`, as `WriterLock` and [`lock_state`]
 /// address it.
+/// The lock open's per-target flags. The module `dirs.rs` pins gives
+/// `O_NOFOLLOW` — a raced-in link fails at open with `ELOOP` — and
+/// `O_NONBLOCK` — a `FIFO` answers at once instead of hanging its
+/// caller and falls through to the shape refusal.
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+))]
+fn lock_open_flags() -> i32 {
+    crate::dirs::checked_flags::O_NOFOLLOW | crate::dirs::checked_flags::O_NONBLOCK
+}
+
+/// The raw `ELOOP` number, per target from its errno table — no
+/// `libc` link: the number is the header's. macOS numbers it 62
+/// (`<sys/errno.h>`); Linux numbers it 40 on both pinned
+/// architectures (`asm-generic/errno-base.h`, exposed by
+/// `<errno.h>`).
+#[cfg(target_os = "macos")]
+const ELOOP_NUMBER: i32 = 62;
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const ELOOP_NUMBER: i32 = 40;
+
+#[cfg(target_os = "macos")]
+const _: () = assert!(ELOOP_NUMBER == 62);
+
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const _: () = assert!(ELOOP_NUMBER == 40);
+
+#[cfg(unix)]
+fn refusal_for_open(err: std::io::Error) -> StoreError {
+    if err.raw_os_error() == Some(ELOOP_NUMBER) {
+        StoreError::DataDirectory(
+            LOCK_ROLE.to_owned(),
+            "is a symlink or not a regular file".to_owned(),
+        )
+    } else {
+        StoreError::Io(err)
+    }
+}
+
+/// The one race window between the pre-open shape check and the open
+/// itself, test-only — the same pattern `dirs::swap_under_open` gives
+/// the directory chain. A test plants its own shape here and clears
+/// it after; no open in the crate sees it.
+#[cfg(test)]
+fn run_lock_race(path: &Path) {
+    let guard = LOCK_RACE.lock().expect("hook slot");
+    if let Some(action) = guard.as_ref() {
+        action(path);
+    }
+}
+
+/// Sets or clears the lock race window for the tests that read it.
+#[cfg(test)]
+pub(crate) fn race_lock_window(hook: Option<Hook>) {
+    *LOCK_RACE.lock().expect("hook slot") = hook;
+}
+
+#[cfg(test)]
+type Hook = Box<dyn Fn(&Path) + Send>;
+
+#[cfg(test)]
+static LOCK_RACE: std::sync::Mutex<Option<Hook>> = std::sync::Mutex::new(None);
 pub(crate) fn lock_path(db_path: &Path) -> PathBuf {
     let name = db_path
         .file_name()
@@ -147,10 +219,23 @@ pub(crate) fn open_existing(path: &Path) -> Result<Option<std::fs::File>, StoreE
     let Some(pre) = verified_lock_meta(path)? else {
         return Ok(None);
     };
-    let file = match std::fs::OpenOptions::new().read(true).open(path) {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+    ))]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(lock_open_flags());
+    }
+    let file = match options.open(path) {
         Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(StoreError::Io(err)),
+        Err(err) => return Err(refusal_for_open(err)),
     };
     #[cfg(unix)]
     if !same_file(&file, &pre)? {
@@ -166,31 +251,60 @@ pub(crate) fn open_existing(path: &Path) -> Result<Option<std::fs::File>, StoreE
 /// entry, identity-matched, before anything is locked or tightened.
 fn open_lock_file(path: &Path) -> Result<std::fs::File, StoreError> {
     verified_lock_meta(path)?;
+    #[cfg(test)]
+    run_lock_race(path);
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true).create_new(true);
-    #[cfg(unix)]
+    #[cfg(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+    ))]
     {
         use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(lock_open_flags());
+        options.mode(0o600);
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+    )))]
+    {
         options.mode(0o600);
     }
     match options.open(path) {
         Ok(file) => Ok(file),
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
             // Something raced in after the check: re-verify the shape,
-            // open the verified regular file, and match its identity.
+            // open the verified regular file with the same flags, and
+            // match its identity.
             let Some(pre) = verified_lock_meta(path)? else {
                 return Err(identity_refusal());
             };
             let mut reopen = std::fs::OpenOptions::new();
             reopen.read(true).write(true);
-            let file = reopen.open(path).map_err(StoreError::Io)?;
+            #[cfg(any(
+                target_os = "macos",
+                all(
+                    target_os = "linux",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+            ))]
+            use std::os::unix::fs::OpenOptionsExt;
+            reopen.custom_flags(lock_open_flags());
+            let file = reopen.open(path).map_err(refusal_for_open)?;
             #[cfg(unix)]
             if !same_file(&file, &pre)? {
                 return Err(identity_refusal());
             }
             Ok(file)
         }
-        Err(err) => Err(StoreError::Io(err)),
+        Err(err) => Err(refusal_for_open(err)),
     }
 }
 
