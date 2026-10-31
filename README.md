@@ -155,21 +155,21 @@ Any other form gives no dependency: a `[dependencies.B]` or `[dev-dependencies.B
 
 #### Measured
 
-On Phantom's own tree at commit `9fd0827`, against a SCIP index from rust-analyzer 1.95.0. These are the provisional figures of the contract run, and the review run's figures replace them. An edge is corroborated when rust-analyzer has the same caller and callee.
+On Phantom's own tree at commit `d5dbfe6`, against a SCIP index from rust-analyzer 1.95.0. An edge is corroborated when rust-analyzer has the same caller and callee. The covered figures, a secondary that is not graded, count only edges whose caller and callee both sit in files the SCIP index carries.
 
-| Measure | Edges | Corroborated | Precision |
-|---|---|---|---|
-| `typed-method` | 1022 | 995 | 0.9736 |
-| `unique-method` | 468 | 461 | 0.9850 |
-| Confidence 0.85 and up | 3155 | 3075 | 0.9746 |
-| Confidence 0.5 and up | 4645 | 4531 | 0.9755 |
+| Measure | Edges | Corroborated | Precision | Covered edges | Covered precision |
+|---|---|---|---|---|---|
+| `typed-method` | 1023 | 996 | 0.9736 | 996 | 1.0000 |
+| `unique-method` | 468 | 461 | 0.9850 | 463 | 0.9957 |
+| Confidence 0.85 and up | 3159 | 3079 | 0.9747 | 3079 | 1.0000 |
+| Confidence 0.5 and up | 4650 | 4536 | 0.9755 | 4538 | 0.9996 |
 
 Recall is the share of rust-analyzer's distinct caller and callee pairs that Phantom has as an edge. The graded figure is document-scoped: a reference takes the callee defined in its own document when its symbol has a definition there. The unscoped figure lets a symbol defined in several documents count a pair for each, as the earlier scorer did, and is kept for comparison.
 
 | Recall | Pairs | Hits | Ratio |
 |---|---|---|---|
-| Document-scoped (graded) | 5127 | 3300 | 0.6437 |
-| Unscoped (the earlier comparison) | 7518 | 3300 | 0.4389 |
+| Document-scoped (graded) | 5134 | 3306 | 0.6439 |
+| Unscoped (the earlier comparison) | 7525 | 3306 | 0.4393 |
 
 ### Never resolved
 
