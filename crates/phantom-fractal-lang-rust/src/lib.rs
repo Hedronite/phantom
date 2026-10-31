@@ -23,6 +23,7 @@ mod std_methods;
 
 use phantom_fractal_lang::{Extract, ExtractError, Item, ItemKind, Language, Visibility};
 
+pub use receivers::MAX_HINT_VISITS;
 pub use resolve::{confidence, links, method_owners, resolve, resolve_graph};
 pub use std_methods::STD_METHOD_NAMES;
 use tree_sitter::{Node, Parser, Query, QueryCursor, QueryMatch, StreamingIterator};
