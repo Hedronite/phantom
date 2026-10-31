@@ -80,3 +80,88 @@ impl crate::Store {
         )?)
     }
 }
+
+/// The spans the scorer matches against (SPEC-w10 G1): every stored
+/// symbol's identity, file, kind, name, inclusive 1-based line span,
+/// and test mark. Read-only; no write path touches it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SymbolSpan {
+    pub id: i64,
+    /// The file's path, repo-relative.
+    pub path: String,
+    /// Lowercase stored kind: `function` for a `fn`, `method` for a
+    /// method, and the other kinds the extract writes.
+    pub kind: String,
+    pub name: String,
+    /// Inclusive 1-based span the matcher contains against.
+    pub start_line: i64,
+    pub end_line: i64,
+    /// The test-module or `#[test]` mark, as stored.
+    pub is_test: bool,
+}
+
+/// One call-shaped ref stored under a symbol, for the scorer's miss
+/// buckets. Read-only; no user text or author data.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SymbolCallRef {
+    /// The ref kind text: `call`, `method_call`, `macro`, or
+    /// `macro_arg`.
+    pub kind: String,
+    /// The ref text as written.
+    pub text: String,
+    /// The receiver text the extractor kept, or none.
+    pub receiver: Option<String>,
+    /// True when an edge named this ref: the call was placed.
+    pub placed: bool,
+}
+
+impl crate::Store {
+    /// Every symbol's span, for the scorer's innermost-span matching.
+    pub fn symbol_spans(&self) -> Result<Vec<SymbolSpan>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT s.id, f.path, s.kind, s.name, s.start_line, s.end_line, s.is_test
+             FROM symbols s
+             JOIN files f ON f.id = s.file_id
+             ORDER BY s.id",
+        )?;
+        let mut rows = statement.query([])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push(SymbolSpan {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                kind: row.get(2)?,
+                name: row.get(3)?,
+                start_line: row.get(4)?,
+                end_line: row.get(5)?,
+                is_test: row.get::<_, i64>(6)? != 0,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Every call-shaped ref named under `id`, oldest first, with
+    /// whether an edge carried it. A symbol with no refs answers an
+    /// empty vector.
+    pub fn symbol_call_refs(&self, id: i64) -> Result<Vec<SymbolCallRef>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT r.kind, r.text, r.receiver,
+                    EXISTS (SELECT 1 FROM edges e WHERE e.ref_id = r.id)
+             FROM refs r
+             WHERE r.from_symbol = ?1
+               AND r.kind IN ('call', 'method_call', 'macro', 'macro_arg')
+             ORDER BY r.id",
+        )?;
+        let mut rows = statement.query([id])?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next()? {
+            out.push(SymbolCallRef {
+                kind: row.get(0)?,
+                text: row.get(1)?,
+                receiver: row.get(2)?,
+                placed: row.get::<_, i64>(3)? != 0,
+            });
+        }
+        Ok(out)
+    }
+}
