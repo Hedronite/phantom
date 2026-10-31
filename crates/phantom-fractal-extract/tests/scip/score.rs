@@ -1,5 +1,8 @@
-//! The span matcher and the deterministic report (SPEC-w10 G1): a SCIP
-//! definition maps to the innermost Phantom `fn` or method symbol in
+//! The span matcher and the deterministic report (SPEC-w10 G1, its
+//! W11 G1a counts): definitions are document-scoped (F2), the
+//! coverage-cast subsets per export (F1) sit beside the full figures,
+//! the W10 wide recall prints as `recall_unscoped`, and every miss
+//! bucket splits by the caller file's module claim. A SCIP
 //! its file whose inclusive span contains the definition line and
 //! whose name equals the last name in the SCIP descriptor; a
 //! reference belongs to the innermost span that contains it; the
@@ -64,7 +67,13 @@ fn innermost<'a>(
         })
 }
 
-/// The full scorer, over one parsed SCIP index and one indexed store.
+/// The full scorer, over one parsed SCIP index and one indexed
+/// store.
+///
+/// The definition scope is per document (F2, SPEC-w11 G1a): a
+/// reference takes the callees its own document mapped, and only a
+/// document with no mapped definition of that symbol falls back to
+/// every mapping.
 pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<String, String> {
     let all = store
         .symbol_spans()
@@ -76,25 +85,35 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
     let by_id: HashMap<i64, SymbolSpan> =
         spans.iter().map(|span| (span.id, span.clone())).collect();
 
-    // Definition maps: one SCIP symbol that carries a Definition
-    // occurrence maps to the innermost named span of its document.
-    let mut definitions: BTreeMap<String, BTreeSet<i64>> = BTreeMap::new();
+    // Definition maps (F2): one `(symbol, document)` key per SCIP
+    // definition, each mapping to the innermost named span of its
+    // own document.
+    let mut definitions: BTreeMap<(String, String), BTreeSet<i64>> = BTreeMap::new();
     for document in &index.documents {
         for occurrence in &document.occurrences {
             if !occurrence.is_definition {
                 continue;
             }
             let line = occurrence.range.start_line + 1;
+
             let Some(name) = last_descriptor(&occurrence.symbol) else {
                 continue;
             };
             if let Some(span) = innermost(&spans, &document.relative_path, line, Some(name)) {
                 definitions
-                    .entry(occurrence.symbol.clone())
+                    .entry((occurrence.symbol.clone(), document.relative_path.clone()))
                     .or_default()
                     .insert(span.id);
             }
         }
+    }
+    // The shipped fallback: a symbol whose definitions span documents.
+    let mut every: BTreeMap<String, BTreeSet<i64>> = BTreeMap::new();
+    for ((symbol, _document), callees) in &definitions {
+        every
+            .entry(symbol.clone())
+            .or_default()
+            .extend(callees.iter().copied());
     }
 
     // The truth set: a reference's caller is the span around it; its
@@ -109,10 +128,20 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
             let Some(caller) = innermost(&spans, &document.relative_path, line, None) else {
                 continue;
             };
-            if let Some(callees) = definitions.get(&occurrence.symbol) {
-                for callee in callees {
-                    truth.insert((caller.id, *callee));
-                }
+            // A reference takes the callees its own document defined;
+            // one whose document carried none takes every mapped
+            // callee, the shipped behaviour.
+            let empty = BTreeSet::new();
+            let local = definitions
+                .get(&(occurrence.symbol.clone(), document.relative_path.clone()))
+                .unwrap_or(&empty);
+            let callees = if local.is_empty() {
+                every.get(&occurrence.symbol).unwrap_or(&empty)
+            } else {
+                local
+            };
+            for callee in callees {
+                truth.insert((caller.id, *callee));
             }
         }
     }
@@ -126,9 +155,26 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
         .map(|edge| (edge.src_id, edge.dst_id))
         .collect();
 
-    // Per-reason and per-band edge-carry counts.
+    // The cover set (F1): the documents the export carries. A pair
+    // is covered when both its span files sit in that set.
+    let exported: BTreeSet<&str> = index
+        .documents
+        .iter()
+        .map(|document| document.relative_path.as_str())
+        .collect();
+    let covered_pair = |pair: (i64, i64)| {
+        matches!(
+            (by_id.get(&pair.0), by_id.get(&pair.1)),
+            (Some(a), Some(b))
+                if exported.contains(a.path.as_str())
+                    && exported.contains(b.path.as_str())
+        )
+    };
+
+    // Per-reason and per-band edge-carry counts, full and covered.
     let mut reasons: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     let mut bands: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    let mut covered: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for edge in &edges {
         pair_into(&mut reasons, edge.reason.clone(), &truth, edge);
         if edge.confidence >= 0.85 {
@@ -138,6 +184,9 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
             pair_into(&mut bands, "0.5".to_owned(), &truth, edge);
         }
         pair_into(&mut bands, "all".to_owned(), &truth, edge);
+        if covered_pair((edge.src_id, edge.dst_id)) {
+            pair_into(&mut covered, edge.reason.clone(), &truth, edge);
+        }
     }
 
     // The recall splits: cross-file pairs, and callers by their test
@@ -158,16 +207,24 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
         .copied()
         .collect();
 
-    // The miss buckets over the truth set minus the hits.
-    let mut misses: BTreeMap<&str, usize> = BTreeMap::new();
+    // The miss buckets over the truth set minus the hits, each with
+    // the caller's file-module split (`in_module`, `orphan`).
+    let mut misses: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
     for bucket in MISS_BUCKETS {
-        misses.insert(bucket, 0);
+        misses.insert(bucket, (0, 0));
     }
     for pair in truth.difference(&hits) {
-        let Some(callee) = by_id.get(&pair.1) else {
-            *misses.get_mut("other").expect("named bucket") += 1;
+        let Some(caller) = by_id.get(&pair.0) else {
+            misses.get_mut("other").expect("named bucket").0 += 1;
             continue;
         };
+        let Some(callee) = by_id.get(&pair.1) else {
+            misses.get_mut("other").expect("named bucket").0 += 1;
+            continue;
+        };
+        let in_module = store
+            .file_has_module(caller.file_id)
+            .map_err(|err| format!("store: {err}"))?;
         let callee_name = callee.name.clone();
         let is_trait = store
             .symbol_facts(pair.1)
@@ -175,7 +232,12 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
             .map(|facts| facts.trait_name.is_some())
             .unwrap_or(false);
         let bucket = miss_bucket(store, *pair, callee_name.as_str(), is_trait)?;
-        *misses.get_mut(bucket).expect("named bucket") += 1;
+        let slot = misses.get_mut(bucket).expect("named bucket");
+        if in_module {
+            slot.0 += 1;
+        } else {
+            slot.1 += 1;
+        }
     }
 
     // The report.
@@ -184,21 +246,25 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
         if position > 0 {
             out.push(',');
         }
+        let carried = covered.get(reason).copied().unwrap_or((0, 0));
         out.push_str(&json(reason));
         out.push(':');
-        out.push_str(&triple(count));
+        out.push_str(&triple_full(count, &carried));
     }
     out.push_str("},\"confidence\":{");
     for (position, (band, count)) in bands.iter().enumerate() {
         if position > 0 {
             out.push(',');
         }
+        let carried = covered.get(band).copied().unwrap_or((0, 0));
         out.push_str(&json(band));
         out.push(':');
-        out.push_str(&triple(count));
+        out.push_str(&triple_full(count, &carried));
     }
     out.push_str("},\"recall\":");
-    out.push_str(&recall(&truth, &hits, &cross, &test_callers));
+    out.push_str(&recall(&truth, &hits, &cross, &test_callers, &covered_pair));
+    out.push_str(",\"recall_unscoped\":");
+    out.push_str(&split(truth.len(), hits.intersection(&truth).count()));
     out.push_str(",\"misses\":{");
     for (position, (bucket, count)) in misses.iter().enumerate() {
         if position > 0 {
@@ -206,10 +272,22 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
         }
         out.push_str(&json(bucket));
         out.push(':');
-        out.push_str(&count.to_string());
+        out.push_str(&split_pair(count));
     }
     out.push_str("}}");
     Ok(out)
+}
+
+/// One group's `{edges, corroborated, precision, covered}` — the
+/// full denominator first, the coverage-cast subset after (F1).
+fn triple_full(count: &(usize, usize), covered: &(usize, usize)) -> String {
+    format!(
+        "{{\"edges\":{},\"corroborated\":{},\"precision\":{},\"covered\":{}}}",
+        count.0,
+        count.1,
+        ratio(count.1, count.0),
+        triple(covered)
+    )
 }
 
 /// One group's `{edges, corroborated, precision}`.
@@ -229,25 +307,51 @@ fn recall(
     hits: &BTreeSet<(i64, i64)>,
     cross: &BTreeSet<(i64, i64)>,
     test: &BTreeSet<(i64, i64)>,
+    covered_pair: &dyn Fn((i64, i64)) -> bool,
 ) -> String {
-    let total_hits = hits.intersection(truth).count();
-    let cross_hits = cross.iter().filter(|pair| hits.contains(*pair)).count();
-    let test_hits = test.iter().filter(|pair| hits.contains(*pair)).count();
-    let test_truth = test.len();
-    let production_truth = truth.len() - test_truth;
+    // The scoped numbers (F1), then the same splits measured in
+    // scope.
+    let scoped_truth: BTreeSet<(i64, i64)> = truth
+        .iter()
+        .copied()
+        .filter(|pair| covered_pair(*pair))
+        .collect();
+    let scoped_hits: BTreeSet<(i64, i64)> = hits
+        .intersection(truth)
+        .copied()
+        .filter(|pair| covered_pair(*pair))
+        .collect();
+    let total = scoped_truth.len();
+    let total_hits = scoped_hits.len();
+    let cross_hits = scoped_truth
+        .intersection(cross)
+        .filter(|pair| scoped_hits.contains(*pair))
+        .count();
+    let test_hits = scoped_truth
+        .intersection(test)
+        .filter(|pair| scoped_hits.contains(*pair))
+        .count();
+    let test_truth = scoped_truth.intersection(test).count();
+    let production_truth = total - test_truth;
     let production_hits = total_hits - test_hits;
     format!(
         "{{\"truth\":{},\"hits\":{},\"ratio\":{},\
          \"cross_file\":{},\
          \"production_callers\":{},\
          \"test_callers\":{}}}",
-        truth.len(),
+        total,
         total_hits,
-        ratio(total_hits, truth.len()),
+        ratio(total_hits, total),
         split(cross.len(), cross_hits),
         split(production_truth, production_hits),
         split(test_truth, test_hits),
     )
+}
+
+/// One bucket's `{in_module, orphan}` counters, the split the
+/// caller's file gives.
+fn split_pair(count: &(usize, usize)) -> String {
+    format!("{{\"in_module\":{},\"orphan\":{}}}", count.0, count.1)
 }
 
 /// One split's `{truth, hits, ratio}`.
