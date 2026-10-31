@@ -49,38 +49,40 @@ impl Drop for Temp {
 #[test]
 #[ignore = "manual: blake3 of PHANTOM_SCIP for the baseline note"]
 fn hash() {
-    let scip = std::env::var("PHANTOM_SCIP")
-        .expect("PHANTOM_SCIP: the rust-analyzer export's path");
-    let bytes = std::fs::read(&scip)
-        .unwrap_or_else(|err| panic!("{}: {err}", scip));
-    println!("{} {}", blake3::hash(&bytes).to_hex().to_string(), scip);
+    let scip =
+        std::env::var("PHANTOM_SCIP").expect("PHANTOM_SCIP: the rust-analyzer export's path");
+    let bytes = std::fs::read(&scip).unwrap_or_else(|err| panic!("{}: {err}", scip));
+    println!("{} {}", blake3::hash(&bytes).to_hex(), scip);
 }
 
 #[test]
 #[ignore = "manual: reads PHANTOM_SCIP and PHANTOM_SCORE_ROOT (GOAL-w10 D3)"]
 fn score() {
-    let scip = std::env::var("PHANTOM_SCIP")
-        .expect("PHANTOM_SCIP: the rust-analyzer export's path");
+    let scip =
+        std::env::var("PHANTOM_SCIP").expect("PHANTOM_SCIP: the rust-analyzer export's path");
     let root = std::env::var("PHANTOM_SCORE_ROOT")
         .expect("PHANTOM_SCORE_ROOT: the tree the export carries");
-    let bytes = std::fs::read(&scip)
-        .unwrap_or_else(|err| panic!("{}: {err}", scip));
-    let parsed = scip::wire::parse_index(&bytes)
-        .unwrap_or_else(|err| panic!("{}: {err}", scip));
+    let bytes = std::fs::read(&scip).unwrap_or_else(|err| panic!("{}: {err}", scip));
+    let parsed = scip::wire::parse_index(&bytes).unwrap_or_else(|err| panic!("{}: {err}", scip));
 
     let temp = Temp::new("w10");
     let mut store = Store::open(&temp.db()).expect("open score store");
     let root_path = PathBuf::from(&root);
-    index(&root_path, &mut store, &RustLanguage::new().expect("grammar"))
-        .expect("index the scored root");
-    let report =
-        scip::score::score(&parsed, &store).expect("score");
+    index(
+        &root_path,
+        &mut store,
+        &RustLanguage::new().expect("grammar"),
+    )
+    .expect("index the scored root");
+    let report = scip::score::score(&parsed, &store).expect("score");
 
     // Deterministic: two runs over the same inputs must print the same
     // bytes, and nothing in the reply may be a path.
     let again = scip::score::score(&parsed, &store).expect("score again");
     assert_eq!(report, again, "two runs of the same tree differ");
-    let no_path = report.lines().any(|line| line.contains("/Users/") || line.contains("/home/"));
+    let no_path = report
+        .lines()
+        .any(|line| line.contains("/Users/") || line.contains("/home/"));
     assert!(!no_path, "the report carries an absolute path: {report}");
     println!("{report}");
 }

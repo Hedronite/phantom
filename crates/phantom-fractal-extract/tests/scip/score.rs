@@ -56,7 +56,12 @@ fn innermost<'a>(
             Some(name) => span.name == name,
             None => true,
         })
-        .min_by_key(|span| (span.end_line - span.start_line, std::cmp::Reverse(span.start_line)))
+        .min_by_key(|span| {
+            (
+                span.end_line - span.start_line,
+                std::cmp::Reverse(span.start_line),
+            )
+        })
 }
 
 /// The full scorer, over one parsed SCIP index and one indexed store.
@@ -116,8 +121,10 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
     let edges = store
         .edges_of_kind("call")
         .map_err(|err| format!("store: {err}"))?;
-    let hits: BTreeSet<(i64, i64)> =
-        edges.iter().map(|edge| (edge.src_id, edge.dst_id)).collect();
+    let hits: BTreeSet<(i64, i64)> = edges
+        .iter()
+        .map(|edge| (edge.src_id, edge.dst_id))
+        .collect();
 
     // Per-reason and per-band edge-carry counts.
     let mut reasons: BTreeMap<String, (usize, usize)> = BTreeMap::new();
@@ -277,7 +284,10 @@ fn miss_bucket(
     {
         return Ok("macro argument");
     }
-    if candidates.iter().any(|reference| reference.kind == "call" && !reference.placed) {
+    if candidates
+        .iter()
+        .any(|reference| reference.kind == "call" && !reference.placed)
+    {
         return Ok("unresolved path call");
     }
     let methods: Vec<&SymbolCallRef> = candidates

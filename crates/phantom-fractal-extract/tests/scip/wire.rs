@@ -80,7 +80,11 @@ impl<'a> Cursor<'a> {
 
     /// One byte, or a failure at the end of the input.
     fn byte(&mut self, reason: &'static str) -> Result<u8, Malformed> {
-        let byte = self.bytes.get(self.at).copied().ok_or(Malformed { reason })?;
+        let byte = self
+            .bytes
+            .get(self.at)
+            .copied()
+            .ok_or(Malformed { reason })?;
         self.at += 1;
         Ok(byte)
     }
@@ -305,8 +309,12 @@ fn parse_multi_line(body: &[u8]) -> Result<Range, Malformed> {
             }
         }
     }
-    let [Some(start_line), Some(start_character), Some(end_line), Some(end_character)] =
-        fields
+    let [
+        Some(start_line),
+        Some(start_character),
+        Some(end_line),
+        Some(end_character),
+    ] = fields
     else {
         return Err(Malformed { reason: REASON });
     };
@@ -329,10 +337,8 @@ pub(crate) fn parse_document(body: &[u8]) -> Result<Document, Malformed> {
         let (field, wire, payload) = next_field(&mut cursor)?;
         match (field, wire) {
             (1, LENGTH) => {
-                let text =
-                    std::str::from_utf8(payload.expect("length")).map_err(|_| Malformed {
-                        reason: REASON,
-                    })?;
+                let text = std::str::from_utf8(payload.expect("length"))
+                    .map_err(|_| Malformed { reason: REASON })?;
                 path = Some(text.to_owned());
             }
             (2, LENGTH) => {

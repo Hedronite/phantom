@@ -7,7 +7,7 @@
 #[path = "scip/mod.rs"]
 mod scip;
 
-use scip::wire::{parse_index, Range};
+use scip::wire::{Range, parse_index};
 
 /// A base-128 varint, per the proto spec.
 fn push_varint(out: &mut Vec<u8>, value: u64) {
@@ -99,30 +99,38 @@ fn fixture() -> Vec<u8> {
     };
     push_field(&mut out, 1, &metadata);
     push_string(&mut out, 9, "unknown index payload");
-    push_field(&mut out, 2, &document(
-        "src/tee.rs",
-        &[
-            &occurrence_single(0, "rust-analyzer cargo phantom 1.0.0 crate#tee().", true),
-            &occurrence_single(2, "rust-analyzer cargo phantom 1.0.0 crate#tee().", false),
-            // The definition of a second symbol, on the same line as
-            // nothing else.
-            &occurrence_single(4, "rust-analyzer cargo phantom 1.0.0 crate#spout.", true),
-            // An occurrence with no symbol and no range: not carried.
-            &{
-                let mut out = Vec::new();
-                push_int(&mut out, 5, 1);
-                out
-            },
-        ],
-    ));
-    push_field(&mut out, 2, &document(
-        "src/lib.rs",
-        &[
-            // A reference to the `tee` method from another file, with
-            // a multi-line packed range.
-            &occurrence_packed(10, 12, "rust-analyzer cargo phantom 1.0.0 crate#tee()."),
-        ],
-    ));
+    push_field(
+        &mut out,
+        2,
+        &document(
+            "src/tee.rs",
+            &[
+                &occurrence_single(0, "rust-analyzer cargo phantom 1.0.0 crate#tee().", true),
+                &occurrence_single(2, "rust-analyzer cargo phantom 1.0.0 crate#tee().", false),
+                // The definition of a second symbol, on the same line as
+                // nothing else.
+                &occurrence_single(4, "rust-analyzer cargo phantom 1.0.0 crate#spout.", true),
+                // An occurrence with no symbol and no range: not carried.
+                &{
+                    let mut out = Vec::new();
+                    push_int(&mut out, 5, 1);
+                    out
+                },
+            ],
+        ),
+    );
+    push_field(
+        &mut out,
+        2,
+        &document(
+            "src/lib.rs",
+            &[
+                // A reference to the `tee` method from another file, with
+                // a multi-line packed range.
+                &occurrence_packed(10, 12, "rust-analyzer cargo phantom 1.0.0 crate#tee()."),
+            ],
+        ),
+    );
     push_field(&mut out, 3, document("src/seek.rs", &[]).as_slice());
     out
 }
@@ -198,9 +206,12 @@ fn a_dangling_dropped_or_unknown_field_is_skipped() {
     let index = parse_index(&fixture()).expect("parses");
     // The fixture's symbol-less occurrence and the unknown string
     // fields either way are skipped, never carried.
-    assert!(index.documents.iter().all(|doc| doc.occurrences.iter().all(
-        |occ| !occ.symbol.is_empty())
-    ));
+    assert!(
+        index
+            .documents
+            .iter()
+            .all(|doc| doc.occurrences.iter().all(|occ| !occ.symbol.is_empty()))
+    );
     // The whole index parses knowledge anew: an idempotent second read
     // gives the same frames.
     let twice = parse_index(&fixture()).expect("parses");
@@ -212,10 +223,7 @@ fn malformed_wire_fails_never_panics() {
     // A tag of wire 7 is unused; a field 0 is reserved; a lone body.
     let broken: &[&[u8]] = &[&[0x3b], &[0x00], &[0x02], &[0x0a, 0xff], &[0x0a, 0x01]];
     for bytes in broken {
-        assert!(
-            parse_index(bytes).is_err(),
-            "{bytes:?} would parse",
-        );
+        assert!(parse_index(bytes).is_err(), "{bytes:?} would parse",);
     }
     // A document without a path, an occurrence-less index, and a
     // truncated `SingleLineRange` all fail rather than panic.
