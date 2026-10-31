@@ -380,7 +380,7 @@ fn status_has_the_spec_keys_and_no_path() {
         );
         assert_eq!(
             data["versions"],
-            json!({ "schema": 3, "extractor": 8, "envelope": 1 })
+            json!({ "schema": 3, "extractor": 9, "envelope": 1 })
         );
         assert_eq!(
             data["epochs"],
@@ -601,12 +601,12 @@ fn status_flags_an_index_from_another_extractor_version() {
                 "{line}"
             );
         };
-        status(false, 8);
+        status(false, 9);
         world.store().set_extractor_version(7).expect("stamp 7");
         let db = world.db();
         status(true, 7);
         assert_eq!(world.db(), db, "git {git}: status wrote");
         world.index();
-        status(false, 8);
+        status(false, 9);
     }
 }

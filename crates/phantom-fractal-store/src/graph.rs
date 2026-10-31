@@ -146,6 +146,7 @@ pub(crate) fn target_kind_to_text(kind: TargetKind) -> &'static str {
     match kind {
         TargetKind::Lib => "lib",
         TargetKind::Bin => "bin",
+        TargetKind::Test => "test",
     }
 }
 
@@ -153,6 +154,7 @@ pub(crate) fn target_kind_from_text(kind: &str) -> Result<TargetKind, StoreError
     match kind {
         "lib" => Ok(TargetKind::Lib),
         "bin" => Ok(TargetKind::Bin),
+        "test" => Ok(TargetKind::Test),
         other => Err(StoreError::UnknownKind(other.to_owned())),
     }
 }

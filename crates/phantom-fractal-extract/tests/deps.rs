@@ -38,6 +38,7 @@ fn on_core() -> Vec<Dep> {
         package: "app".to_owned(),
         on: "core-lib".to_owned(),
         crate_name: "core_lib".to_owned(),
+        dev: false,
     }]
 }
 
@@ -101,12 +102,13 @@ fn other_dependency_forms_give_no_dependency() {
 }
 
 #[test]
-fn only_the_dependencies_table_counts() {
+fn only_the_dependencies_and_dev_dependencies_tables_count() {
     for section in [
         "[dependencies.core-lib]\npath = \"../core-lib\"",
-        "[dev-dependencies]\ncore-lib = { path = \"../core-lib\" }",
+        "[dev-dependencies.core-lib]\npath = \"../core-lib\"",
         "[build-dependencies]\ncore-lib = { path = \"../core-lib\" }",
         "[target.'cfg(unix)'.dependencies]\ncore-lib = { path = \"../core-lib\" }",
+        "[target.'cfg(unix)'.dev-dependencies]\ncore-lib = { path = \"../core-lib\" }",
         "[workspace.dependencies]\ncore-lib = { path = \"../core-lib\" }",
     ] {
         let manifests = workspace(ROOT, &format!("serde = \"1\"\n\n{section}"));
@@ -193,4 +195,52 @@ fn a_root_package_can_be_depended_on_and_can_depend() {
             ("leaf".to_owned(), "top".to_owned())
         ]
     );
+}
+
+/// `app` with `deps` as its `[dev-dependencies]` lines.
+fn app_dev_deps(deps: &str) -> Vec<Dep> {
+    scan(&workspace(
+        ROOT,
+        &format!("serde = \"1\"\n\n[dev-dependencies]\n{deps}"),
+    ))
+}
+
+fn dev_on_core() -> Vec<Dep> {
+    vec![Dep {
+        dev: true,
+        ..on_core().remove(0)
+    }]
+}
+
+#[test]
+fn a_dev_dependency_counts_in_the_same_forms_marked_dev() {
+    for line in [
+        "core-lib = { path = \"../core-lib\" }",
+        "core-lib = { version = \"0.1\", path = '../core-lib', features = [\"a\"] }",
+        "core-lib.workspace = true",
+        "core-lib = { workspace = true, optional = true }",
+    ] {
+        assert_eq!(app_dev_deps(line), dev_on_core(), "{line}");
+    }
+    for line in [
+        "core-lib = \"0.1\"",
+        "core = { path = \"../core-lib\", package = \"core-lib\" }",
+        "core-lib = { git = \"https://example.invalid/core\", path = \"../core-lib\" }",
+        "\"core-lib\" = { path = \"../core-lib\" }",
+        "core-lib = {\n    path = \"../core-lib\",\n}",
+        "core-lib = { path = \"/abs/core-lib\" }",
+        "other = { path = \"../core-lib\" }",
+        "app = { path = \".\" }",
+    ] {
+        assert_eq!(app_dev_deps(line), [], "{line}");
+    }
+}
+
+#[test]
+fn a_package_both_tables_name_gives_two_entries() {
+    let line = "core-lib = { path = \"../core-lib\" }";
+    let manifests = workspace(ROOT, &format!("{line}\n\n[dev-dependencies]\n{line}"));
+    let mut want = on_core();
+    want.extend(dev_on_core());
+    assert_eq!(scan(&manifests), want);
 }

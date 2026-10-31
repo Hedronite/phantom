@@ -286,13 +286,136 @@ fn a_file_reached_twice_keeps_its_first_module() {
 #[test]
 fn files_no_target_reaches_are_orphans() {
     let files = [
+        file("benches/b.rs", vec![]),
+        file("examples/e.rs", vec![]),
         file("src/lib.rs", vec![]),
         file("src/lost.rs", vec![]),
-        file("tests/it.rs", vec![]),
     ];
     let graph = build(&[package("pkg")], &files);
-    assert_eq!(graph.orphans, ["src/lost.rs", "tests/it.rs"]);
+    assert_eq!(
+        graph.orphans,
+        ["benches/b.rs", "examples/e.rs", "src/lost.rs"]
+    );
     let none = build(&[], &files);
     assert!(none.targets.is_empty() && none.modules.is_empty());
-    assert_eq!(none.orphans.len(), 3);
+    assert_eq!(none.orphans.len(), 4);
+}
+
+#[test]
+fn test_targets_are_tests_files_and_directories_with_a_main() {
+    let files = [
+        file("src/lib.rs", vec![]),
+        file("tests/a.rs", vec![]),
+        file("tests/deep/x/main.rs", vec![]),
+        file("tests/helper/lib.rs", vec![]),
+        file("tests/suite/main.rs", vec![]),
+        file("tests/z.txt.rs", vec![]),
+    ];
+    let graph = build(&[package("pkg")], &files);
+    let got: Vec<(i64, TargetKind, &str, &str)> = graph
+        .targets
+        .iter()
+        .map(|t| (t.id, t.kind, t.name.as_str(), t.root.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (1, TargetKind::Lib, "pkg", "src/lib.rs"),
+            (2, TargetKind::Test, "a", "tests/a.rs"),
+            (3, TargetKind::Test, "suite", "tests/suite/main.rs"),
+            (4, TargetKind::Test, "z.txt", "tests/z.txt.rs"),
+        ]
+    );
+    assert_eq!(
+        graph.orphans,
+        ["tests/deep/x/main.rs", "tests/helper/lib.rs"]
+    );
+}
+
+#[test]
+fn test_targets_follow_every_lib_and_bin_so_those_keep_their_files() {
+    let manifests = [
+        manifest("a/Cargo.toml", "[package]\nname = \"a\"\n"),
+        manifest("b/Cargo.toml", "[package]\nname = \"b\"\n"),
+    ];
+    let files = [
+        file("a/src/lib.rs", vec![]),
+        file(
+            "a/tests/t.rs",
+            vec![decl("x", "", false, Some("../../b/src/x.rs"))],
+        ),
+        file("b/src/lib.rs", vec![decl("x", "", false, None)]),
+        file("b/src/x.rs", vec![]),
+    ];
+    let graph = build(&manifests, &files);
+    let got: Vec<(i64, &str)> = graph
+        .targets
+        .iter()
+        .map(|t| (t.id, t.root.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (1, "a/src/lib.rs"),
+            (2, "b/src/lib.rs"),
+            (3, "a/tests/t.rs")
+        ]
+    );
+    assert_eq!(
+        modules(&graph),
+        [
+            row("a/src/lib.rs", "crate", "a/src/lib.rs", ""),
+            row("b/src/lib.rs", "crate", "b/src/lib.rs", ""),
+            row("b/src/lib.rs", "crate::x", "b/src/x.rs", ""),
+            row("a/tests/t.rs", "crate", "a/tests/t.rs", ""),
+        ]
+    );
+}
+
+#[test]
+fn a_test_root_looks_beside_itself_and_every_module_of_it_is_a_test_module() {
+    let common = || vec![decl("common", "", false, None)];
+    let files = [
+        file("src/lib.rs", vec![decl("inner", "", true, None)]),
+        file("tests/common/mod.rs", vec![decl("util", "", false, None)]),
+        file("tests/common/util.rs", vec![]),
+        file("tests/plain.rs", common()),
+        file(
+            "tests/suite/main.rs",
+            vec![decl("common", "", false, Some("../common/mod.rs"))],
+        ),
+    ];
+    let graph = build(&[package("pkg")], &files);
+    assert_eq!(
+        modules(&graph),
+        [
+            row("src/lib.rs", "crate", "src/lib.rs", ""),
+            row("src/lib.rs", "crate::inner", "src/lib.rs", "inner"),
+            row("tests/plain.rs", "crate", "tests/plain.rs", ""),
+            row("tests/plain.rs", "crate::common", "tests/common/mod.rs", ""),
+            row(
+                "tests/plain.rs",
+                "crate::common::util",
+                "tests/common/util.rs",
+                ""
+            ),
+            row("tests/suite/main.rs", "crate", "tests/suite/main.rs", ""),
+        ]
+    );
+    // `common` keeps its first module, under `plain`.
+    let tests: Vec<&str> = graph
+        .test_modules
+        .iter()
+        .map(|id| graph.modules[*id as usize - 1].file.as_str())
+        .collect();
+    assert_eq!(
+        tests,
+        [
+            "tests/plain.rs",
+            "tests/common/mod.rs",
+            "tests/common/util.rs",
+            "tests/suite/main.rs",
+        ]
+    );
+    assert!(graph.orphans.is_empty(), "{:?}", graph.orphans);
 }

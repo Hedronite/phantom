@@ -2,7 +2,8 @@
 //!
 //! Each manifest is scanned line by line: no TOML crate. Package `A` may
 //! call workspace package `B` only for these forms in `A`'s
-//! `[dependencies]`:
+//! `[dependencies]`, or in its `[dev-dependencies]`, whose entries are
+//! marked dev and serve `A`'s test targets only (SPEC-w11 G1b):
 //!
 //! - one line `B = { … path = "…" … }` whose path, from `A`'s directory,
 //!   stays inside the root and is `B`'s package directory;
@@ -13,9 +14,10 @@
 //! Anything else gives no dependency: a `[dependencies.B]` table, a
 //! `package = "…"` rename, a `git` source, an inline table over several
 //! lines, a version-only line, a quoted key, and every other section,
-//! `[dev-dependencies]` and `[target.….dependencies]` included. A bin
-//! calling its own package's lib is not a dependency; the resolver allows
-//! it from the target kind.
+//! `[build-dependencies]`, `[target.….dependencies]` and
+//! `[target.….dev-dependencies]` included. A bin or test calling its own
+//! package's lib is not a dependency; the resolver allows it from the
+//! target kind.
 
 use std::collections::HashMap;
 
@@ -51,7 +53,12 @@ pub fn scan(manifests: &[Manifest]) -> Vec<Dep> {
             continue;
         };
         let dir = parent_dir(&package.manifest_path);
-        for (key, form) in entries(&manifest.text, "[dependencies]") {
+        let sections = [("[dependencies]", false), ("[dev-dependencies]", true)];
+        for (dev, (key, form)) in sections.into_iter().flat_map(|(header, dev)| {
+            entries(&manifest.text, header)
+                .into_iter()
+                .map(move |entry| (dev, entry))
+        }) {
             let named = match form {
                 Form::Path(path) => inside(dir, &path),
                 Form::Workspace => workspace.get(&key).cloned(),
@@ -66,6 +73,7 @@ pub fn scan(manifests: &[Manifest]) -> Vec<Dep> {
                 package: package.name.clone(),
                 crate_name: key.replace('-', "_"),
                 on: key,
+                dev,
             };
             if !deps.contains(&dep) {
                 deps.push(dep);

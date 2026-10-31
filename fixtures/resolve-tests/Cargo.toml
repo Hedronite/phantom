@@ -1,0 +1,6 @@
+[workspace]
+members = ["app", "probe"]
+resolver = "2"
+
+[workspace.dependencies]
+probe = { path = "probe" }
