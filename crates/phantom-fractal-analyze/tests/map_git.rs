@@ -26,6 +26,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use phantom_fractal_analyze::{Detail, MapRequest, estimate_tokens, packing_budget, render};
@@ -52,13 +53,15 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new(tag: &str) -> Self {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|dur| dur.as_nanos())
             .unwrap_or(0);
         let path = std::env::temp_dir().join(format!(
-            "phantom-fractal-analyze-map-git-{tag}-{}-{nanos}",
-            process::id()
+            "phantom-fractal-analyze-map-git-{tag}-{}-{nanos}-{}",
+            process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(path.join("repo")).expect("temp dir");
         fs::create_dir_all(path.join("home")).expect("temp home");
