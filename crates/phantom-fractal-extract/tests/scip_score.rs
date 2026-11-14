@@ -365,7 +365,7 @@ impl S2 {
     pub fn m(&self) {}
 }
 pub fn caller_call_recv() {
-    make::<Amb1>().jj();
+    (make::<Amb1>)().jj();
 }
 pub fn caller_ctor() {
     let c = Amb3::build();
@@ -437,7 +437,7 @@ pub fn caller_other(v: Vec<i32>) {
             ),
             occurrence(
                 "d4",
-                line_of(&lines, "make::<Amb1>().jj();", 0),
+                line_of(&lines, "(make::<Amb1>)().jj();", 0),
                 4,
                 13,
                 "Amb1.jj",
