@@ -96,7 +96,11 @@ pub struct Reference {
     /// call. `T` is the path as written, without generic arguments, with
     /// `Self` replaced by the impl's self type. A method name in a
     /// [`RefKind::MacroArg`] whose receiver is one identifier takes its hint
-    /// the same way. None for any other binding, receiver or kind.
+    /// the same way. Since SPEC-w12 G2a, `let x = f(…)` gives `ret:f` and
+    /// `let x = f(…)?` gives `ret?:f`; a receiver that is itself a path call
+    /// gives `ret:f`, `ret?:f`, `ctor:T::f` or `ctor?:T::f`; and `self.f`
+    /// gives `type:T` when `Self` is a struct of the same file with a named
+    /// field `f: T`. None for any other binding, receiver or kind.
     pub receiver_type: Option<String>,
     /// True for a single-segment [`RefKind::Call`], or a single-segment
     /// path in a [`RefKind::MacroArg`], whose name is bound

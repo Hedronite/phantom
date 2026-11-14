@@ -319,7 +319,11 @@ fn each_d4_bucket_classifies_its_hand_built_refs() {
 /// extracted macro-arg miss reads the path shape; the method shape
 /// key is the hand-built refs above and arrives with G1b. The W11
 /// coarse keys are gone, and the origin line reads zero with no
-/// macro_arg edge.
+/// macro_arg edge. Two shapes are built to stay misses under the D6
+/// cures too (R9): `Holder` is generic, so the same-file field hint
+/// clears, and `make` returns its own generic, so the ret hint
+/// clears - the ambiguous method is the only reason either stays
+/// unplaced.
 #[test]
 fn each_d4_bucket_holds_its_extracted_case() {
     let temp = Temp::new("d4");
@@ -329,12 +333,12 @@ fn each_d4_bucket_holds_its_extracted_case() {
     let source = r#"pub struct Amb1;
 pub struct Amb2;
 pub struct Amb3;
-pub struct Holder {
-    pub f: Amb1,
+pub struct Holder<F> {
+    pub f: F,
 }
 pub struct S2;
-pub fn make() -> Amb1 {
-    Amb1
+pub fn make<T: Default>() -> T {
+    T::default()
 }
 pub fn one() {}
 pub fn one_macro() {}
@@ -352,7 +356,7 @@ impl Amb3 {
         Some(Amb3)
     }
 }
-impl Holder {
+impl<F> Holder<F> {
     pub fn caller_self_field(&self) {
         self.f.jj();
     }
@@ -361,7 +365,7 @@ impl S2 {
     pub fn m(&self) {}
 }
 pub fn caller_call_recv() {
-    make().jj();
+    (make::<Amb1>)().jj();
 }
 pub fn caller_ctor() {
     let c = Amb3::build();
@@ -433,7 +437,7 @@ pub fn caller_other(v: Vec<i32>) {
             ),
             occurrence(
                 "d4",
-                line_of(&lines, "make().jj();", 0),
+                line_of(&lines, "(make::<Amb1>)().jj();", 0),
                 4,
                 13,
                 "Amb1.jj",

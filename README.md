@@ -109,7 +109,7 @@ That output is cut to one hit.
 
 ### Resolution
 
-A call inside a function is a candidate when it is a path call, such as `f()`, `a::f()`, `Type::new()`, or `Self::new()`, a method call on `self`, such as `self.m()`, a method call on a plain identifier with a [type hint](#type-hints), such as `x.m()`, or, by its name alone, a method call on any other receiver with no hint. A single-segment name that the function binds with `let`, a parameter, a closure parameter, or a pattern is shadowed and not resolved. A call gets an edge only when exactly one symbol fits. Otherwise it gets no edge and is counted instead.
+A call inside a function is a candidate when it is a path call, such as `f()`, `a::f()`, `Type::new()`, or `Self::new()`, a method call on `self`, such as `self.m()`, a method call whose receiver has a [type hint](#type-hints), such as `x.m()`, `self.f.m()`, or `f().m()`, or, by its name alone, a method call on any other receiver. A single-segment name that the function binds with `let`, a parameter, a closure parameter, or a pattern is shadowed and not resolved. A call gets an edge only when exactly one symbol fits. Otherwise it gets no edge and is counted instead.
 
 | Reason | Confidence | When |
 |---|---|---|
@@ -120,8 +120,8 @@ A call inside a function is a candidate when it is a path call, such as `f()`, `
 | `self-method` | 0.9 | `self.m()` in a method of an `impl` block. The impl's self type resolves by the path rows (`path-exact`, `local`, `use-alias`, and `crate-path`) to one struct or enum, so `impl Show for core_lib::Thing` counts. Exactly one method named `m` belongs to an impl of that type, inherent or trait, across the whole index, not only in the caller's target: a method of that name for the same type in another target means no edge. |
 | `self-assoc` | 0.9 | `Self::m()`, exactly two segments, in a method of an `impl` block, by the same rule as `self-method`: the self type resolves by the path rows, `crate-path` included, and the method is the only candidate across the whole index. |
 | `crate-path` | 0.95 | The first segment is the crate name of a workspace lib that the caller's package may call, as below, and the rest walks from that lib's root to one item or method. The path may be written in the call or reached through a `use`. A local item, child module, or `use` with that name wins. |
-| `typed-method` | 0.8 | `x.m()`, where `x` is a plain identifier other than `self` with a [type hint](#type-hints). The hinted type resolves, by the type lookup `self-method` and `assoc` use, to one workspace struct or enum, and exactly one method named `m` belongs to it, inherent or in an `impl Trait for` it. |
-| `unique-method` | 0.5 | `x.m()` on a receiver other than `self` with no [type hint](#type-hints), where exactly one method in the whole workspace is named `m`, counting inherent and trait-impl methods of every type in every target, and `m` is not on `STD_METHOD_NAMES`, the sorted list of `core`, `alloc`, and `std` method names written out in the source. A free function of that name does not count. A call with a hint never takes this rule, even when its hint places nothing. |
+| `typed-method` | 0.8 | A method call whose receiver has a [type hint](#type-hints): a plain identifier `x` other than `self`, a field `self.f`, or a path call `f(…)` or `T::f(…)`. The hinted type resolves, by the type lookup `self-method` and `assoc` use, to one workspace struct or enum, and exactly one method named `m` belongs to it, inherent or in an `impl Trait for` it. |
+| `unique-method` | 0.5 | `x.m()` on a receiver other than `self`, where exactly one method in the whole workspace is named `m`, counting inherent and trait-impl methods of every type in every target, and `m` is not on `STD_METHOD_NAMES`, the sorted list of `core`, `alloc`, and `std` method names written out in the source. A free function of that name does not count. It applies to a call with no hint, and to a call whose hint is one of the [placed receivers](#placed-receivers), before that hint is tried. A call on a plain identifier whose hint comes from its parameter, a typed `let`, a struct literal, or `T::f(…)` never takes this rule, even when its hint places nothing. |
 
 So an inherent and a trait method with the same name, or two `#[cfg]` impls of one method, give `self.m()` no edge. A trait's own default body is not in an `impl` block, so its `self.m()` gets no edge either.
 
@@ -134,10 +134,25 @@ A hint for `x` comes from the nearest binding of `x` before the call, in an encl
 | a parameter `x: T`, `&T`, `&mut T`, `Box<T>`, `Rc<T>`, or `Arc<T>` | `T` |
 | `let x: T = …`, with the same wrappers | `T` |
 | `let x = T { … }` | `T` |
-| `let x = T::f(…)` | `T`, when `T::f` resolves as `assoc` does and its signature returns `Self` or `T` |
-| `let x = T::f(…)?` | `T`, when `T::f` resolves as `assoc` does and its signature returns `Result<Self, _>`, `Result<T, _>`, `Option<Self>`, or `Option<T>` |
+| `let x = T::f(…)` | `T`, when `T::f` resolves as `assoc` does and its signature returns `Self` or `T`; or `R`, when it returns another workspace struct or enum `R` |
+| `let x = T::f(…)?` | the same, through `Result<…, _>` or `Option<…>`: `Result<Self, _>`, `Option<T>`, `Result<R, _>`, and so on |
+| `let x = f(…)` or `let x = a::f(…)` | the type `f` returns, as [Placed receivers](#placed-receivers) describes |
+| `let x = f(…)?` | the type inside the `Result` or `Option` that `f` returns |
 
-`T` is the path as written, without generic arguments, and `Self` in an `impl` body stands for the impl's self type. Any other binding of `x` clears the hint: a `let` with no type to read, such as `let x = f()` or `let x: _`, a pattern in `match`, `if let`, `while let`, or `for`, a closure parameter, a tuple or struct pattern, `impl Trait`, `dyn Trait`, or `_`. A hint that names no workspace struct or enum, a constructor that returns something else, or a type with no method `m` or more than one gives no edge. The hint is stored with the call's reference, so a later pass reads it back.
+`T` is the path as written, without generic arguments, and `Self` in an `impl` body stands for the impl's self type. When `T` in `T::f` names no type, such as a module path, the call is read as a path call `f`. Any other binding of `x` clears the hint: a `let` with no type to read, such as `let x = o.g()` or `let x: _`, a pattern in `match`, `if let`, `while let`, or `for`, a closure parameter, a tuple or struct pattern, `impl Trait`, `dyn Trait`, or `_`. A hint that names no workspace struct or enum, a constructor or function that returns something else, or a type with no method `m` or more than one gives no edge. The hint is stored with the call's reference, so a later pass reads it back.
+
+#### Placed receivers
+
+Four more receivers take a hint. None is inferred: each is read from a declaration the index already holds.
+
+- **A same-file field,** `self.f.m()`, in a method whose `Self` is a struct declared in the same file with a named field `f: T`, under the wrappers a parameter takes. A generic of the struct or the impl clears it, and so do a tuple field, a self type that two structs of the file share or none has, and a field of a field, `self.a.b.m()`.
+- **A function's return,** `let x = f(…)` or `let x = f(…)?`, where `f` is a path call that names exactly one workspace function or method by the call rows, from the call's module. Its signature must return a path type, or with `?` a `Result` or `Option` of one, naming one struct or enum of `f`'s own module. A reference, a tuple, `impl Trait`, `dyn Trait`, `Self`, or a generic of the function gives nothing, and so does a name the function binds, such as a closure.
+- **A path-call receiver,** `f(…).m()` or `T::f(…).m()`, by the same rule as a `let` of that call. Only one level counts: `f().g().m()` has no hint.
+- **A constructor of another type,** `let x = T::f(…)`, where `T::f` returns a workspace struct or enum `R` other than `T`, gives `R`. A generic of the method, or of the impl's self type, gives nothing.
+
+**A new hint never displaces an edge.** A call with one of these hints first takes `unique-method` when the name rule places it, and its hint is tried only when the name rule places nothing. So every edge the rows above gave before is kept, and the hint only places calls that had none. A `let x = T::f(…)` that returns another type is the exception to that order, since it is typed only, as any `T::f(…)` hint is: a call with that hint never had a `unique-method` edge.
+
+Still never typed: a field of a struct declared in another file, a method chain, a closure or iterator element, and a receiver known only through a trait, such as `dyn Trait`, `impl Trait`, or a generic. [Never resolved](#never-resolved) lists them with the rest.
 
 For `crate-path`, the crate name is the package name with `-` turned to `_`. Package A depends on workspace package B only when one of these holds:
 
@@ -159,33 +174,33 @@ A call-shaped name in a macro invocation's tokens, such as `f(x)` in `assert!(f(
 
 - A path, `f(`, `a::f(`, `T::f(`, or `Self::f(`, takes the path rows in the invocation's module: `path-exact`, `local`, `use-alias`, `assoc`, `self-assoc`, and `crate-path`. A single-segment name that the enclosing function binds is shadowed, as it is outside a macro.
 - `self.m(` takes `self-method`.
-- `x.m(`, where `x` is one identifier, takes a [type hint](#type-hints) from the bindings of `x` before the invocation; a binding inside the macro's own tokens is not seen. With a hint it is placed only by `typed-method`, and with none only by `unique-method`.
+- `x.m(`, where `x` is one identifier, takes a [type hint](#type-hints) from the bindings of `x` before the invocation, `let x = f(…)` included; a binding inside the macro's own tokens is not seen. It is placed as the same call outside a macro would be: by `typed-method` alone for a hint from a parameter, a typed `let`, a struct literal, or `T::f(…)`; by `unique-method` and then its hint for `let x = f(…)`; and by `unique-method` alone with no hint. The field and path-call receivers of [Placed receivers](#placed-receivers) are never read inside a macro, since its tokens are not parsed.
 - A method name on any other receiver, such as `a.b().m(` or `self.f.m(`, is placed only by `unique-method`, `STD_METHOD_NAMES` included.
 
 Each edge keeps the reason and confidence of its row. A call-shaped name that no row places gets no edge and is in none of `index`'s counts; [`macro_boundary`](#completeness) counts it. The invocation itself is counted under `macros`, with no edge. A `macro_rules!` body is never scanned, so a call written there has no reference at all.
 
 #### Measured
 
-On Phantom's own tree at commit `6499f87`, against a SCIP index from rust-analyzer 1.95.0. These are the contract run's figures, from the commit that added [calls inside macros](#calls-inside-macros), and the review run's figures replace them. An edge is corroborated when rust-analyzer has the same caller and callee. The covered figures, a secondary that is not graded, count only edges whose caller and callee both sit in files the SCIP index carries. The last row counts only edges placed from inside a macro's tokens.
+On Phantom's own tree at commit `986c55d`, against a SCIP index from rust-analyzer 1.95.0. These are the contract run's figures, from the commit that added [placed receivers](#placed-receivers), and the review run's figures replace them. An edge is corroborated when rust-analyzer has the same caller and callee. The covered figures, a secondary that is not graded, count only edges whose caller and callee both sit in files the SCIP index carries. The last row counts only edges placed from inside a macro's tokens.
 
 | Measure | Edges | Corroborated | Precision | Covered edges | Covered precision |
 |---|---|---|---|---|---|
-| `typed-method` | 1161 | 1134 | 0.9767 | 1134 | 1.0000 |
-| `unique-method` | 651 | 647 | 0.9939 | 649 | 0.9969 |
-| Confidence 0.85 and up | 3912 | 3829 | 0.9788 | 3829 | 1.0000 |
-| Confidence 0.5 and up | 5724 | 5610 | 0.9801 | 5612 | 0.9996 |
-| From inside a macro | 1018 | 1015 | 0.9971 | — | — |
+| `typed-method` | 1265 | 1225 | 0.9684 | 1225 | 1.0000 |
+| `unique-method` | 653 | 648 | 0.9923 | 650 | 0.9969 |
+| Confidence 0.85 and up | 3983 | 3892 | 0.9772 | 3892 | 1.0000 |
+| Confidence 0.5 and up | 5901 | 5765 | 0.9770 | 5767 | 0.9997 |
+| From inside a macro | 1027 | 1024 | 0.9971 | — | — |
 
 Recall is the share of rust-analyzer's distinct caller and callee pairs that Phantom has as an edge. The graded figure is document-scoped: a reference takes the callee defined in its own document when its symbol has a definition there. The unscoped figure lets a symbol defined in several documents count a pair for each, as the earlier scorer did, and is kept for comparison.
 
 | Recall | Pairs | Hits | Ratio |
 |---|---|---|---|
-| Document-scoped (graded) | 5242 | 3790 | 0.7230 |
-| Unscoped (the earlier comparison) | 7637 | 3790 | 0.4963 |
+| Document-scoped (graded) | 5345 | 3899 | 0.7295 |
+| Unscoped (the earlier comparison) | 7753 | 3899 | 0.5029 |
 
 ### Never resolved
 
-- **Receivers:** a method call on a receiver other than `self` with no [type hint](#type-hints), such as `self.field.m()`, `a.b().m()`, `(*self).m()`, or an unhinted `x.m()`, is placed only by `unique-method`, so it stays unresolved when two or more workspace methods share its name or the name is on `STD_METHOD_NAMES`. A call whose hint places nothing stays unresolved. No receiver is typed by a field's type, a free function's return type, or a closure or iterator element.
+- **Receivers:** a method call on a receiver other than `self` with no [type hint](#type-hints), such as `a.b().m()`, `(*self).m()`, or an unhinted `x.m()`, is placed only by `unique-method`, so it stays unresolved when two or more workspace methods share its name or the name is on `STD_METHOD_NAMES`. A call whose hint and name rule both place nothing stays unresolved. No receiver is typed by a field of a struct declared in another file, a field of a field, a method chain such as `x.f().m()` or `f().g().m()`, or a closure or iterator element.
 - **Dispatch:** a method that only a trait's provided default supplies, `<T as Trait>::f`, blanket impls, and dispatch on `dyn` or a generic.
 - **Crates:** `std`, `core`, `alloc`, registry and git crates, renamed dependencies (`package = "…"`), `[target.…].dependencies` and `[target.…].dev-dependencies`, `[build-dependencies]`, `[dev-dependencies]` from a lib or a bin, a lib's `#[cfg(test)]` modules included, `extern crate … as …`, and `[lib] path`, `[[bin]] path`, and `[[test]] path`. The targets are `src/lib.rs`, `src/main.rs`, `src/bin/*.rs`, `tests/*.rs`, and `tests/*/main.rs`; `benches/` and `examples/` have none.
 - **Other edges:** edges for paths that are not calls, for types, and for struct literals, and names that only a glob import such as `use a::*` supplies.
@@ -193,7 +208,7 @@ Recall is the share of rust-analyzer's distinct caller and callee pairs that Pha
 
 ### Nothing runs
 
-Phantom reads source text only. Macros are never expanded: they are counted by name, and a call-shaped name in a macro's tokens (`f(…)`, `a::f(…)`, or `.m(…)`, nested macros included, `macro_rules!` bodies not) is placed by its shape alone, as [Calls inside macros](#calls-inside-macros) describes, or recorded as a fact with no edge. There is no type inference: a receiver other than `self` is typed only by the binding text that [Type hints](#type-hints) lists. Phantom never runs cargo, rustc, rust-analyzer, git, a build script, a proc macro, or any other code or command from the indexed repo.
+Phantom reads source text only. Macros are never expanded: they are counted by name, and a call-shaped name in a macro's tokens (`f(…)`, `a::f(…)`, or `.m(…)`, nested macros included, `macro_rules!` bodies not) is placed by its shape alone, as [Calls inside macros](#calls-inside-macros) describes, or recorded as a fact with no edge. There is no type inference: a receiver other than `self` is typed only by the binding, field, and signature text that [Type hints](#type-hints) and [Placed receivers](#placed-receivers) list. Phantom never runs cargo, rustc, rust-analyzer, git, a build script, a proc macro, or any other code or command from the indexed repo.
 
 ## Impact
 
@@ -265,7 +280,7 @@ That output, from `fixtures/impact`, is cut to one hit: the depth-2 group is lef
 
 ### What impact does not do
 
-Canon §7.3 describes more than this command does. The impact of a diff is [Diff impact](#diff-impact). A path between two symbols is [Path](#path). There is no file path as a target, no `--edges`, no rank, and no co-change: history never changes what `impact` reports. Only `calls` edges are walked, so receivers other than `self` and trait dispatch are not followed.
+Canon §7.3 describes more than this command does. The impact of a diff is [Diff impact](#diff-impact). A path between two symbols is [Path](#path). There is no file path as a target, no `--edges`, no rank, and no co-change: history never changes what `impact` reports. Only `calls` edges are walked, so a call that [Resolution](#resolution) does not place, such as one through trait dispatch, is not followed.
 
 ## Diff impact
 
@@ -534,7 +549,7 @@ An index describes the tree as it was at the last `index`. Every success envelop
 On the history in [`cochange`](#cochange), after `fract index .` and one line added to `src/b.rs`, `fract status` prints:
 
 ```
-{"ok":true,"data":{"key":"repo-a4236502","name":"repo","head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","stale":true,"changes":{"added":0,"modified":1,"removed":0},"fingerprint_changed":false,"extractor_changed":false,"counts":{"files":8,"symbols":15,"edges":2},"versions":{"schema":3,"extractor":10,"envelope":1},"epochs":{"graph":1,"rank":1},"cochange":{"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","commits_seen":23,"skipped_bulk":0,"pairs":4,"window":{"days":365,"max_commits":5000}},"lock":"free"},"meta":{"stale":true,"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","rank_epoch":1},"error":null,"schema":1}
+{"ok":true,"data":{"key":"repo-a4236502","name":"repo","head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","stale":true,"changes":{"added":0,"modified":1,"removed":0},"fingerprint_changed":false,"extractor_changed":false,"counts":{"files":8,"symbols":15,"edges":2},"versions":{"schema":3,"extractor":11,"envelope":1},"epochs":{"graph":1,"rank":1},"cochange":{"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","commits_seen":23,"skipped_bulk":0,"pairs":4,"window":{"days":365,"max_commits":5000}},"lock":"free"},"meta":{"stale":true,"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","rank_epoch":1},"error":null,"schema":1}
 ```
 
 The key's hash comes from the tree's canonical path, so it differs on another machine. `fract find fb` still answers from the index, with the same `meta`.
@@ -614,7 +629,7 @@ Each index is a directory under the data directory's `repos/`, named `<name>-<ha
 1. `data_dir`: `repos/` and each index directory are private (no group or other bits, and not a link), the data directory is not writable by group or others, and every one of them, and every database file, is owned by the data directory's owner. No data directory yet is fine.
 2. `databases`: each `graph.db`, and its WAL and shared memory when present, is `0600`. Its schema, read from the SQLite header without opening the database, is not newer than this binary's. An older schema is noted, since `index` migrates it.
 3. `locks`: whether a writer holds each index. A held lock is not a fault.
-4. `extractor`: the extractor version this binary writes, 10.
+4. `extractor`: the extractor version this binary writes, 11.
 5. `grammar`: the tree-sitter-rust version the binary was built with.
 6. `network`: `none: Phantom has no network code`.
 7. `git`: for each index, whether HEAD reads at its stored tree, or why it was not checked. Only a HEAD that cannot be read is a fault.
@@ -785,7 +800,7 @@ The answers are heuristic. Only resolved calls, trait impls, and imports are edg
 `phantom-fractal version` prints one line and exits 0:
 
 ```
-{"ok":true,"data":{"name":"phantom-fractal","version":"0.0.0","git_sha":"<40 lowercase hex, or null>","extractor_version":10,"store_schema":3},"error":null,"schema":1}
+{"ok":true,"data":{"name":"phantom-fractal","version":"0.0.0","git_sha":"<40 lowercase hex, or null>","extractor_version":11,"store_schema":3},"error":null,"schema":1}
 ```
 
 `phantom-fractal --json version`, `phantom-fractal version --json`, and `fract version` print the same line. `data` holds these fields, in this order:
@@ -795,7 +810,7 @@ The answers are heuristic. Only resolved calls, trait impls, and imports are edg
 | `name` | `phantom-fractal`, under `fract` too |
 | `version` | the CLI crate's version, `0.0.0` |
 | `git_sha` | the commit the binary was built from, as 40 lowercase hex characters, or `null` when unknown |
-| `extractor_version` | the extractor version the binary writes, 10 |
+| `extractor_version` | the extractor version the binary writes, 11 |
 | `store_schema` | the store schema version the binary writes, 3 |
 
 `git_sha` is fixed at build time. `PHANTOM_FRACTAL_GIT_SHA`, when it holds 40 hex characters, sets it, for packagers. Otherwise it is the output of `git rev-parse HEAD` in the CLI crate's directory. With no git, no `.git` (as in a crates.io tarball), or a refused repository, it is `null`, and the build still succeeds.

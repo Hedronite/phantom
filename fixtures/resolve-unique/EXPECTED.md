@@ -3,12 +3,13 @@ title: Expected edges — resolve-unique fixture
 type: fixture
 status: ground-truth
 created: "2026-10-30"
-updated: "2026-10-30"
+updated: "2026-11-14"
 owner: fullstack
 spec: "[[foundry/phantom/specs/SPEC-w10]]"
 cross_refs:
   - "[[foundry/phantom/checklists/CHECKLIST-w10]]"
   - "[[foundry/phantom/rubrics/RUBRIC-w10]]"
+  - "[[foundry/phantom/specs/SPEC-w12]]"
 tags:
   - phantom
   - fixture
@@ -28,8 +29,8 @@ A symbol is written `<target>:<module path>::<name>`, with the impl owner before
 | `one_unique_name` | `make().settle()` | no hint (the receiver is a call), and `settle` is the one workspace method of that name | `unique-method` to `Ledger::settle` |
 | `a_field_receiver` | `s.ledger.settle()` | no hint (the receiver is a field) | `unique-method` to `Ledger::settle` |
 | `a_cleared_hint` | `|x| x.settle()` | a closure parameter clears the hint | `unique-method` to `Ledger::settle` |
-| `a_stoplisted_name` | `make().len()` | `len` is on `STD_METHOD_NAMES`, though `Ledger::len` is the one workspace `len` | none |
-| `a_name_defined_twice` | `make().label()` | `Ledger::label` and `Book::label` | none |
+| `a_stoplisted_name` | `make().len()` | `len` is on `STD_METHOD_NAMES`, though `Ledger::len` is the one workspace `len`, so the name rule places nothing; the receiver is the path call `make()`, which returns `Ledger`, so its hint `ret:make` places it (W12 G2a) | `typed-method` to `Ledger::len` |
+| `a_name_defined_twice` | `make().label()` | `Ledger::label` and `Book::label`, so the name rule places nothing; the hint `ret:make` names `Ledger` (W12 G2a) | `typed-method` to `Ledger::label` |
 | `a_hint_that_places_nothing` | `v.settle()` with `v: Vec<u8>` | the receiver has a hint, `type:Vec`, which places nothing; only an unhinted call takes the name rule | none |
 | `a_typed_call_stays_typed` | `l.settle()` with `l: Ledger` | the hint places it | `typed-method` to `Ledger::settle` |
 | `Book::shelve` | `self.settle()` | a `self` receiver takes only the `self-method` tier, and `Book` has no `settle` | none (unresolved) |
@@ -38,7 +39,9 @@ A symbol is written `<target>:<module path>::<name>`, with the impl owner before
 
 - `lib:crate::a_cleared_hint -> lib:crate::Ledger::settle unique-method`
 - `lib:crate::a_field_receiver -> lib:crate::Ledger::settle unique-method`
+- `lib:crate::a_name_defined_twice -> lib:crate::Ledger::label typed-method`
 - `lib:crate::a_name_defined_twice -> lib:crate::make local`
+- `lib:crate::a_stoplisted_name -> lib:crate::Ledger::len typed-method`
 - `lib:crate::a_stoplisted_name -> lib:crate::make local`
 - `lib:crate::a_typed_call_stays_typed -> lib:crate::Ledger::settle typed-method`
 - `lib:crate::one_unique_name -> lib:crate::Ledger::settle unique-method`
@@ -46,13 +49,13 @@ A symbol is written `<target>:<module path>::<name>`, with the impl owner before
 
 ## Counts
 
-- edges: 7
+- edges: 9
 - unresolved: 1
 - external: 0
 - no_source: 0
-- method_calls: 3
+- method_calls: 1
 - macros: 0
 - modules: 1
 - orphans: 0
 
-`unresolved` is `self.settle()` in `Book::shelve`. `method_calls` is `make().len()`, `make().label()` and `v.settle()`.
+`unresolved` is `self.settle()` in `Book::shelve`. `method_calls` is `v.settle()`.
