@@ -575,7 +575,8 @@ fn index_lists_typed_method_after_crate_path() {
             "self-assoc",
             "crate-path",
             "typed-method",
-            "unique-method"
+            "unique-method",
+            "use-glob"
         ],
         "{line}"
     );
