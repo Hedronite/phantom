@@ -83,8 +83,6 @@ impl Drop for WriterLock {
     }
 }
 
-/// `graph.db.lock` beside `db_path`, as `WriterLock` and [`lock_state`]
-/// address it.
 /// The lock open's per-target flags. The module `dirs.rs` pins gives
 /// `O_NOFOLLOW` — a raced-in link fails at open with `ELOOP` — and
 /// `O_NONBLOCK` — a `FIFO` answers at once instead of hanging its
@@ -124,14 +122,20 @@ const _: () = assert!(ELOOP_NUMBER == 40);
 
 #[cfg(unix)]
 fn refusal_for_open(err: std::io::Error) -> StoreError {
+    #[cfg(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+    ))]
     if err.raw_os_error() == Some(ELOOP_NUMBER) {
-        StoreError::DataDirectory(
+        return StoreError::DataDirectory(
             LOCK_ROLE.to_owned(),
             "is a symlink or not a regular file".to_owned(),
-        )
-    } else {
-        StoreError::Io(err)
+        );
     }
+    StoreError::Io(err)
 }
 
 /// The one race window between the pre-open shape check and the open
@@ -157,6 +161,8 @@ type Hook = Box<dyn Fn(&Path) + Send>;
 
 #[cfg(test)]
 static LOCK_RACE: std::sync::Mutex<Option<Hook>> = std::sync::Mutex::new(None);
+/// `graph.db.lock` beside `db_path`, as `WriterLock` and [`lock_state`]
+/// address it.
 pub(crate) fn lock_path(db_path: &Path) -> PathBuf {
     let name = db_path
         .file_name()
@@ -253,6 +259,8 @@ fn open_lock_file(path: &Path) -> Result<std::fs::File, StoreError> {
     verified_lock_meta(path)?;
     #[cfg(test)]
     run_lock_race(path);
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true).create_new(true);
     #[cfg(any(
@@ -262,21 +270,9 @@ fn open_lock_file(path: &Path) -> Result<std::fs::File, StoreError> {
             any(target_arch = "x86_64", target_arch = "aarch64")
         ),
     ))]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(lock_open_flags());
-        options.mode(0o600);
-    }
-    #[cfg(not(any(
-        target_os = "macos",
-        all(
-            target_os = "linux",
-            any(target_arch = "x86_64", target_arch = "aarch64")
-        ),
-    )))]
-    {
-        options.mode(0o600);
-    }
+    options.custom_flags(lock_open_flags());
+    #[cfg(unix)]
+    options.mode(0o600);
     match options.open(path) {
         Ok(file) => Ok(file),
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -295,7 +291,6 @@ fn open_lock_file(path: &Path) -> Result<std::fs::File, StoreError> {
                     any(target_arch = "x86_64", target_arch = "aarch64")
                 ),
             ))]
-            use std::os::unix::fs::OpenOptionsExt;
             reopen.custom_flags(lock_open_flags());
             let file = reopen.open(path).map_err(refusal_for_open)?;
             #[cfg(unix)]
