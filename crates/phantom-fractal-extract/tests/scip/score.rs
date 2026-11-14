@@ -518,7 +518,7 @@ pub fn score_with(
         out.push(':');
         out.push_str(&graded_full(count, &full));
     }
-    out.push_str("},\"split\":{");
+    out.push_str("}},\"split\":{");
     for (position, (taken, sources)) in split_taken.iter().enumerate() {
         if position > 0 {
             out.push(',');
@@ -535,7 +535,7 @@ pub fn score_with(
         }
         out.push('}');
     }
-    out.push_str("}}");
+    out.push_str("}");
     out.push('}');
     Ok(out)
 }
