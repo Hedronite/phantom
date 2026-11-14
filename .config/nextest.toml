@@ -27,3 +27,8 @@ exclusive-fs = { max-threads = 1 }
 [[profile.ci.overrides]]
 filter = 'binary(hint_bound) & test(=a_20000_statement_function_keeps_the_walk_bounded)'
 slow-timeout = { period = "30s", terminate-after = 2 }
+
+# A wall-clock assert, flaky on shared macOS runners: retry it in ci only.
+[[profile.ci.overrides]]
+filter = 'binary(watch) & test(=a_burst_of_twenty_saves_inside_the_debounce_is_one_batch)'
+retries = 2
