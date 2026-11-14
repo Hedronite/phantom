@@ -349,18 +349,21 @@ fn only_a_plain_identifier_receiver_has_a_hint() {
 }
 
 #[test]
-fn a_method_call_in_a_macro_has_no_hint() {
+fn a_method_name_in_a_macro_takes_the_hint_of_its_receiver() {
+    // A macro's tokens give no `MethodCall`; the `MacroArg` takes the hint
+    // (SPEC-w12 G1b).
     let extract = RustLanguage::new()
         .expect("query compiles")
         .extract("fn f(x: T) { println!(\"{}\", x.m()); }")
         .expect("source parses");
-    assert!(
-        extract
-            .refs
-            .iter()
-            .all(|r| r.receiver_type.is_none() && r.kind != RefKind::MethodCall),
-        "{:?}",
-        extract.refs
+    let hints: Vec<(RefKind, Option<&str>)> = extract
+        .refs
+        .iter()
+        .map(|r| (r.kind, r.receiver_type.as_deref()))
+        .collect();
+    assert_eq!(
+        hints,
+        [(RefKind::Macro, None), (RefKind::MacroArg, Some("type:T"))]
     );
 }
 

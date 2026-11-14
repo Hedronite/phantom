@@ -3,13 +3,14 @@ title: Expected impact — impact fixture
 type: fixture
 status: ground-truth
 created: "2026-10-28"
-updated: "2026-10-28"
+updated: "2026-11-13"
 owner: fullstack
 spec: "[[foundry/phantom/specs/SPEC-w5]]"
 cross_refs:
   - "[[foundry/phantom/checklists/CHECKLIST-w5]]"
   - "[[foundry/phantom/rubrics/RUBRIC-w5]]"
   - "[[foundry/phantom/w5]]"
+  - "[[foundry/phantom/specs/SPEC-w12]]"
 options: "max_depth 3, min_confidence 0.2, include_tests true"
 tags:
   - phantom
@@ -54,7 +55,7 @@ Every group's `total` is its number of `hit:` lines, and no group is truncated.
   - `inline_tests::helper` sits in an inline `#[cfg(test)]` module.
   - `tests.rs` `helper` and `t_root` sit in a `#[cfg(test)] mod tests;` file module.
   - Tests are listed apart and not expanded, so `inline_tests::outer`, which calls `helper`, is never reached.
-- **Macros.** `used_in_macros` appears inside `assert!(…)` and `vec![…]` in `checks`, two `macro_arg` refs with no edge.
+- **Macros.** `used_in_macros` appears inside `assert!(…)` and `vec![…]` in `checks`, two `macro_arg` refs. Both resolve by `local` (W12), so `checks` is an ordinary caller and `macro_boundary` does not apply.
 - **Typed method (W10).** `square.area()` in `run` reaches `Square::area` at 0.8 by `typed-method`, through `let square = engine::shapes::Square::new(3);`, whose `new` returns `Self`.
 - **Targets.**
   - `Square::area` is a trait-impl method.
@@ -90,11 +91,12 @@ Every group's `total` is its number of `hit:` lines, and no group is truncated.
 
 ## Target used_in_macros
 
-- risk: unknown
+- risk: low
 - exact: false
-- reasons: macro_boundary=2, external_users_possible
-- counts: direct 1, total 1, packages 1, tests 0, below_floor 0
+- reasons: external_users_possible
+- counts: direct 2, total 2, packages 1, tests 0, below_floor 0
 - hit: 1 engine/src/lib.rs:41 real 0.95 local engine/src/lib.rs:42
+- hit: 1 engine/src/lib.rs:45 checks 0.95 local engine/src/lib.rs:46
 
 ## Target ping
 

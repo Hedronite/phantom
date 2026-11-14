@@ -1,0 +1,4 @@
+# Macro-argument fixture for SPEC-w12 G1b. Never built or run.
+[workspace]
+members = ["app", "util"]
+resolver = "2"

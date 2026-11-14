@@ -1,11 +1,8 @@
 //! `MacroArg` refs: call-shaped names inside macro token trees
-//! (SPEC-w5 G1a).
+//! (SPEC-w5 G1a), with their receivers, hints and shadowing (SPEC-w12 G1b).
 
-mod support;
-
-use phantom_fractal_lang::{Caller, Extract, Language, RefKind, ResolveCounts};
-use phantom_fractal_lang_rust::RustLanguage;
-use support::Input;
+use phantom_fractal_lang::{Caller, Extract, Language, RefKind};
+use phantom_fractal_lang_rust::{MAX_HINT_VISITS, RustLanguage};
 
 fn extract(source: &str) -> Extract {
     RustLanguage::new()
@@ -142,16 +139,116 @@ fn the_macro_itself_is_still_one_macro_ref() {
     );
 }
 
+/// `(text, receiver, hint, shadowed)` of every `MacroArg` in `source`, in
+/// ref order.
+type Facts = (String, Option<String>, Option<String>, bool);
+
+fn facts(source: &str) -> Vec<Facts> {
+    extract(source)
+        .refs
+        .into_iter()
+        .filter(|r| r.kind == RefKind::MacroArg)
+        .map(|r| (r.text, r.receiver, r.receiver_type, r.shadowed))
+        .collect()
+}
+
+fn fact(text: &str, receiver: Option<&str>, hint: Option<&str>, shadowed: bool) -> Facts {
+    (
+        text.to_owned(),
+        receiver.map(str::to_owned),
+        hint.map(str::to_owned),
+        shadowed,
+    )
+}
+
 #[test]
-fn the_resolver_never_places_or_counts_a_macro_arg() {
-    let mut i = Input::new();
-    let caller = i.function("caller");
-    i.function("helper");
-    for text in ["helper", "crate::helper", "std::mem::drop", "x"] {
-        i.call_in(Some(caller), "src/lib.rs", "", text, RefKind::MacroArg);
-    }
-    i.call_in(None, "src/lib.rs", "", "helper", RefKind::MacroArg);
-    let (edges, counts) = i.resolve();
-    assert_eq!(edges, []);
-    assert_eq!(counts, ResolveCounts::default());
+fn a_method_name_keeps_the_tokens_of_its_receiver() {
+    let source = "fn f() {\n    m!(self.a(), x.b(), &y.c(), x.y.d(), f(1).e(), z?.g(), \
+                  1.h(), (.i()), ::w.j(), k.l::<u8>(), q[0].r(), s . t (2));\n}\n";
+    let receivers: Vec<(String, Option<String>)> = facts(source)
+        .into_iter()
+        .map(|(text, receiver, ..)| (text, receiver))
+        .collect();
+    let want = [
+        ("a", Some("self")),
+        ("b", Some("x")),
+        ("c", Some("y")),
+        ("d", Some("x.y")),
+        ("f", None),
+        ("e", Some("f(1)")),
+        ("g", Some("z?")),
+        ("h", Some("1")),
+        ("i", Some("")),
+        ("j", Some("::w")),
+        ("l::<u8>", Some("k")),
+        ("r", Some("q[0]")),
+        ("t", Some("s")),
+    ];
+    let want: Vec<(String, Option<String>)> = want
+        .iter()
+        .map(|(text, receiver)| ((*text).to_owned(), receiver.map(str::to_owned)))
+        .collect();
+    assert_eq!(receivers, want);
+}
+
+#[test]
+fn one_identifier_takes_its_hint_from_the_binding_walk() {
+    let source = "struct T;\nstruct U;\nimpl T {\n    fn new() -> Self { T }\n    \
+                  fn go(&self, x: &U) {\n        let t = T::new();\n        \
+                  let u = U {};\n        assert!(self.a() && x.b() && t.c() && u.d());\n        \
+                  assert!(x.e.f() && u.g()?.h());\n    }\n}\n\
+                  fn plain<V>(v: V, w: Box<U>) {\n    assert!(v.i() && w.j());\n}\n";
+    assert_eq!(
+        facts(source),
+        [
+            fact("a", Some("self"), None, false),
+            fact("b", Some("x"), Some("type:U"), false),
+            fact("c", Some("t"), Some("ctor:T::new"), false),
+            fact("d", Some("u"), Some("type:U"), false),
+            fact("f", Some("x.e"), None, false),
+            fact("g", Some("u"), Some("type:U"), false),
+            fact("h", Some("u.g()?"), None, false),
+            fact("i", Some("v"), None, false),
+            fact("j", Some("w"), Some("type:U"), false),
+        ]
+    );
+}
+
+#[test]
+fn a_binding_inside_the_macro_tokens_is_not_seen() {
+    // The tokens are never parsed, so only bindings outside them count.
+    let source = "fn f(x: T) {\n    m!({ let x = U {}; x.m() });\n}\n";
+    assert_eq!(facts(source), [fact("m", Some("x"), Some("type:T"), false)]);
+}
+
+#[test]
+fn the_hint_walk_in_a_macro_stops_after_4096_visits() {
+    assert_eq!(MAX_HINT_VISITS, 4096);
+    // The token visits its token tree, the invocation, its statement and
+    // block, the n statements before it, then `f` and the parameter.
+    let hint = |n: usize| {
+        let filler: String = (0..n).map(|i| format!("let a{i} = 0;\n")).collect();
+        let source = format!("fn f(x: T) {{\n{filler}m!(x.m());\n}}");
+        facts(&source).pop().expect("macro arg").2
+    };
+    assert_eq!(hint(4090).as_deref(), Some("type:T"));
+    assert_eq!(hint(4091), None);
+}
+
+#[test]
+fn a_single_segment_path_bound_in_the_function_is_shadowed() {
+    let source = "fn f(g: u8) {\n    let h = |v: u8| v;\n    \
+                  m!(g(1), h(2), k(3), a::h(4), x.h(5), h::<u8>(6));\n}\n\
+                  fn h() {}\n";
+    assert_eq!(
+        facts(source),
+        [
+            fact("g", None, None, true),
+            fact("h", None, None, true),
+            fact("k", None, None, false),
+            fact("a::h", None, None, false),
+            fact("h", Some("x"), None, false),
+            fact("h::<u8>", None, None, true),
+        ]
+    );
 }

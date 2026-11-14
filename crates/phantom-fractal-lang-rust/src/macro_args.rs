@@ -4,6 +4,9 @@
 //! parsed as an expression and nothing is expanded: a name counts when the
 //! tokens right before a parenthesised token tree spell a path or a method
 //! name. A `macro_rules!` body inside the tokens is not scanned.
+//!
+//! A method name keeps its receiver: the run of tokens before its `.` that
+//! a postfix chain could spell, read backwards (SPEC-w12 G1b).
 
 use tree_sitter::Node;
 
@@ -15,6 +18,20 @@ pub(crate) struct CallShape<'tree> {
     pub last_segment: String,
     /// The first token of the path, or the method name.
     pub at: Node<'tree>,
+    /// The receiver of a method name; none for a path.
+    pub receiver: Option<Receiver<'tree>>,
+    /// True for a path of one segment, generic arguments aside.
+    pub single_segment: bool,
+}
+
+/// The receiver of a method name inside a macro's tokens.
+pub(crate) enum Receiver<'tree> {
+    /// The receiver is `self` alone.
+    SelfValue,
+    /// The receiver is one identifier token.
+    Name(Node<'tree>),
+    /// Any other receiver, its tokens as written, whitespace removed.
+    Other(String),
 }
 
 /// Every call-shaped name in the token trees of `invocation`, nested
@@ -74,6 +91,8 @@ fn shape<'tree>(before: &[Node<'tree>], src: &[u8]) -> Option<CallShape<'tree>> 
             text: text(name, end, src),
             last_segment,
             at: name,
+            receiver: Some(receiver(&before[..at - 1], src)),
+            single_segment: false,
         });
     }
     let mut start = at;
@@ -95,7 +114,48 @@ fn shape<'tree>(before: &[Node<'tree>], src: &[u8]) -> Option<CallShape<'tree>> 
         text: text(before[start], end, src),
         last_segment,
         at: before[start],
+        receiver: None,
+        single_segment: start == at,
     })
+}
+
+/// The receiver whose tokens end `before`, the tokens up to a method's
+/// `.`: the longest run a postfix chain could spell, read backwards. A word
+/// (an identifier, `self`, `super`, `crate`, a metavariable or a literal)
+/// may follow only `.` or `::`; a `?` or a token tree may follow anything a
+/// chain allows. A `.` with no such run before it, as in `(.m())`, gives an
+/// empty receiver.
+fn receiver<'tree>(before: &[Node<'tree>], src: &[u8]) -> Receiver<'tree> {
+    let mut start = before.len();
+    let mut want_operand = true;
+    for (index, token) in before.iter().enumerate().rev() {
+        let kind = token.kind();
+        let fits = if want_operand {
+            is_word(*token) || matches!(kind, "?" | "token_tree")
+        } else {
+            matches!(kind, "." | "::")
+        };
+        if !fits {
+            break;
+        }
+        start = index;
+        want_operand = !is_word(*token);
+    }
+    match &before[start..] {
+        [] => Receiver::Other(String::new()),
+        [one] if one.kind() == "self" => Receiver::SelfValue,
+        [one] if one.kind() == "identifier" => Receiver::Name(*one),
+        [first, ..] => Receiver::Other(text(*first, before[before.len() - 1], src)),
+    }
+}
+
+/// A token a chain may start a link with.
+fn is_word(token: Node<'_>) -> bool {
+    let kind = token.kind();
+    is_segment(token)
+        || kind == "metavariable"
+        || kind.ends_with("_literal")
+        || matches!(kind, "true" | "false")
 }
 
 /// For generic arguments that close at `close`, the index of the path

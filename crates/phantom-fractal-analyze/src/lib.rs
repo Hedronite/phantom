@@ -44,7 +44,7 @@ pub trait ImpactSource {
     fn facts(&self, id: i64) -> Result<Option<SymbolFacts>, StoreError>;
     /// `call` and `method_call` refs ending in `name` with no edge.
     fn unresolved_named(&self, name: &str) -> Result<i64, StoreError>;
-    /// `macro_arg` refs ending in `name`.
+    /// `macro_arg` refs ending in `name` with no edge.
     fn macro_args_named(&self, name: &str) -> Result<i64, StoreError>;
     /// The stored count of `.rs` files the index pass could not read.
     fn rs_skipped(&self) -> Result<Option<u64>, StoreError>;

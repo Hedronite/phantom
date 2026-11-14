@@ -64,7 +64,8 @@ pub struct Extract {
 /// One call site, as written. Nothing is resolved.
 ///
 /// Macros are never expanded. A call-shaped name inside a macro's token
-/// tree is recorded as a [`RefKind::MacroArg`], which no resolver places.
+/// tree is recorded as a [`RefKind::MacroArg`], which a resolver places by
+/// its shape alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reference {
     pub kind: RefKind,
@@ -85,16 +86,20 @@ pub struct Reference {
     /// in a closure belongs to the closure's enclosing function.
     pub from: Option<Caller>,
     /// The receiver expression of a [`RefKind::MethodCall`], whitespace
-    /// removed.
+    /// removed. For a method name in a [`RefKind::MacroArg`], the tokens
+    /// before its `.` that a postfix chain could spell, whitespace removed,
+    /// and none for a path there.
     pub receiver: Option<String>,
     /// The receiver's type hint (SPEC-w10 G2a), for a [`RefKind::MethodCall`]
     /// whose receiver is a plain identifier: `type:T`, `ctor:T::f` or
     /// `ctor?:T::f`, from the nearest binding of the identifier before the
     /// call. `T` is the path as written, without generic arguments, with
-    /// `Self` replaced by the impl's self type. None for any other binding,
-    /// receiver or kind.
+    /// `Self` replaced by the impl's self type. A method name in a
+    /// [`RefKind::MacroArg`] whose receiver is one identifier takes its hint
+    /// the same way. None for any other binding, receiver or kind.
     pub receiver_type: Option<String>,
-    /// True for a single-segment [`RefKind::Call`] whose name is bound
+    /// True for a single-segment [`RefKind::Call`], or a single-segment
+    /// path in a [`RefKind::MacroArg`], whose name is bound
     /// anywhere in the enclosing function: by `let`, a parameter, a closure
     /// parameter, a `match` arm, a `for`, `if let`, or `while let` pattern,
     /// or a local item or `use`. Conservative: a binding after the call, or
@@ -116,8 +121,8 @@ pub enum RefKind {
     /// token trees included: an identifier or `::` path directly followed
     /// by a parenthesised token tree, as in `f(..)` or `a::f(..)`, or `.`
     /// and an identifier so followed, as in `.m(..)`. Nothing is expanded,
-    /// and a `macro_rules!` body is not scanned. It is never resolved and
-    /// never counted.
+    /// and a `macro_rules!` body is not scanned. It is resolved by its
+    /// shape, and counted only when placed.
     MacroArg,
 }
 

@@ -42,8 +42,9 @@ pub use walk::{Candidate, MAX_FILE_BYTES, SkipReason, Skipped, Walk, is_secret, 
 /// end line, signature, and doc summary of items and methods; version 7
 /// adds the `import` and `impl` links; version 8 adds receiver type hints
 /// and the `typed-method` edges; version 9 adds `test` targets and their
-/// module trees.
-pub const EXTRACTOR_VERSION: u32 = 9;
+/// module trees; version 10 places `macro_arg` refs, with their receivers,
+/// hints and shadowing.
+pub const EXTRACTOR_VERSION: u32 = 10;
 
 /// What one [`index`] pass did, by repo-relative path, in walk order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -427,12 +427,12 @@ fn every_detail_row_shows_its_stored_detail() {
     assert_eq!(grid["symbol"]["visibility"], "pub", "{grid}");
 }
 
-/// For every stored symbol of both fixtures, `show --id` agrees with the
+/// For every stored symbol of each fixture, `show --id` agrees with the
 /// store's detail, members, edge counts, and `macro_args`, and its edge
 /// hits are the first of what `callers` and `callees` print.
 #[test]
 fn show_agrees_with_the_store_and_the_call_commands() {
-    for name in ["detail", "impact"] {
+    for name in ["detail", "impact", "resolve-macros"] {
         let fixture = Fixture::of(name);
         let store = fixture.store();
         let input = store.resolve_input().expect("resolve input");
@@ -515,9 +515,11 @@ fn show_agrees_with_the_store_and_the_call_commands() {
             }
         }
         assert!(seen_members || name == "impact", "{name} has no members");
-        assert!(
-            seen_macro_args || name == "detail",
-            "{name} has no macro args"
+        // Only `resolve-macros` keeps a `macro_arg` ref no edge places.
+        assert_eq!(
+            seen_macro_args,
+            name == "resolve-macros",
+            "{name} macro args"
         );
     }
 }

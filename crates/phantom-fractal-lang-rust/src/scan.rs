@@ -4,7 +4,8 @@
 //! The pass keeps an explicit stack, so a deeply nested expression cannot
 //! overflow the thread stack. Macros are never expanded: the tree walk does
 //! not enter a token tree, and a macro invocation's tokens are only read for
-//! call-shaped names (SPEC-w5 G1a).
+//! call-shaped names (SPEC-w5 G1a). Those names keep their receiver, its
+//! hint and their shadowing as a call would (SPEC-w12 G1b).
 
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -12,7 +13,7 @@ use std::rc::Rc;
 use phantom_fractal_lang::{Caller, Extract, Method, ModDecl, RefKind, Reference, Visibility};
 use tree_sitter::Node;
 
-use crate::macro_args::call_shapes;
+use crate::macro_args::{CallShape, Receiver, call_shapes};
 use crate::receivers::Blocks;
 use crate::{at_module_scope, attrs, bindings, compact, detail, receivers, start_line, visibility};
 
@@ -113,16 +114,8 @@ fn visit<'tree>(
                 out.refs.push(reference);
             }
             for shape in call_shapes(node, src) {
-                let callee = Callee {
-                    kind: RefKind::MacroArg,
-                    text: shape.text,
-                    last_segment: shape.last_segment,
-                    at: shape.at,
-                    receiver: None,
-                    receiver_type: None,
-                    single_segment: false,
-                };
-                out.refs.push(reference(callee, false, &context));
+                let reference = macro_arg(shape, src, &context, blocks);
+                out.refs.push(reference);
             }
             context
         }
@@ -170,13 +163,47 @@ fn call<'tree>(
         }
         _ => None,
     }?;
-    let shadowed = callee.kind == RefKind::Call
-        && callee.single_segment
+    let shadowed = callee.kind == RefKind::Call && shadows(&callee, context);
+    Some(reference(callee, shadowed, context))
+}
+
+/// A `MacroArg` reference. A method name's receiver is kept as written,
+/// and one identifier takes its hint from the binding walk at that token;
+/// a path of one segment is shadowed as a call's would be.
+fn macro_arg<'tree>(
+    shape: CallShape<'tree>,
+    src: &[u8],
+    context: &Context,
+    blocks: &mut Blocks<'tree>,
+) -> Reference {
+    let (receiver, receiver_type) = match shape.receiver {
+        None => (None, None),
+        Some(Receiver::SelfValue) => (Some("self".to_owned()), None),
+        Some(Receiver::Name(name)) => {
+            (Some(compact(name, src)), receivers::hint(name, src, blocks))
+        }
+        Some(Receiver::Other(text)) => (Some(text), None),
+    };
+    let callee = Callee {
+        kind: RefKind::MacroArg,
+        text: shape.text,
+        last_segment: shape.last_segment,
+        at: shape.at,
+        receiver,
+        receiver_type,
+        single_segment: shape.single_segment,
+    };
+    let shadowed = shadows(&callee, context);
+    reference(callee, shadowed, context)
+}
+
+/// True for a single-segment callee whose name the enclosing function binds.
+fn shadows(callee: &Callee<'_>, context: &Context) -> bool {
+    callee.single_segment
         && context
             .function
             .as_ref()
-            .is_some_and(|function| function.bindings.contains(&callee.last_segment));
-    Some(reference(callee, shadowed, context))
+            .is_some_and(|function| function.bindings.contains(&callee.last_segment))
 }
 
 /// A path callee. `written` is the whole callee with any generic arguments;
