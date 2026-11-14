@@ -25,6 +25,7 @@ mod meta;
 mod rank;
 mod rows;
 mod schema;
+mod scoring;
 
 pub use crate::impact::{SymbolCallRef, SymbolFacts, SymbolSpan};
 
@@ -40,6 +41,7 @@ pub use crate::graph::{CallHit, EdgeRow, Package, SymbolMatch};
 pub use crate::lock::{LockState, WriterLock, lock_state};
 pub use crate::rank::{MapFile, MapRow, RankEdge, RankImportEdge, RankSymbolRow};
 pub use crate::rows::FileStat;
+pub use crate::scoring::ScoreCallRef;
 
 /// Producer stamp written into `meta`.
 pub const PRODUCER: &str = "phantom-fractal";

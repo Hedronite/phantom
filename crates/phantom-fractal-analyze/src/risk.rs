@@ -12,7 +12,8 @@ use crate::{Counts, DiffState, ImpactSource};
 pub enum CompletenessReason {
     /// Calls or method calls named like the target that no edge places.
     UnresolvedRefs,
-    /// Call-shaped names like the target inside macro tokens.
+    /// Call-shaped names like the target inside macro tokens that no edge
+    /// places (SPEC-w12 G1b). A placed one is an ordinary caller.
     MacroBoundary,
     /// The target is a trait-impl method, which dynamic or generic calls
     /// can reach without an edge.

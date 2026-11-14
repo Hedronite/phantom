@@ -153,23 +153,35 @@ Any other form gives no dependency: a `[dependencies.B]` or `[dev-dependencies.B
 
 `index` rebuilds the crate graph and its edges when a `.rs` file is written or removed, when the index was written by another extractor version, or when the workspace fingerprint changes. The fingerprint is a blake3 hash, stored in the database, over every walked `Cargo.toml` (its path and its bytes, or that the read skipped it or found it not UTF-8) and over every `.rs` file the pass skipped or found not UTF-8 (its path and which of the two). So a `Cargo.toml`-only edit rebuilds, even one that changes only whitespace, and so does a `.rs` file that starts or stops being skipped. A pass where none of these changed writes nothing.
 
+#### Calls inside macros
+
+A call-shaped name in a macro invocation's tokens, such as `f(x)` in `assert!(f(x))` or `.m()` in `vec![a.m()]`, nested macros included, is placed by its shape with the rows above. The macro is never expanded, and nothing in its tokens is parsed as an expression.
+
+- A path, `f(`, `a::f(`, `T::f(`, or `Self::f(`, takes the path rows in the invocation's module: `path-exact`, `local`, `use-alias`, `assoc`, `self-assoc`, and `crate-path`. A single-segment name that the enclosing function binds is shadowed, as it is outside a macro.
+- `self.m(` takes `self-method`.
+- `x.m(`, where `x` is one identifier, takes a [type hint](#type-hints) from the bindings of `x` before the invocation; a binding inside the macro's own tokens is not seen. With a hint it is placed only by `typed-method`, and with none only by `unique-method`.
+- A method name on any other receiver, such as `a.b().m(` or `self.f.m(`, is placed only by `unique-method`, `STD_METHOD_NAMES` included.
+
+Each edge keeps the reason and confidence of its row. A call-shaped name that no row places gets no edge and is in none of `index`'s counts; [`macro_boundary`](#completeness) counts it. The invocation itself is counted under `macros`, with no edge. A `macro_rules!` body is never scanned, so a call written there has no reference at all.
+
 #### Measured
 
-On Phantom's own tree at commit `d5dbfe6`, against a SCIP index from rust-analyzer 1.95.0. An edge is corroborated when rust-analyzer has the same caller and callee. The covered figures, a secondary that is not graded, count only edges whose caller and callee both sit in files the SCIP index carries.
+On Phantom's own tree at commit `6499f87`, against a SCIP index from rust-analyzer 1.95.0. These are the contract run's figures, from the commit that added [calls inside macros](#calls-inside-macros), and the review run's figures replace them. An edge is corroborated when rust-analyzer has the same caller and callee. The covered figures, a secondary that is not graded, count only edges whose caller and callee both sit in files the SCIP index carries. The last row counts only edges placed from inside a macro's tokens.
 
 | Measure | Edges | Corroborated | Precision | Covered edges | Covered precision |
 |---|---|---|---|---|---|
-| `typed-method` | 1023 | 996 | 0.9736 | 996 | 1.0000 |
-| `unique-method` | 468 | 461 | 0.9850 | 463 | 0.9957 |
-| Confidence 0.85 and up | 3159 | 3079 | 0.9747 | 3079 | 1.0000 |
-| Confidence 0.5 and up | 4650 | 4536 | 0.9755 | 4538 | 0.9996 |
+| `typed-method` | 1161 | 1134 | 0.9767 | 1134 | 1.0000 |
+| `unique-method` | 651 | 647 | 0.9939 | 649 | 0.9969 |
+| Confidence 0.85 and up | 3912 | 3829 | 0.9788 | 3829 | 1.0000 |
+| Confidence 0.5 and up | 5724 | 5610 | 0.9801 | 5612 | 0.9996 |
+| From inside a macro | 1018 | 1015 | 0.9971 | — | — |
 
 Recall is the share of rust-analyzer's distinct caller and callee pairs that Phantom has as an edge. The graded figure is document-scoped: a reference takes the callee defined in its own document when its symbol has a definition there. The unscoped figure lets a symbol defined in several documents count a pair for each, as the earlier scorer did, and is kept for comparison.
 
 | Recall | Pairs | Hits | Ratio |
 |---|---|---|---|
-| Document-scoped (graded) | 5134 | 3306 | 0.6439 |
-| Unscoped (the earlier comparison) | 7525 | 3306 | 0.4393 |
+| Document-scoped (graded) | 5242 | 3790 | 0.7230 |
+| Unscoped (the earlier comparison) | 7637 | 3790 | 0.4963 |
 
 ### Never resolved
 
@@ -177,11 +189,11 @@ Recall is the share of rust-analyzer's distinct caller and callee pairs that Pha
 - **Dispatch:** a method that only a trait's provided default supplies, `<T as Trait>::f`, blanket impls, and dispatch on `dyn` or a generic.
 - **Crates:** `std`, `core`, `alloc`, registry and git crates, renamed dependencies (`package = "…"`), `[target.…].dependencies` and `[target.…].dev-dependencies`, `[build-dependencies]`, `[dev-dependencies]` from a lib or a bin, a lib's `#[cfg(test)]` modules included, `extern crate … as …`, and `[lib] path`, `[[bin]] path`, and `[[test]] path`. The targets are `src/lib.rs`, `src/main.rs`, `src/bin/*.rs`, `tests/*.rs`, and `tests/*/main.rs`; `benches/` and `examples/` have none.
 - **Other edges:** edges for paths that are not calls, for types, and for struct literals, and names that only a glob import such as `use a::*` supplies.
-- **Macros:** calls inside a macro invocation, such as `f(x)` in `assert!(f(x))` or `.m()` in `vec![a.m()]`, are stored as facts for [`macro_boundary`](#completeness), never as edges.
+- **Macros:** the calls a macro's expansion makes, calls written in a `macro_rules!` body, and a call-shaped name inside a macro invocation that [Calls inside macros](#calls-inside-macros) does not place. That last kind is stored as a fact for [`macro_boundary`](#completeness), never as an edge.
 
 ### Nothing runs
 
-Phantom reads source text only. Macros are never expanded: they are counted by name, and a call-shaped name in a macro's tokens (`f(…)`, `a::f(…)`, or `.m(…)`, nested macros included, `macro_rules!` bodies not) is recorded as a fact with no edge. There is no type inference: a receiver other than `self` is typed only by the binding text that [Type hints](#type-hints) lists. Phantom never runs cargo, rustc, rust-analyzer, git, a build script, a proc macro, or any other code or command from the indexed repo.
+Phantom reads source text only. Macros are never expanded: they are counted by name, and a call-shaped name in a macro's tokens (`f(…)`, `a::f(…)`, or `.m(…)`, nested macros included, `macro_rules!` bodies not) is placed by its shape alone, as [Calls inside macros](#calls-inside-macros) describes, or recorded as a fact with no edge. There is no type inference: a receiver other than `self` is typed only by the binding text that [Type hints](#type-hints) lists. Phantom never runs cargo, rustc, rust-analyzer, git, a build script, a proc macro, or any other code or command from the indexed repo.
 
 ## Impact
 
@@ -227,7 +239,7 @@ A test that is reached goes to `tests`, with its depth, and never to `groups`. I
 | Reason | When | `count` |
 |---|---|---|
 | `unresolved_refs` | Calls or method calls whose last segment is SYMBOL's name have no edge. | how many |
-| `macro_boundary` | Call-shaped names inside macros end in SYMBOL's name. They are facts, never edges. | how many |
+| `macro_boundary` | Call-shaped names inside macros end in SYMBOL's name and have no edge. One that [Calls inside macros](#calls-inside-macros) places is an ordinary caller instead. | how many |
 | `trait_dispatch` | SYMBOL is a method of a trait impl, which dynamic or generic calls reach with no edge. | null |
 | `parse_skipped_files` | The last `index` skipped `.rs` files, or its count is unknown. | the count, or null |
 | `external_users_possible` | SYMBOL is `pub` in a lib target, so code outside the indexed tree may call it. | null |
@@ -307,7 +319,7 @@ Before that `index`, the same command adds `stale_index` to `reasons`, and `meta
 - `members`: `{hits, truncated}`. For a struct or an enum, these are the methods of the `impl` blocks, inherent or trait, whose self type resolves to it, by the rule `self-method` uses. Each hit has the `symbol` keys. There are at most 100, and `truncated` is true when more existed. Any other kind, a trait included, has none.
 - `callers`: `{count, hits, truncated}`. `count` is every stored edge into the symbol. `hits` holds the first 20, in the order and shape `callers` prints them.
 - `callees`: `{count, hits, truncated, unresolved_calls}`, the same way for the edges out, plus the count `callees` prints.
-- `macro_args`: how many call-shaped names inside macros end in the symbol's name, the count [`macro_boundary`](#completeness) uses.
+- `macro_args`: how many call-shaped names inside macros end in the symbol's name and have no edge, the count [`macro_boundary`](#completeness) uses. One that [Calls inside macros](#calls-inside-macros) places is in `callers` instead.
 - `source`: present only with `--source`.
 
 Without `--source`, no file is read and no source text is printed. With it, `source` is `{status, start_line, end_line, text}`, where `start_line` and `end_line` are the symbol's `line` and `end_line`. The file is opened only under the indexed tree, after following any symlinks. `status` is the first of these that holds:
@@ -522,7 +534,7 @@ An index describes the tree as it was at the last `index`. Every success envelop
 On the history in [`cochange`](#cochange), after `fract index .` and one line added to `src/b.rs`, `fract status` prints:
 
 ```
-{"ok":true,"data":{"key":"repo-a4236502","name":"repo","head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","stale":true,"changes":{"added":0,"modified":1,"removed":0},"fingerprint_changed":false,"extractor_changed":false,"counts":{"files":8,"symbols":15,"edges":2},"versions":{"schema":3,"extractor":9,"envelope":1},"epochs":{"graph":1,"rank":1},"cochange":{"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","commits_seen":23,"skipped_bulk":0,"pairs":4,"window":{"days":365,"max_commits":5000}},"lock":"free"},"meta":{"stale":true,"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","rank_epoch":1},"error":null,"schema":1}
+{"ok":true,"data":{"key":"repo-a4236502","name":"repo","head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","stale":true,"changes":{"added":0,"modified":1,"removed":0},"fingerprint_changed":false,"extractor_changed":false,"counts":{"files":8,"symbols":15,"edges":2},"versions":{"schema":3,"extractor":10,"envelope":1},"epochs":{"graph":1,"rank":1},"cochange":{"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","commits_seen":23,"skipped_bulk":0,"pairs":4,"window":{"days":365,"max_commits":5000}},"lock":"free"},"meta":{"stale":true,"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","rank_epoch":1},"error":null,"schema":1}
 ```
 
 The key's hash comes from the tree's canonical path, so it differs on another machine. `fract find fb` still answers from the index, with the same `meta`.
@@ -602,7 +614,7 @@ Each index is a directory under the data directory's `repos/`, named `<name>-<ha
 1. `data_dir`: `repos/` and each index directory are private (no group or other bits, and not a link), the data directory is not writable by group or others, and every one of them, and every database file, is owned by the data directory's owner. No data directory yet is fine.
 2. `databases`: each `graph.db`, and its WAL and shared memory when present, is `0600`. Its schema, read from the SQLite header without opening the database, is not newer than this binary's. An older schema is noted, since `index` migrates it.
 3. `locks`: whether a writer holds each index. A held lock is not a fault.
-4. `extractor`: the extractor version this binary writes, 9.
+4. `extractor`: the extractor version this binary writes, 10.
 5. `grammar`: the tree-sitter-rust version the binary was built with.
 6. `network`: `none: Phantom has no network code`.
 7. `git`: for each index, whether HEAD reads at its stored tree, or why it was not checked. Only a HEAD that cannot be read is a fault.
@@ -773,7 +785,7 @@ The answers are heuristic. Only resolved calls, trait impls, and imports are edg
 `phantom-fractal version` prints one line and exits 0:
 
 ```
-{"ok":true,"data":{"name":"phantom-fractal","version":"0.0.0","git_sha":"<40 lowercase hex, or null>","extractor_version":9,"store_schema":3},"error":null,"schema":1}
+{"ok":true,"data":{"name":"phantom-fractal","version":"0.0.0","git_sha":"<40 lowercase hex, or null>","extractor_version":10,"store_schema":3},"error":null,"schema":1}
 ```
 
 `phantom-fractal --json version`, `phantom-fractal version --json`, and `fract version` print the same line. `data` holds these fields, in this order:
@@ -783,7 +795,7 @@ The answers are heuristic. Only resolved calls, trait impls, and imports are edg
 | `name` | `phantom-fractal`, under `fract` too |
 | `version` | the CLI crate's version, `0.0.0` |
 | `git_sha` | the commit the binary was built from, as 40 lowercase hex characters, or `null` when unknown |
-| `extractor_version` | the extractor version the binary writes, 9 |
+| `extractor_version` | the extractor version the binary writes, 10 |
 | `store_schema` | the store schema version the binary writes, 3 |
 
 `git_sha` is fixed at build time. `PHANTOM_FRACTAL_GIT_SHA`, when it holds 40 hex characters, sets it, for packagers. Otherwise it is the output of `git rev-parse HEAD` in the CLI crate's directory. With no git, no `.git` (as in a crates.io tarball), or a refused repository, it is `null`, and the build still succeeds.

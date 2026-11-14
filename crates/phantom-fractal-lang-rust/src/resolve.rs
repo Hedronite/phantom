@@ -22,13 +22,20 @@
 //! receiver hint (SPEC-w10 G2a), or, with no hint, by its name alone
 //! (SPEC-w10 G3a); one that neither places is counted. Trait dispatch, glob imports, and calls into
 //! crates outside the workspace are never resolved.
+//!
+//! A call-shaped name inside a macro's tokens is placed by the tier its
+//! shape takes (SPEC-w12 G1b): a path as a call, a method name on `self`
+//! by `self-method`, and any other method name as a method call, by its
+//! receiver hint or else by `unique-method`. One that no tier places is
+//! not counted.
 
 mod lookup;
 
 use std::collections::HashSet;
 
 use phantom_fractal_lang::{
-    Edge, Graph, Id, Link, LinkKind, LinkReason, Node, Reason, RefKind, ResolveCounts, ResolveInput,
+    CallRef, Edge, Graph, Id, Link, LinkKind, LinkReason, Node, Reason, RefKind, ResolveCounts,
+    ResolveInput,
 };
 
 use lookup::{Index, Placed};
@@ -53,7 +60,7 @@ pub fn confidence(reason: Reason) -> f64 {
 /// found, including a workspace lib the caller may not call; `no_source` for a `Call` outside any function symbol;
 /// `method_calls` for method calls on any receiver but `self` that got no
 /// edge, and `macros`.
-/// A [`RefKind::MacroArg`] gets no edge and no count.
+/// A [`RefKind::MacroArg`] is counted only in `edges`, when it is placed.
 pub fn resolve(input: &ResolveInput) -> (Vec<Edge>, ResolveCounts) {
     let index = Index::new(input);
     let mut edges = Vec::new();
@@ -61,13 +68,9 @@ pub fn resolve(input: &ResolveInput) -> (Vec<Edge>, ResolveCounts) {
     for call in &input.refs {
         let (source, placed) = match call.kind {
             RefKind::MethodCall if call.receiver.as_deref() != Some("self") => {
-                let placed = call.from.and_then(|source| {
-                    let placed = match call.receiver_type.as_deref() {
-                        Some(hint) => (index.place_typed(call, hint)?, Reason::TypedMethod),
-                        None => (index.place_unique(call)?, Reason::UniqueMethod),
-                    };
-                    Some((source, placed))
-                });
+                let placed = call
+                    .from
+                    .and_then(|source| Some((source, place_method(&index, call)?)));
                 match placed {
                     Some((source, (target, reason))) => (source, Placed::Edge(target, reason)),
                     None => {
@@ -88,8 +91,15 @@ pub fn resolve(input: &ResolveInput) -> (Vec<Edge>, ResolveCounts) {
                 counts.macros += 1;
                 continue;
             }
-            // A name inside a macro's tokens: never placed, never counted.
-            RefKind::MacroArg => continue,
+            RefKind::MacroArg => {
+                let Some(source) = call.from else {
+                    continue;
+                };
+                match place_macro_arg(&index, call, source) {
+                    placed @ Placed::Edge(..) => (source, placed),
+                    Placed::Unresolved | Placed::External => continue,
+                }
+            }
             RefKind::Call => {
                 let Some(source) = call.from else {
                     counts.no_source += 1;
@@ -114,6 +124,31 @@ pub fn resolve(input: &ResolveInput) -> (Vec<Edge>, ResolveCounts) {
         }
     }
     (edges, counts)
+}
+
+/// A method call on a receiver other than `self`: by its receiver hint, or
+/// with none by its name alone.
+fn place_method(index: &Index, call: &CallRef) -> Option<(Id, Reason)> {
+    match call.receiver_type.as_deref() {
+        Some(hint) => Some((index.place_typed(call, hint)?, Reason::TypedMethod)),
+        None => Some((index.place_unique(call)?, Reason::UniqueMethod)),
+    }
+}
+
+/// A call-shaped name inside a macro's tokens, by its shape: a path, which
+/// has no receiver, as a call; a method name on `self` by `self-method`;
+/// any other method name by [`place_method`].
+fn place_macro_arg(index: &Index, call: &CallRef, source: Id) -> Placed {
+    match call.receiver.as_deref() {
+        None => index.place(call, source),
+        Some("self") => match segments(&call.text).and_then(|segs| segs.last().cloned()) {
+            Some(name) => index.place_self(source, &name, Reason::SelfMethod),
+            None => Placed::Unresolved,
+        },
+        Some(_) => place_method(index, call).map_or(Placed::Unresolved, |(target, reason)| {
+            Placed::Edge(target, reason)
+        }),
+    }
 }
 
 /// Each method in `input` with the struct or enum that owns it, as

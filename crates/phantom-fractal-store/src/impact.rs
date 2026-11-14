@@ -70,11 +70,12 @@ impl crate::Store {
         )?)
     }
 
-    /// How many `macro_arg` refs end in `name`.
+    /// How many `macro_arg` refs end in `name` and carry no edge.
     pub fn macro_args_named(&self, name: &str) -> Result<i64, StoreError> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM refs r
-             WHERE r.kind = 'macro_arg' AND r.last_segment = ?1",
+             WHERE r.kind = 'macro_arg' AND r.last_segment = ?1
+               AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.ref_id = r.id)",
             [name],
             |row| row.get(0),
         )?)
