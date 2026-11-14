@@ -607,7 +607,7 @@ fn run_cases(first: u64, end: u64, step: u64, corpus: &Corpus) -> Summary {
 
 /// One CI shard: no case may panic. Its times are printed, not asserted,
 /// because a debug build of the C parser cannot meet a release bound
-/// (ruling R3); the full run on tower asserts them.
+/// (ruling R3); the full run on the build box asserts them.
 fn smoke(shard: u64) {
     let corpus = Corpus::load();
     let summary = run_cases(shard, SMOKE, SHARDS, &corpus);
@@ -719,7 +719,7 @@ fn the_one_file_crate_resolves_its_own_calls() {
 }
 
 #[test]
-#[ignore = "full run: PHANTOM_FUZZ_CASES cases, on tower"]
+#[ignore = "full run: PHANTOM_FUZZ_CASES cases, on the build box"]
 fn full() {
     let cases = env_number("PHANTOM_FUZZ_CASES", SMOKE);
     let first = env_number("PHANTOM_FUZZ_FIRST", 0);

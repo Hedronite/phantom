@@ -481,7 +481,7 @@ fn the_generator_reaches_500_symbols_and_both_budget_ends() {
 }
 
 #[test]
-#[ignore = "full run: PHANTOM_MAP_CASES cases, on tower"]
+#[ignore = "full run: PHANTOM_MAP_CASES cases, on the build box"]
 fn full() {
     let cases = env_number("PHANTOM_MAP_CASES", SMOKE);
     let first = env_number("PHANTOM_MAP_FIRST", 0);

@@ -7,6 +7,8 @@
 
 #[path = "scip/mod.rs"]
 mod scip;
+#[path = "scip/score_support.rs"]
+mod score_support;
 
 use std::path::PathBuf;
 
@@ -15,35 +17,7 @@ use phantom_fractal_lang::{Edge, Reason};
 use phantom_fractal_lang_rust::RustLanguage;
 use phantom_fractal_store::{ScoreCallRef, Store};
 use scip::foreign::Members;
-
-/// One throwaway data dir, removed with the run.
-struct Temp {
-    root: PathBuf,
-}
-
-impl Temp {
-    fn new(label: &str) -> Self {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|dur| dur.as_nanos())
-            .unwrap_or(0);
-        let root = std::env::temp_dir().join(format!(
-            "phantom-fractal-score-{label}-{}-{nanos}",
-            std::process::id()
-        ));
-        Self { root }
-    }
-
-    fn db(&self) -> PathBuf {
-        self.root.join("repos").join("score").join("graph.db")
-    }
-}
-
-impl Drop for Temp {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.root);
-    }
-}
+use score_support::{Temp, line_of, occurrence};
 
 /// The baseline helper: one blake3 of the export, for
 /// `evidence/w10/G1-backend.md`. It does what the evidence needs and
@@ -153,42 +127,6 @@ fn each_band_carries_its_covered_figure() {
         ),
         "{report}"
     );
-}
-
-/// One SCIP occurrence on a `crate#<name>()` symbol of one test
-/// package, as the bands test builds them.
-fn occurrence(
-    package: &str,
-    line: i64,
-    first: i64,
-    last: i64,
-    name: &str,
-    is_definition: bool,
-) -> scip::wire::Occurrence {
-    scip::wire::Occurrence {
-        range: scip::wire::Range {
-            start_line: line,
-            start_character: first,
-            end_line: line,
-            end_character: last,
-        },
-        symbol: format!("rust-analyzer cargo {package} 0.0.0 crate#{name}()."),
-        is_definition,
-    }
-}
-
-/// The 0-based line of the `skip`th line that carries `needle`.
-fn line_of(lines: &[&str], needle: &str, skip: usize) -> i64 {
-    let mut found = 0;
-    for (index, line) in lines.iter().enumerate() {
-        if line.contains(needle) {
-            if found == skip {
-                return index as i64;
-            }
-            found += 1;
-        }
-    }
-    panic!("needle not found: {needle}");
 }
 
 /// The D4 buckets, each on a hand-built ref set (W12 G1a): the
