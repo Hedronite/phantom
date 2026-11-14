@@ -90,3 +90,29 @@ pub(crate) fn map(request: &MapRequest) -> Result<Reply<MapResult>, Failure> {
     };
     Ok(Reply::with_meta(result, meta))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The budget is checked by `map` itself, before any index is read, so
+    /// the command line and the MCP tool share one bound.
+    #[test]
+    fn a_budget_outside_1_to_100000_is_usage() {
+        for budget in [0, BUDGET_MAX + 1] {
+            let request = MapRequest {
+                budget,
+                focus: Vec::new(),
+                detail: Detail::default(),
+                repo: PathBuf::from("no-such-tree"),
+            };
+            let (line, code) = super::super::envelope(map(&request));
+            assert_eq!(code, 1, "budget {budget}");
+            assert_eq!(
+                line.expect("envelope"),
+                r#"{"ok":false,"data":null,"error":{"kind":"usage","message":"budget must be 1 to 100000","exit":1},"schema":1}"#,
+                "budget {budget}"
+            );
+        }
+    }
+}
