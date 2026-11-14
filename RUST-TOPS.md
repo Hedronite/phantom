@@ -11,8 +11,10 @@ and runs the enabled layers in a fixed order. Protocol and tooling:
 - **Protocol:** rust-tops 1.1.0, spec
   `https://github.com/Hedronite/rust-tops/blob/v0.2.0/RUST_TOPS.md`, as each
   crate's `protocol` block states it.
-- **Gate:** run with cargo-tops 0.1.3, cargo-llvm-cov 0.9.1, cargo-crap
-  0.5.0 and cargo-mutants 27.1.0.
+- **Gate:** run with cargo-tops 0.2.0, cargo-llvm-cov 0.9.1, cargo-crap
+  0.5.0 and cargo-mutants 27.1.0. cargo-tops 0.2.0 enforces no coverage or
+  CRAP threshold, so the grade comes from the measured cargo-llvm-cov,
+  cargo-crap and cargo-mutants figures, not from the gate's exit.
 
 ## Crates and thresholds
 
@@ -44,8 +46,8 @@ cargo-tops gate    # fmt, clippy, deny, nextest, coverage, CRAP, mutation, advis
 ```
 
 Call the `cargo-tops` binary directly, not `cargo tops`. Cargo passes
-`tops` as the first argument to a subcommand binary, and cargo-tops 0.1.3
-and 0.2.0 do not strip it, so `cargo tops gate` fails with
+`tops` as the first argument to a subcommand binary, and cargo-tops 0.2.0
+does not strip it, so `cargo tops gate` fails with
 `unrecognized subcommand 'tops'`.
 
 An exit of 0 is not a pass. The coverage layer writes
