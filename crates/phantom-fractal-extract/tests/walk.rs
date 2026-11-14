@@ -162,3 +162,30 @@ fn secret_denylist_matches_names_not_paths() {
         assert!(!is_secret(name), "{name}");
     }
 }
+
+#[test]
+fn an_unreadable_directory_is_recorded_unreadable() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = common::TempDir::new("walk-unreadable");
+    common::write(root.path(), "lib.rs", b"pub fn f() {}\n");
+    common::write(root.path(), "locked/inner.rs", b"pub fn g() {}\n");
+    let locked = root.path().join("locked");
+    let mode = |bits| std::fs::Permissions::from_mode(bits);
+    std::fs::set_permissions(&locked, mode(0o000)).expect("lock");
+    let readable = std::fs::read_dir(&locked).is_ok();
+    let got = walk(root.path());
+    std::fs::set_permissions(&locked, mode(0o755)).expect("unlock");
+    if readable {
+        // A superuser lists it anyway; there is nothing to record.
+        return;
+    }
+    let got = got.expect("walk");
+    let kept: Vec<&str> = got.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(kept, ["lib.rs"]);
+    let skipped: Vec<(&str, SkipReason)> = got
+        .skipped
+        .iter()
+        .map(|skip| (skip.path.as_str(), skip.reason))
+        .collect();
+    assert_eq!(skipped, [("locked", SkipReason::Unreadable)]);
+}

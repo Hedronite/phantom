@@ -505,3 +505,33 @@ fn common_snapshot(roots: &[&Path]) -> Vec<(PathBuf, u64, std::time::SystemTime,
     out.sort();
     out
 }
+
+#[test]
+fn a_target_beside_a_nested_manifest_is_pruned_and_one_elsewhere_is_not() {
+    // SPEC-w9 G2a: a base file under `target` counts only when that
+    // `target` is neither at the root nor beside a `Cargo.toml`.
+    let repo = Repo::new();
+    repo.commit(
+        "main",
+        T0 + 60,
+        &[
+            ("crates/tool/Cargo.toml", MANIFEST),
+            ("crates/tool/target/built.rs", "pub fn built() {}\n"),
+            ("src/target/kept.rs", "pub fn kept() {}\n"),
+        ],
+    );
+    repo.git(&["reset", "-q", "--hard", "main"], None);
+    fs::remove_file(repo.root().join("crates/tool/target/built.rs")).expect("delete built");
+    fs::remove_file(repo.root().join("src/target/kept.rs")).expect("delete kept");
+    let found = repo.diff(&Base::Head);
+    let keys: Vec<(&str, FileChange)> = found
+        .changed
+        .iter()
+        .map(|symbol| (symbol.key.as_str(), symbol.change))
+        .collect();
+    assert_eq!(
+        keys,
+        [("src/target/kept.rs#kept#function#0", FileChange::Removed)]
+    );
+    assert!(found.files_only.is_empty(), "{:?}", found.files_only);
+}
