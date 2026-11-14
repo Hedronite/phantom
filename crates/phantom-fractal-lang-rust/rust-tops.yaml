@@ -1,7 +1,6 @@
 # Rust-TOPS 1.1.0 instance for phantom-fractal-lang-rust (library-core).
-# Scaffold slice: laws, coverage, CRAP, and mutation stay off until the
-# crate has code they can measure.
-
+# Layers: lint, unit and security-advisory stay on; coverage, CRAP and
+# mutation turn on with the thresholds the R1 ruling keeps.
 protocol:
   id: rust-tops
   version: "1.1.0"
@@ -31,9 +30,9 @@ layers:
   - { id: acceptance,        enabled: false, tier: 1, runner: "assert_cmd journeys",   scope: tests }
   - { id: snapshot,          enabled: false, tier: 2, runner: insta,                   scope: tests }
   - { id: compile-fail,      enabled: false, tier: 2, runner: trybuild,                scope: tests }
-  - { id: coverage,          enabled: false, tier: 0, runner: cargo-llvm-cov,          scope: lib }
-  - { id: crap,              enabled: false, tier: 0, runner: cargo-crap,              scope: lib }
-  - { id: mutation,          enabled: false, tier: 1, runner: cargo-mutants,           scope: diff }
+  - { id: coverage,          enabled: true, tier: 0, runner: cargo-llvm-cov,          scope: lib }
+  - { id: crap,              enabled: true, tier: 0, runner: cargo-crap,              scope: lib }
+  - { id: mutation,          enabled: true, tier: 1, runner: cargo-mutants,           scope: diff }
   - { id: property,          enabled: false, tier: 1, runner: proptest,                scope: lib }
   - { id: fuzz,              enabled: false, tier: 3, runner: cargo-fuzz,              scope: lib }
   - { id: concurrency,       enabled: false, tier: 3, runner: loom,                    scope: lib }
