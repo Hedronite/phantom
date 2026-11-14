@@ -7,20 +7,38 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::UNIX_EPOCH;
 
 mod cochange;
+mod defects;
 mod detail;
 mod dirs;
 mod dump;
+mod faults;
 mod graph;
 mod hints;
 mod legacy;
+mod lift;
 mod lock;
 mod meta;
 mod rank;
 mod readonly;
+mod reads;
 mod writes;
+
+/// One process-wide guard for the tests that take or observe a global
+/// test hook (the lock race window, the directory swap window): plain
+/// libtest runs tests in threads of one process, so two hook-taking
+/// tests would otherwise share a hook. `cargo nextest` isolates
+/// processes and does not need it; it costs nothing there.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 struct TempDb {
     path: PathBuf,
@@ -28,12 +46,10 @@ struct TempDb {
 
 impl TempDb {
     fn new(label: &str) -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|dur| dur.as_nanos())
-            .unwrap_or(0);
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let count = COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "phantom-fractal-store-{label}-{}-{nanos}.db",
+            "phantom-fractal-store-{label}-{}-{count}.db",
             process::id()
         ));
         Self { path }
@@ -59,12 +75,10 @@ struct TempData {
 
 impl TempData {
     fn new(label: &str) -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|dur| dur.as_nanos())
-            .unwrap_or(0);
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let count = COUNTER.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
-            "phantom-fractal-data-{label}-{}-{nanos}",
+            "phantom-fractal-data-{label}-{}-{count}",
             process::id()
         ));
         Self { root }

@@ -31,7 +31,10 @@ impl crate::Store {
              JOIN files f ON f.id = s.file_id
              WHERE s.id = ?1",
         )?;
-        let mut rows = statement.query([id])?;
+        let queried = statement.query([id]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
         match rows.next()? {
             None => Ok(None),
             Some(row) => Ok(Some(SymbolDetail {
@@ -81,7 +84,10 @@ impl crate::Store {
                AND s.kind IN ('struct', 'enum')
              ORDER BY f.path, m.start_line, m.id",
         )?;
-        let mut rows = statement.query([id])?;
+        let queried = statement.query([id]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
             out.push(SymbolDetail {

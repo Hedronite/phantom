@@ -212,7 +212,10 @@ impl crate::Store {
         }
         let file_ids: HashMap<String, i64> = {
             let mut statement = tx.prepare("SELECT path, id FROM files")?;
-            let mut rows = statement.query([])?;
+            let queried = statement.query([]);
+            #[cfg(test)]
+            let queried = crate::fault::tick(queried);
+            let mut rows = queried?;
             let mut map = HashMap::new();
             while let Some(row) = rows.next()? {
                 map.insert(row.get::<_, String>(0)?, row.get::<_, i64>(1)?);
@@ -287,7 +290,10 @@ impl crate::Store {
                  FROM targets t JOIN packages p ON p.id = t.package_id
                  ORDER BY t.id",
             )?;
-            let mut rows = statement.query([])?;
+            let queried = statement.query([]);
+            #[cfg(test)]
+            let queried = crate::fault::tick(queried);
+            let mut rows = queried?;
             while let Some(row) = rows.next()? {
                 targets.push(Target {
                     id: row.get(0)?,
@@ -305,7 +311,10 @@ impl crate::Store {
                  FROM modules m JOIN files f ON f.id = m.file_id
                  ORDER BY m.id",
             )?;
-            let mut rows = statement.query([])?;
+            let queried = statement.query([]);
+            #[cfg(test)]
+            let queried = crate::fault::tick(queried);
+            let mut rows = queried?;
             while let Some(row) = rows.next()? {
                 modules.push(Module {
                     id: row.get(0)?,
@@ -325,7 +334,10 @@ impl crate::Store {
                  FROM symbols s JOIN files f ON f.id = s.file_id
                  ORDER BY s.id",
             )?;
-            let mut rows = statement.query([])?;
+            let queried = statement.query([]);
+            #[cfg(test)]
+            let queried = crate::fault::tick(queried);
+            let mut rows = queried?;
             while let Some(row) = rows.next()? {
                 symbols.push(Symbol {
                     id: row.get(0)?,
@@ -350,7 +362,10 @@ impl crate::Store {
                  FROM refs r JOIN files f ON f.id = r.file_id
                  WHERE r.kind = 'use' ORDER BY r.id",
             )?;
-            let mut rows = statement.query([])?;
+            let queried = statement.query([]);
+            #[cfg(test)]
+            let queried = crate::fault::tick(queried);
+            let mut rows = queried?;
             while let Some(row) = rows.next()? {
                 uses.push(UseBinding {
                     id: row.get(6)?,
@@ -372,7 +387,10 @@ impl crate::Store {
                  FROM refs r JOIN files f ON f.id = r.file_id
                  WHERE r.kind IN ('call', 'method_call', 'macro', 'macro_arg') ORDER BY r.id",
             )?;
-            let mut rows = statement.query([])?;
+            let queried = statement.query([]);
+            #[cfg(test)]
+            let queried = crate::fault::tick(queried);
+            let mut rows = queried?;
             while let Some(row) = rows.next()? {
                 refs.push(CallRef {
                     id: row.get(0)?,
@@ -469,7 +487,10 @@ impl crate::Store {
              WHERE e.kind = ?1
              ORDER BY e.src_kind, e.src_id, e.dst_kind, e.dst_id, e.id",
         )?;
-        let mut rows = statement.query([kind])?;
+        let queried = statement.query([kind]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
             out.push(EdgeRow {
@@ -664,7 +685,10 @@ impl crate::Store {
                 )
              ORDER BY s.qual_name, f.path, s.id",
         )?;
-        let mut rows = statement.query([query, qualified])?;
+        let queried = statement.query([query, qualified]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
             out.push(SymbolMatch {
@@ -715,7 +739,10 @@ impl crate::Store {
         statement: &mut rusqlite::Statement<'_>,
         id: [i64; 1],
     ) -> Result<Vec<CallHit>, StoreError> {
-        let mut rows = statement.query(id)?;
+        let queried = statement.query(id);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
             let reason = reason_from_text(&row.get::<_, String>(4)?)?;

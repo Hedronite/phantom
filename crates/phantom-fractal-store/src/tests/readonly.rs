@@ -111,6 +111,7 @@ fn assert_serves(store: &Store) {
 
 #[test]
 fn open_read_only_serves_the_getters_and_moves_nothing() {
+    let _serial = super::serial();
     let data = written_store("rooclosed");
     let before = snapshot(data.data());
     let store = Store::open_read_only(&data.db()).expect("read-only open");
@@ -147,6 +148,7 @@ fn open_read_only_serves_the_getters_and_moves_nothing() {
 
 #[test]
 fn open_read_only_gates_on_sidecars_and_a_held_lock() {
+    let _serial = super::serial();
     // A writer connection alive keeps `-wal` and `-shm` on disk; the
     // guarded read refuses them before any SQLite work.
     let data = written_store("rowal");
@@ -187,6 +189,7 @@ fn open_read_only_gates_on_sidecars_and_a_held_lock() {
 
 #[test]
 fn read_only_still_valid_mirrors_the_gate() {
+    let _serial = super::serial();
     let data = written_store("rostale");
     let store = Store::open_read_only(&data.db()).expect("read-only open");
     assert!(store.read_only_still_valid().expect("valid"));
@@ -199,6 +202,7 @@ fn read_only_still_valid_mirrors_the_gate() {
 
 #[test]
 fn open_read_only_needs_no_writable_index_dir_and_never_chmods() {
+    let _serial = super::serial();
     let data = written_store("ro0755");
     {
         // The guarded read never creates a sidecar, so an index dir
@@ -233,6 +237,7 @@ fn open_read_only_needs_no_writable_index_dir_and_never_chmods() {
 
 #[test]
 fn open_read_only_refuses_a_schema_newer_database_without_a_touch() {
+    let _serial = super::serial();
     let data = written_store("ronewer");
     {
         // Stamp a newer version through a direct write connection:

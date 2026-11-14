@@ -109,7 +109,16 @@ pub fn score_with(
     store: &phantom_fractal_store::Store,
     members: Option<&Members>,
 ) -> Result<String, String> {
-    let in_scope = |document: &str| members.is_none_or(|list| list.in_scope(document));
+    let package_dirs = match members {
+        Some(_) => store
+            .package_dirs()
+            .map_err(|err| format!("store: {err}"))?,
+        None => BTreeSet::new(),
+    };
+    let in_scope = |document: &str| match members {
+        Some(list) => list.in_scope_with_packages(document, &package_dirs),
+        None => true,
+    };
     let all = store
         .symbol_spans()
         .map_err(|err| format!("store: {err}"))?;
@@ -236,11 +245,14 @@ pub fn score_with(
     let edges: Vec<&EdgeRow> = if members.is_some() {
         let mut kept = Vec::new();
         for edge in &edges_all {
-            let in_scope = matches!(
-                (by_id.get(&edge.src_id), by_id.get(&edge.dst_id)),
-                (Some(a), Some(b)) if in_scope(a.path.as_str()) && in_scope(b.path.as_str())
-            );
-            if in_scope {
+            // The edge belongs to the document its call sits in: a
+            // caller outside every member leaves with its document,
+            // while a call into a foreign document stays and reads
+            // uncovered (W13 D4, R7).
+            let keep = by_id
+                .get(&edge.src_id)
+                .is_some_and(|span| in_scope(span.path.as_str()));
+            if keep {
                 kept.push(edge);
             } else {
                 out_of_scope_edges += 1;

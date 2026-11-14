@@ -64,7 +64,10 @@ impl crate::Store {
                AND r.kind IN ('call', 'method_call', 'macro', 'macro_arg')
              ORDER BY r.id",
         )?;
-        let mut rows = statement.query([id])?;
+        let queried = statement.query([id]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
             out.push(ScoreCallRef {
@@ -85,7 +88,10 @@ impl crate::Store {
         let mut statement = self.conn.prepare(
             "SELECT id, target_id, parent_id, path, file_id, scope FROM modules ORDER BY id",
         )?;
-        let mut rows = statement.query([])?;
+        let queried = statement.query([]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
         let mut out = BTreeMap::new();
         while let Some(row) = rows.next()? {
             let file_id: Option<i64> = row.get(4)?;
@@ -111,7 +117,10 @@ impl crate::Store {
             "SELECT file_id, COUNT(DISTINCT target_id) FROM modules
              WHERE file_id IS NOT NULL GROUP BY file_id",
         )?;
-        let mut rows = statement.query([])?;
+        let queried = statement.query([]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
         let mut out = BTreeMap::new();
         while let Some(row) = rows.next()? {
             out.insert(row.get(0)?, row.get::<_, i64>(1)? as usize);
@@ -125,7 +134,10 @@ impl crate::Store {
             "SELECT id, file_id, scope, text, alias, glob FROM refs
              WHERE kind = 'use' ORDER BY id",
         )?;
-        let mut rows = statement.query([])?;
+        let queried = statement.query([]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
             out.push(UseRow {
@@ -147,10 +159,26 @@ impl crate::Store {
             "SELECT ref_id, dst_kind, dst_id FROM edges
              WHERE kind = 'import' AND ref_id IS NOT NULL",
         )?;
-        let mut rows = statement.query([])?;
+        let queried = statement.query([]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
         let mut out = BTreeMap::new();
         while let Some(row) = rows.next()? {
             out.insert(row.get(0)?, (row.get(1)?, row.get(2)?));
+        }
+        Ok(out)
+    }
+
+    /// The directory of every package Phantom's own discovery found, as
+    /// its manifest path's parent (relative, as the store keeps it). The
+    /// scope rule reads a nested package that is not a workspace member
+    /// as its own boundary (W13 R7).
+    pub fn package_dirs(&self) -> Result<BTreeSet<String>, StoreError> {
+        let mut statement = self.conn.prepare("SELECT manifest_path FROM packages")?;
+        let mut out = BTreeSet::new();
+        for path in statement.query_map([], |row| row.get::<_, String>(0))? {
+            out.insert(manifest_dir(&path?));
         }
         Ok(out)
     }
@@ -160,7 +188,10 @@ impl crate::Store {
         let mut statement = self
             .conn
             .prepare("SELECT id, module_id FROM symbols WHERE module_id IS NOT NULL")?;
-        let mut rows = statement.query([])?;
+        let queried = statement.query([]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
         let mut out = BTreeMap::new();
         while let Some(row) = rows.next()? {
             out.insert(row.get(0)?, row.get(1)?);
@@ -173,11 +204,23 @@ impl crate::Store {
     /// call that sat inside a macro argument.
     pub fn ref_ids_of_kind(&self, kind: &str) -> Result<BTreeSet<i64>, StoreError> {
         let mut statement = self.conn.prepare("SELECT id FROM refs WHERE kind = ?1")?;
-        let mut rows = statement.query([kind])?;
+        let queried = statement.query([kind]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
         let mut out = BTreeSet::new();
         while let Some(row) = rows.next()? {
             out.insert(row.get(0)?);
         }
         Ok(out)
+    }
+}
+
+/// The directory of one package manifest path: everything before its
+/// last separator, and the borrowed empty string for a path with none.
+fn manifest_dir(path: &str) -> String {
+    match path.rsplit_once('/') {
+        Some((head, _)) => head.to_owned(),
+        None => String::new(),
     }
 }

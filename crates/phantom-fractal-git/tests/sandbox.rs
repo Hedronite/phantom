@@ -27,6 +27,19 @@ use phantom_fractal_git::{Window, mine};
 use support::{DAY, HEAD, Op, Repo, Script, indexed};
 
 const SANDBOX: &str = "/usr/bin/sandbox-exec";
+
+/// The LLVM profile file the spawned child uses. The parent's value
+/// passes through when a coverage run set it — its patterns name a
+/// file per process, so the child's raw profile still lands where the
+/// coverage run reads it — and a plain test run points the child at
+/// the test's own temp dir. Either way an instrumented child never
+/// writes the default profraw into the source tree (W13 G1).
+fn child_profile_file(repo: &Repo) -> String {
+    match std::env::var_os("LLVM_PROFILE_FILE") {
+        Some(value) => value.to_string_lossy().into_owned(),
+        None => repo.dir().join("child-%p.profraw").display().to_string(),
+    }
+}
 const CHILD: &str = "PHANTOM_GIT_SANDBOX_ROOT";
 const TEST: &str = "mine_under_an_exec_and_fork_kill_sandbox_equals_mine_outside";
 const PATHS: [&str; 3] = ["a.rs", "b.rs", "c.rs"];
@@ -126,6 +139,7 @@ fn mine_under_an_exec_and_fork_kill_sandbox_equals_mine_outside() {
         .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
         .env_clear()
         .env(CHILD, &repo.root)
+        .env("LLVM_PROFILE_FILE", child_profile_file(&repo))
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("HOME", &repo.home)
         .env("GIT_DIR", "/nonexistent")
@@ -162,6 +176,7 @@ fn mine_under_an_exec_and_fork_kill_sandbox_equals_mine_outside() {
         .arg(&profile)
         .args(["/bin/sh", "-c", "exit 0"])
         .env_clear()
+        .env("LLVM_PROFILE_FILE", child_profile_file(&repo))
         .status()
         .expect("run control");
     assert_eq!(control.signal(), Some(9), "control not killed: {control:?}");

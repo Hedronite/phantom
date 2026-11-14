@@ -101,7 +101,10 @@ impl crate::Store {
              WHERE s.kind <> 'module'
              ORDER BY s.id",
         )?;
-        let mut rows = statement.query([])?;
+        let queried = statement.query([]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
             let target_kind: Option<String> = row.get(6)?;
@@ -136,7 +139,10 @@ impl crate::Store {
              WHERE e.kind IN ('call', 'impl')
              ORDER BY e.id",
         )?;
-        let mut rows = statement.query([])?;
+        let queried = statement.query([]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
             out.push(RankEdge {
@@ -176,7 +182,10 @@ impl crate::Store {
                AND e.dst_kind = 'symbol'
              ORDER BY 1, 2",
         )?;
-        let mut rows = statement.query([])?;
+        let queried = statement.query([]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
             out.push(RankImportEdge {
@@ -233,7 +242,10 @@ impl crate::Store {
              FROM rank r
              ORDER BY r.node_kind, r.node_id",
         )?;
-        let mut rows = statement.query([])?;
+        let queried = statement.query([]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
             out.push((row.get(0)?, row.get(1)?, row.get(2)?));
@@ -247,7 +259,10 @@ impl crate::Store {
         let mut statement = self
             .conn
             .prepare("SELECT id, path FROM files ORDER BY path")?;
-        let mut rows = statement.query([])?;
+        let queried = statement.query([]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
             out.push(MapFile {
@@ -272,7 +287,10 @@ impl crate::Store {
              WHERE s.is_test = 0 AND s.kind <> 'module'
              ORDER BY s.id",
         )?;
-        let mut rows = statement.query([])?;
+        let queried = statement.query([]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
             out.push(MapRow {

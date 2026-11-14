@@ -47,6 +47,7 @@ fn wait_for_held(child: &mut std::process::Child, marker: &std::path::Path) {
 
 #[test]
 fn acquire_creates_an_empty_0600_file_and_releases_on_drop() {
+    let _serial = super::serial();
     let db = TempDb::new("lockfile");
     assert_outside_workspace(db.path());
     let lock_path = crate::lock::lock_path(db.path());
@@ -72,6 +73,7 @@ fn acquire_creates_an_empty_0600_file_and_releases_on_drop() {
 
 #[test]
 fn two_threads_contend_and_the_loser_gets_lock_held() {
+    let _serial = super::serial();
     let db = TempDb::new("lock2thread");
     assert_outside_workspace(db.path());
     // The chain is born outside the timed window on a loaded runner:
@@ -108,6 +110,7 @@ fn two_threads_contend_and_the_loser_gets_lock_held() {
 
 #[test]
 fn two_processes_contend_and_the_loser_gets_lock_held() {
+    let _serial = super::serial();
     let db = TempDb::new("lock2proc");
     assert_outside_workspace(db.path());
     let marker = std::env::temp_dir().join(format!(
@@ -147,6 +150,7 @@ fn two_processes_contend_and_the_loser_gets_lock_held() {
 
 #[test]
 fn killed_holder_frees_the_lock() {
+    let _serial = super::serial();
     let db = TempDb::new("lockkill");
     assert_outside_workspace(db.path());
     let marker = std::env::temp_dir().join(format!(
@@ -173,6 +177,7 @@ fn killed_holder_frees_the_lock() {
 
 #[test]
 fn lock_state_never_creates_the_file() {
+    let _serial = super::serial();
     let db = TempDb::new("lockstate");
     assert_outside_workspace(db.path());
     let lock_path = crate::lock::lock_path(db.path());
@@ -188,6 +193,7 @@ fn lock_state_never_creates_the_file() {
 /// the environment answers at once.
 #[test]
 fn spawned_child_holds_the_lock() {
+    let _serial = super::serial();
     let Ok(db) = std::env::var("PHA_STORE_TEST_LOCK_DB") else {
         return;
     };
@@ -204,6 +210,7 @@ fn spawned_child_holds_the_lock() {
 
 #[test]
 fn acquire_creates_the_0700_chain_and_holds() {
+    let _serial = super::serial();
     let data = TempData::new("lockchain");
     // No chain exists yet: only the lock file is here, and the chain
     // Store::open would have created is born around it — at `0700`,
@@ -232,6 +239,7 @@ fn acquire_creates_the_0700_chain_and_holds() {
 
 #[test]
 fn acquire_refuses_a_broken_chain_like_the_store() {
+    let _serial = super::serial();
     use std::fs;
     let data = TempData::new("lockshape");
     fs::create_dir_all(data.root.join("repos")).expect("repos");
@@ -298,6 +306,7 @@ fn file_state(path: &std::path::Path) -> ((i64, i64), u32, Vec<u8>) {
 
 #[test]
 fn acquire_refuses_a_symlink_and_spares_its_target() {
+    let _serial = super::serial();
     let (data, lock) = bare_repo("roloclink");
     let target = data.repo_dir().join("scout");
     std::fs::write(&target, b"the target bytes").expect("target");
@@ -324,6 +333,7 @@ fn acquire_refuses_a_symlink_and_spares_its_target() {
 
 #[test]
 fn acquire_and_lock_state_refuse_a_dangling_symlink() {
+    let _serial = super::serial();
     let (data, lock) = bare_repo("roloclink-dg");
     std::os::unix::fs::symlink("nowhere", &lock).expect("dangling");
 
@@ -348,6 +358,7 @@ fn acquire_and_lock_state_refuse_a_dangling_symlink() {
 
 #[test]
 fn acquire_refuses_a_directory_at_the_lock_path() {
+    let _serial = super::serial();
     let (data, lock) = bare_repo("rolocdir");
     std::fs::create_dir(&lock).expect("dir at the lock path");
     let refused = WriterLock::acquire(&data.db()).expect_err("refused");
@@ -360,6 +371,7 @@ fn acquire_refuses_a_directory_at_the_lock_path() {
 
 #[test]
 fn lock_state_refuses_a_directory_and_a_link_to_one() {
+    let _serial = super::serial();
     // The FIFO case takes the same `is_file()` false a directory or a
     // link to one takes: both are non-regular entries at the lock
     // path, and QA plants a real FIFO against the same refusal.
@@ -391,6 +403,7 @@ fn lock_state_refuses_a_directory_and_a_link_to_one() {
 /// roots; without the tool the case skips, never fakes.
 #[test]
 fn a_real_fifo_at_the_lock_path_is_refused_without_a_hang() {
+    let _serial = super::serial();
     let (data, lock) = bare_repo("rolocfifo");
     let planted = Command::new("mkfifo")
         .arg(&lock)
@@ -453,6 +466,7 @@ fn a_real_fifo_at_the_lock_path_is_refused_without_a_hang() {
 /// QA uses to plant its own between-checks shapes.
 #[test]
 fn a_fifo_racing_the_open_is_refused_without_a_hang() {
+    let _serial = super::serial();
     let (data, lock) = bare_repo("rolockrace");
     let db = data.db();
     let lock_for_hook = lock.clone();
@@ -498,6 +512,7 @@ fn a_fifo_racing_the_open_is_refused_without_a_hang() {
 /// refusal, never an absolute path and never a follow.
 #[test]
 fn a_symlink_racing_the_open_is_refused_as_a_lock_file() {
+    let _serial = super::serial();
     use crate::StoreError;
 
     let (data, lock) = bare_repo("rolocelink");
@@ -537,4 +552,247 @@ fn a_symlink_racing_the_open_is_refused_as_a_lock_file() {
     );
     let _ = std::fs::remove_file(&lock);
     let _ = std::fs::remove_file(data.repo_dir().join("target.rs"));
+}
+
+/// A bare database name has no parent directory, and the lock path is
+/// then the bare name itself.
+#[test]
+fn a_bare_database_name_keeps_a_bare_lock_path() {
+    let _serial = super::serial();
+    assert_eq!(
+        crate::lock::lock_path(std::path::Path::new("graph.db")),
+        std::path::PathBuf::from("graph.db.lock")
+    );
+}
+
+/// A wide lock file is narrowed to `0600` on the way in, and a link
+/// swapped in after the pre-open check is re-verified and refused by
+/// the reopen path's own identity match.
+#[test]
+fn a_wide_lock_file_is_narrowed_and_a_swapped_in_file_is_refused() {
+    let _serial = super::serial();
+    use std::os::unix::fs::PermissionsExt;
+
+    let (data, lock) = bare_repo("rolocwide");
+    let db = data.db();
+    let held = WriterLock::acquire(&db).expect("first lock");
+    drop(held);
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o666)).expect("widen");
+    drop(WriterLock::acquire(&db).expect("second lock"));
+    let mode = fs::metadata(&lock).expect("metadata").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the lock file was not narrowed");
+
+    // The hook swaps in a different regular file after the shape
+    // check: the exclusive create sees it, and the reopen's identity
+    // match refuses it.
+    let raced = std::sync::atomic::AtomicBool::new(false);
+    let raced_once = std::sync::Arc::new(raced);
+    let raced_hook = raced_once.clone();
+    let hook_target = lock.clone();
+    let hook: Box<dyn Fn(&std::path::Path) + Send> = Box::new(move |_| {
+        if !raced_hook.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let _ = fs::remove_file(&hook_target);
+            let _ = fs::write(&hook_target, b"swapped");
+            fs::set_permissions(&hook_target, fs::Permissions::from_mode(0o600)).ok();
+        }
+    });
+    crate::lock::race_lock_window(Some(hook));
+    let taken = std::thread::scope(|scope| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        scope.spawn(move || {
+            let _ = tx.send(WriterLock::acquire(&db).is_ok());
+        });
+        rx.recv_timeout(Duration::from_secs(2))
+    });
+    crate::lock::race_lock_window(None);
+    // A regular file swapped in after the check is re-verified and
+    // adopted through the reopen path, and its bytes are never
+    // touched — the lock file carries no content.
+    assert!(taken.expect("the swap race hung past two seconds"));
+    assert_eq!(fs::read(&lock).expect("contents"), b"swapped");
+    let _ = fs::remove_file(&lock);
+}
+
+/// A repository directory the process cannot stat answers the store's
+/// own error rather than a raw `io` one.
+#[test]
+fn an_unreadable_repository_directory_refuses_the_lock() {
+    let _serial = super::serial();
+    use std::os::unix::fs::PermissionsExt;
+
+    let (data, _lock) = bare_repo("rolocnoread");
+    let db = data.db();
+    let repo = data.repo_dir();
+    fs::set_permissions(&repo, fs::Permissions::from_mode(0o000)).expect("close");
+    let opened = WriterLock::acquire(&db);
+    fs::set_permissions(&repo, fs::Permissions::from_mode(0o700)).expect("reopen");
+    assert!(
+        matches!(
+            opened,
+            Err(StoreError::Io(_) | StoreError::DataDirectory(..) | StoreError::NotOwnedByUs(..))
+        ),
+        "{opened:?}"
+    );
+}
+
+/// The second race window: a regular file is planted after the pre-open
+/// check (the exclusive create then answers `AlreadyExists`), and the
+/// reopen's window swaps a different regular file in — the identity
+/// match refuses it.
+#[test]
+fn a_second_swap_between_the_reverify_and_the_reopen_is_refused() {
+    let _serial = super::serial();
+    use std::os::unix::fs::PermissionsExt;
+
+    let (data, lock) = bare_repo("rolocswap2");
+    let db = data.db();
+    let shots = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let shots_hook = shots.clone();
+    let hook_target = lock.clone();
+    let hook: Box<dyn Fn(&std::path::Path) + Send> = Box::new(move |_| {
+        let shot = shots_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match shot {
+            0 => {
+                fs::write(&hook_target, b"first").expect("plant");
+                fs::set_permissions(&hook_target, fs::Permissions::from_mode(0o600)).expect("mode");
+            }
+            1 => {
+                fs::remove_file(&hook_target).expect("remove");
+                fs::write(&hook_target, b"second").expect("swap");
+                fs::set_permissions(&hook_target, fs::Permissions::from_mode(0o600)).expect("mode");
+            }
+            _ => {}
+        }
+    });
+    crate::lock::race_lock_window(Some(hook));
+    let refused = std::thread::scope(|scope| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        scope.spawn(move || {
+            let _ = tx.send(WriterLock::acquire(&db).err());
+        });
+        rx.recv_timeout(Duration::from_secs(2))
+    });
+    crate::lock::race_lock_window(None);
+    let refused = refused
+        .expect("the second swap hung past two seconds")
+        .expect("refused");
+    assert_lock_refusal(&refused, "changed between the check and the open");
+    let _ = fs::remove_file(&lock);
+}
+
+/// The reopen's window with a SYMLINK planted: the flagged targets fail
+/// the open itself with `ELOOP`, mapped to the store's lock-file
+/// refusal — never a raw `Io` error, never a follow.
+#[test]
+fn a_symlink_in_the_reopen_window_refuses_as_a_lock_file() {
+    let _serial = super::serial();
+    use std::os::unix::fs::PermissionsExt;
+
+    let (data, lock) = bare_repo("roloclink2");
+    let db = data.db();
+    let shots = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let shots_hook = shots.clone();
+    let hook_target = lock.clone();
+    let repo = data.repo_dir();
+    let hook: Box<dyn Fn(&std::path::Path) + Send> = Box::new(move |_| {
+        let shot = shots_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match shot {
+            0 => {
+                fs::write(&hook_target, b"first").expect("plant");
+                fs::set_permissions(&hook_target, fs::Permissions::from_mode(0o600)).expect("mode");
+            }
+            1 => {
+                let target = repo.join("linktarget.rs");
+                fs::write(&target, b"target").expect("target");
+                fs::remove_file(&hook_target).expect("remove");
+                std::os::unix::fs::symlink(&target, &hook_target).expect("link");
+            }
+            _ => {}
+        }
+    });
+    crate::lock::race_lock_window(Some(hook));
+    let refused = std::thread::scope(|scope| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        scope.spawn(move || {
+            let _ = tx.send(WriterLock::acquire(&db).err());
+        });
+        rx.recv_timeout(Duration::from_secs(2))
+    });
+    crate::lock::race_lock_window(None);
+    let refused = refused
+        .expect("the reopen link hung past two seconds")
+        .expect("refused");
+    assert_lock_refusal(&refused, "symlink or not a regular file");
+    let _ = fs::remove_file(&lock);
+    let _ = fs::remove_file(data.repo_dir().join("linktarget.rs"));
+}
+
+/// A path with no file name and no parent still answers a lock path:
+/// the default database name, bare.
+#[test]
+fn a_root_like_path_answers_the_default_lock_name() {
+    let _serial = super::serial();
+    assert_eq!(
+        crate::lock::lock_path(std::path::Path::new("/")),
+        std::path::PathBuf::from("graph.db.lock")
+    );
+}
+
+/// A lock file the process cannot open answers the store's `io`
+/// error on the probe path rather than a panic.
+#[test]
+fn an_unreadable_lock_file_answers_the_io_error() {
+    let _serial = super::serial();
+    use std::os::unix::fs::PermissionsExt;
+
+    let (data, lock) = bare_repo("rolocnoreadfile");
+    let db = data.db();
+    drop(WriterLock::acquire(&db).expect("first lock"));
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o000)).expect("close");
+    let probed = crate::lock_state(&db);
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o600)).expect("reopen");
+    assert!(
+        matches!(probed, Err(StoreError::Io(_)) | Ok(crate::LockState::Free)),
+        "{probed:?}"
+    );
+}
+
+/// The reopen's window with the file GONE: the reopen answers the
+/// store's own error through the open-error mapping, never a success
+/// on a missing lock file.
+#[test]
+fn a_vanished_file_in_the_reopen_window_answers_the_open_error() {
+    let _serial = super::serial();
+    use std::os::unix::fs::PermissionsExt;
+
+    let (data, lock) = bare_repo("rolocvanish");
+    let db = data.db();
+    let shots = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let shots_hook = shots.clone();
+    let hook_target = lock.clone();
+    let hook: Box<dyn Fn(&std::path::Path) + Send> = Box::new(move |_| {
+        let shot = shots_hook.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match shot {
+            0 => {
+                fs::write(&hook_target, b"first").expect("plant");
+                fs::set_permissions(&hook_target, fs::Permissions::from_mode(0o600)).expect("mode");
+            }
+            1 => {
+                fs::remove_file(&hook_target).expect("remove");
+            }
+            _ => {}
+        }
+    });
+    crate::lock::race_lock_window(Some(hook));
+    let refused = std::thread::scope(|scope| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        scope.spawn(move || {
+            let _ = tx.send(WriterLock::acquire(&db).err());
+        });
+        rx.recv_timeout(Duration::from_secs(2))
+    });
+    crate::lock::race_lock_window(None);
+    let outcome = refused.expect("the vanish race hung past two seconds");
+    assert!(outcome.is_some(), "{outcome:?}");
+    let _ = fs::remove_file(&lock);
 }

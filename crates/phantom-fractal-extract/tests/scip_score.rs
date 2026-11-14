@@ -971,3 +971,99 @@ fn the_w13_buckets_hold_their_extracted_cases() {
         "{report}"
     );
 }
+
+/// The R7 scope rule on a hand-built case: a workspace-root package
+/// member covers the tree, but a directory that carries its own
+/// `Cargo.toml` and is not a member is its own boundary, so documents
+/// under it leave both sets and only the counters move — recall and
+/// the graded precision are the member documents' own.
+#[test]
+fn a_nested_package_that_is_not_a_member_stays_out_of_scope() {
+    let temp = Temp::new("nested-scope");
+    let repo = temp.root.join("repo");
+    std::fs::create_dir_all(repo.join("src")).expect("create src");
+    std::fs::create_dir_all(repo.join("vendor/odd/src")).expect("create vendor");
+    std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"root\"\n").expect("manifest");
+    std::fs::write(
+        repo.join("vendor/odd/Cargo.toml"),
+        "[package]\nname = \"odd\"\n",
+    )
+    .expect("vendor manifest");
+    std::fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn one() {}\npub fn caller() {\n    one();\n}\n",
+    )
+    .expect("lib");
+    std::fs::write(
+        repo.join("vendor/odd/src/lib.rs"),
+        "pub fn far() {}\npub fn caller() {\n    far();\n}\n",
+    )
+    .expect("vendor lib");
+    // Q1: a fixture document under `fixtures/` is a nested non-member
+    // package too — its own manifest, not a workspace member.
+    std::fs::create_dir_all(repo.join("fixtures/odd/src")).expect("create fixture dir");
+    std::fs::write(
+        repo.join("fixtures/odd/Cargo.toml"),
+        "[package]\nname = \"fix-odd\"\n",
+    )
+    .expect("fixture manifest");
+    std::fs::write(
+        repo.join("fixtures/odd/src/lib.rs"),
+        "pub fn fixture() {}\n",
+    )
+    .expect("fixture lib");
+    let mut store = Store::open(&temp.db()).expect("open store");
+    index(&repo, &mut store, &RustLanguage::new().expect("grammar")).expect("index");
+
+    let document = |path: &str, occurrences: Vec<scip::wire::Occurrence>| scip::wire::Document {
+        relative_path: path.to_owned(),
+        occurrences,
+    };
+    let export = scip::wire::ScipIndex {
+        documents: vec![
+            document(
+                "src/lib.rs",
+                vec![
+                    occurrence("root", 0, 7, 10, "one", true),
+                    occurrence("root", 2, 4, 7, "one", false),
+                ],
+            ),
+            document(
+                "vendor/odd/src/lib.rs",
+                vec![
+                    occurrence("odd", 0, 7, 10, "far", true),
+                    occurrence("odd", 2, 4, 7, "far", false),
+                ],
+            ),
+        ],
+    };
+    // Only the root package is a member; vendor/odd carries its own
+    // manifest and is not one.
+    let members = Members::from_metadata(
+        b"{\"workspace_root\":\"/w\",\"packages\":[{\"manifest_path\":\"/w/Cargo.toml\"}]}",
+    )
+    .expect("members");
+    assert!(members.in_scope("vendor/odd/src/lib.rs"));
+    assert!(!members.in_scope_with_packages(
+        "vendor/odd/src/lib.rs",
+        &store.package_dirs().expect("package dirs")
+    ));
+    // Q1: the fixture document reads out of scope even though the root
+    // member's prefix covers it, because fixtures/odd is its own
+    // package and not a member.
+    let package_dirs = store.package_dirs().expect("package dirs");
+    assert!(package_dirs.contains("fixtures/odd"));
+    assert!(members.in_scope("fixtures/odd/src/lib.rs"));
+    assert!(!members.in_scope_with_packages("fixtures/odd/src/lib.rs", &package_dirs));
+    let report = scip::score::score_with(&export, &store, Some(&members)).expect("score");
+    assert!(report.contains("\"out_of_scope_documents\":1"), "{report}");
+    assert!(report.contains("\"out_of_scope_truth\":1"), "{report}");
+    assert!(report.contains("\"out_of_scope_edges\":1"), "{report}");
+    // Only the member pair remains in truth, and the graded figures are
+    // the member edges' own: recall and precision did not move.
+    assert!(report.contains("\"recall\":{\"truth\":1,"), "{report}");
+    assert!(
+        report.contains("\"graded\":{\"0.5\":{\"edges\":1,\"corroborated\":1,\"precision\":1.0000"),
+        "{report}"
+    );
+}

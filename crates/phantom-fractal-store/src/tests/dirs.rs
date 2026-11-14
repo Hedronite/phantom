@@ -13,6 +13,7 @@ use crate::{Store, StoreError};
 #[test]
 #[cfg(unix)]
 fn fresh_data_directories_are_created_0700() {
+    let _serial = super::serial();
     let data = TempData::new("dirs");
     let db = data.db();
     let store = Store::open(&db).expect("open");
@@ -33,6 +34,7 @@ fn fresh_data_directories_are_created_0700() {
 #[test]
 #[cfg(unix)]
 fn open_tightens_repos_directories_and_leaves_the_data_root() {
+    let _serial = super::serial();
     let data = TempData::new("tighten");
     mkdir_explicit(&data.root, 0o751);
     let repos = data.root.join("repos");
@@ -56,6 +58,7 @@ fn open_tightens_repos_directories_and_leaves_the_data_root() {
 #[test]
 #[cfg(unix)]
 fn open_leaves_a_wider_non_repos_directory_alone() {
+    let _serial = super::serial();
     let db = TempDb::new("plain");
     assert_outside_workspace(db.path());
     // The temp dir already exists with a wider umask-carried mode; opening
@@ -72,6 +75,7 @@ fn open_leaves_a_wider_non_repos_directory_alone() {
 #[test]
 #[cfg(unix)]
 fn database_and_wal_files_are_0600_after_index() {
+    let _serial = super::serial();
     let data = TempData::new("wal");
     let db = data.db();
     let mut store = Store::open(&db).expect("open");
@@ -90,6 +94,7 @@ fn database_and_wal_files_are_0600_after_index() {
 #[test]
 #[cfg(unix)]
 fn a_symlinked_repos_refuses_open_without_chmod() {
+    let _serial = super::serial();
     let data = TempData::new("symlink-repos");
     mkdir_explicit(&data.root, 0o755);
     let target = data.root.join("target");
@@ -107,6 +112,7 @@ fn a_symlinked_repos_refuses_open_without_chmod() {
 #[test]
 #[cfg(unix)]
 fn a_symlinked_repo_directory_refuses_open_without_chmod() {
+    let _serial = super::serial();
     let data = TempData::new("symlink-repo");
     mkdir_explicit(&data.root, 0o755);
     mkdir_explicit(&data.root.join("repos"), 0o755);
@@ -125,6 +131,7 @@ fn a_symlinked_repo_directory_refuses_open_without_chmod() {
 #[test]
 #[cfg(unix)]
 fn non_directory_repos_refuses_open() {
+    let _serial = super::serial();
     let data = TempData::new("file-repos");
     mkdir_explicit(&data.root, 0o755);
     fs::write(data.root.join("repos"), b"not a directory").expect("write");
@@ -135,6 +142,7 @@ fn non_directory_repos_refuses_open() {
 #[test]
 #[cfg(unix)]
 fn owner_comparison_rejects_a_mismatched_uid() {
+    let _serial = super::serial();
     use std::os::unix::fs::MetadataExt;
     let probe = unique_path("owner-compare");
     std::fs::OpenOptions::new()
@@ -152,6 +160,7 @@ fn owner_comparison_rejects_a_mismatched_uid() {
 #[test]
 #[cfg(unix)]
 fn the_real_owner_path_uses_the_effective_uid() {
+    let _serial = super::serial();
     let data = TempData::new("owner-real");
     mkdir_explicit(&data.root, 0o755);
     mkdir_explicit(&data.root.join("repos"), 0o755);
@@ -180,6 +189,7 @@ fn unique_path(label: &str) -> PathBuf {
 #[test]
 #[cfg(unix)]
 fn open_fails_when_the_repo_dir_swaps_to_a_symlink() {
+    let _serial = super::serial();
     let data = TempData::new("swap-link");
     mkdir_explicit(&data.root, 0o755);
     mkdir_explicit(&data.root.join("repos"), 0o755);
@@ -201,6 +211,7 @@ fn open_fails_when_the_repo_dir_swaps_to_a_symlink() {
 #[test]
 #[cfg(unix)]
 fn open_refuses_a_swapped_in_directory() {
+    let _serial = super::serial();
     let data = TempData::new("swap-dir");
     mkdir_explicit(&data.root, 0o755);
     mkdir_explicit(&data.root.join("repos"), 0o755);
@@ -220,6 +231,7 @@ fn open_refuses_a_swapped_in_directory() {
 #[test]
 #[cfg(unix)]
 fn tighten_refuses_without_the_uid_and_narrows_with_it() {
+    let _serial = super::serial();
     use std::os::unix::fs::MetadataExt;
     // Same dev/ino directory with a group bit: the chmod lands through
     // the handle only after the uid check passes (the probe's uid).
@@ -257,6 +269,7 @@ fn tighten_refuses_without_the_uid_and_narrows_with_it() {
     ),
 ))]
 fn a_symlink_swap_fails_at_the_open() {
+    let _serial = super::serial();
     let data = TempData::new("w5-swap-link");
     mkdir_explicit(&data.root, 0o755);
     mkdir_explicit(&data.root.join("repos"), 0o755);
@@ -298,6 +311,7 @@ fn a_symlink_swap_fails_at_the_open() {
     ),
 ))]
 fn a_regular_file_swap_fails_at_the_open() {
+    let _serial = super::serial();
     let data = TempData::new("w5-swap-file");
     mkdir_explicit(&data.root, 0o755);
     mkdir_explicit(&data.root.join("repos"), 0o755);

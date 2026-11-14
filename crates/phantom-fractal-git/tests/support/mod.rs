@@ -4,8 +4,9 @@
 //! CLI, run only here: `git init`, then one `git fast-import` stream with
 //! fixed committer times and identity, then `git reset --hard` to check
 //! the tree out. Every run clears the environment and sets
-//! `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, a temp `HOME`
-//! and `core.hooksPath=/dev/null`, so no hook or outside config runs.
+//! `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, a temp `HOME`,
+//! an explicit author and committer identity, and `core.hooksPath=/dev/null`,
+//! so no hook or outside config runs (W13 R9).
 #![allow(dead_code)]
 
 use std::collections::BTreeSet;
@@ -14,7 +15,8 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::SystemTime;
 
 /// HEAD's committer time in most tests, unix seconds (2025-06-15).
 pub const HEAD: i64 = 1_750_000_000;
@@ -25,12 +27,10 @@ pub struct TempDir(pub PathBuf);
 
 impl TempDir {
     pub fn new(tag: &str) -> Self {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|dur| dur.as_nanos())
-            .unwrap_or(0);
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let count = COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
-            "phantom-fractal-git-{tag}-{}-{nanos}",
+            "phantom-fractal-git-{tag}-{}-{count}",
             process::id()
         ));
         fs::create_dir_all(&path).expect("temp dir");
@@ -159,6 +159,13 @@ impl Repo {
             .env("HOME", &self.home)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            // R9: an explicit identity on every spawned git, so no
+            // machine-wide config can supply one and a commit git makes
+            // itself is deterministic.
+            .env("GIT_AUTHOR_NAME", "Phantom Tests")
+            .env("GIT_AUTHOR_EMAIL", "tests@phantom.invalid")
+            .env("GIT_COMMITTER_NAME", "Phantom Tests")
+            .env("GIT_COMMITTER_EMAIL", "tests@phantom.invalid")
             .env("LC_ALL", "C")
             .args([
                 "-c",

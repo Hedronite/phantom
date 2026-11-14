@@ -282,6 +282,11 @@ fn open_lock_file(path: &Path) -> Result<std::fs::File, StoreError> {
             let Some(pre) = verified_lock_meta(path)? else {
                 return Err(identity_refusal());
             };
+            // The second race window: between the re-verify and the
+            // reopen, test-only, so a test can show the identity match
+            // and the `ELOOP` refusal that no plain sequence reaches.
+            #[cfg(test)]
+            run_lock_race(path);
             let mut reopen = std::fs::OpenOptions::new();
             reopen.read(true).write(true);
             #[cfg(any(
