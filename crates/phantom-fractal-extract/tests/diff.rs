@@ -93,6 +93,11 @@ impl Repo {
             .env("HOME", self.home.path())
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("XDG_CONFIG_HOME", self.home.path())
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
             .env("LC_ALL", "C")
             .args([
                 "-c",
