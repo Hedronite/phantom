@@ -956,3 +956,29 @@ fn stdout_carries_only_json_rpc_lines() {
         assert!(line.starts_with('{') && line.ends_with('}'), "{line}");
     }
 }
+
+/// A client's response, a message with a result or an error and no method,
+/// gets no reply. A message with no method and neither is refused.
+#[test]
+fn a_client_response_gets_no_reply_and_a_message_without_a_method_is_refused() {
+    let mut input = transcript(&[initialize(1, "2025-11-25"), initialized()]);
+    input.extend(transcript(&[
+        json!({ "jsonrpc": "2.0", "id": 2, "result": {} }),
+        json!({ "jsonrpc": "2.0", "id": 3, "error": { "code": 1, "message": "no" } }),
+        json!({ "jsonrpc": "2.0", "id": 4 }),
+        request(5, "ping", json!({})),
+    ]));
+    let replies = session(&[], &input);
+    let got: Vec<(Value, Value)> = replies[1..]
+        .iter()
+        .map(|reply| {
+            let outcome = reply
+                .get("error")
+                .map_or_else(|| reply["result"].clone(), |error| error["code"].clone());
+            (reply["id"].clone(), outcome)
+        })
+        .collect();
+    let want: Vec<(Value, Value)> = vec![(json!(4), json!(-32600)), (json!(5), json!({}))];
+    assert_eq!(got, want);
+    assert_eq!(replies[1]["error"]["message"], "method must be a string");
+}
