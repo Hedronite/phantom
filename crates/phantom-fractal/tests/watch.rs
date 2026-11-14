@@ -741,3 +741,35 @@ fn a_git_branch_switch() {
     assert_eq!(counts(&batch), (1, 1, true));
     assert_eq!(batch["meta"]["head"], repo.rev("main"));
 }
+
+/// A watch whose stdout is closed stops at its first batch with exit 1,
+/// as any failed write stops it.
+#[test]
+fn a_closed_stdout_stops_the_watch_with_exit_one() {
+    let root = package();
+    let data = TempDir::new("watch-data");
+    let mut child = Command::new(FRACT)
+        .args(["watch", "--repo"])
+        .arg(root.path())
+        .args(["--interval-ms", INTERVAL_MS, "--debounce-ms", DEBOUNCE_MS])
+        .env("PHANTOM_FRACTAL_DATA", data.path())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn watch");
+    drop(child.stdout.take());
+    let deadline = Instant::now() + BATCH_WAIT;
+    let code = loop {
+        if let Some(status) = child.try_wait().expect("try wait") {
+            break status.code();
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the watch kept running with its stdout closed");
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(code, Some(1));
+}

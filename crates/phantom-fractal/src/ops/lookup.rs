@@ -14,7 +14,7 @@ use phantom_fractal_proto::ErrorKind;
 use phantom_fractal_store::{Store, SymbolMatch};
 use serde::Serialize;
 
-use super::{Failure, open_index};
+use super::{Failure, budget, open_index};
 
 /// Most candidates an `Ambiguous` failure lists.
 const CANDIDATE_CAP: usize = 10;
@@ -94,6 +94,15 @@ pub(crate) fn current_index(repo: &Path) -> Result<(Store, Names), Failure> {
     let store = current_store(repo)?;
     let names = Names::new(store.resolve_input()?);
     Ok((store, names))
+}
+
+/// [`current_index`], once `max_tokens` is checked first.
+pub(crate) fn checked_index(
+    max_tokens: Option<u64>,
+    repo: &Path,
+) -> Result<(Store, Names), Failure> {
+    budget::check(max_tokens)?;
+    current_index(repo)
 }
 
 /// The store for the tree at `repo`. It is `NoIndex` unless the index was

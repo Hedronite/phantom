@@ -47,21 +47,23 @@ impl Server {
     /// The reply line for one input line, or none for a notification, a
     /// client response, or a blank line.
     pub(crate) fn handle(&mut self, line: Line) -> Option<String> {
-        let bytes = match line {
-            Line::Eof => return None,
-            Line::TooLong => {
-                return Some(error(
-                    &Value::Null,
-                    INVALID_REQUEST,
-                    "message is over 1 MiB",
-                ));
-            }
-            Line::Text(bytes) => bytes,
-        };
+        match line {
+            Line::Eof => None,
+            Line::TooLong => Some(error(
+                &Value::Null,
+                INVALID_REQUEST,
+                "message is over 1 MiB",
+            )),
+            Line::Text(bytes) => self.text(&bytes),
+        }
+    }
+
+    /// The reply to one whole line of text: none for a blank one.
+    fn text(&mut self, bytes: &[u8]) -> Option<String> {
         if bytes.iter().all(u8::is_ascii_whitespace) {
             return None;
         }
-        match serde_json::from_slice::<Value>(&bytes) {
+        match serde_json::from_slice::<Value>(bytes) {
             Ok(message) => self.message(message),
             Err(_) => Some(error(&Value::Null, PARSE_ERROR, "parse error")),
         }
@@ -69,17 +71,12 @@ impl Server {
 
     fn message(&mut self, message: Value) -> Option<String> {
         let Value::Object(message) = message else {
-            let text = if message.is_array() {
-                "batches are not supported"
-            } else {
-                "a message must be a JSON object"
-            };
-            return Some(error(&Value::Null, INVALID_REQUEST, text));
+            return Some(not_an_object(&message));
         };
         let id = message.get("id");
         let method = message.get("method");
         // A client's response: this server sends no requests to answer.
-        if method.is_none() && (message.contains_key("result") || message.contains_key("error")) {
+        if is_response(&message) {
             return None;
         }
         let reply_id = id.filter(|id| valid_id(id)).unwrap_or(&Value::Null);
@@ -89,6 +86,18 @@ impl Server {
         let Some(method) = method.and_then(Value::as_str) else {
             return Some(error(reply_id, INVALID_REQUEST, "method must be a string"));
         };
+        self.reply_to(id, method, message.get("params"))
+    }
+
+    /// The reply to a well-formed message by its id: none for a
+    /// notification, a refusal for an id that is not a string or a number,
+    /// and the request's answer otherwise.
+    fn reply_to(
+        &mut self,
+        id: Option<&Value>,
+        method: &str,
+        params: Option<&Value>,
+    ) -> Option<String> {
         match id {
             // A notification gets no reply. `notifications/initialized`
             // changes nothing here, and the rest are ignored.
@@ -98,20 +107,23 @@ impl Server {
                 INVALID_REQUEST,
                 "id must be a string or a number",
             )),
-            Some(id) => Some(self.request(id, method, message.get("params"))),
+            Some(id) => Some(self.request(id, method, params)),
         }
     }
 
     fn request(&mut self, id: &Value, method: &str, params: Option<&Value>) -> String {
-        if !self.initialized && method != "initialize" && method != "ping" {
+        if !self.initialized && !before_initialize(method) {
             return error(id, NOT_INITIALIZED, "server not initialized");
         }
         let empty = Map::new();
-        let params = match params {
-            None => &empty,
-            Some(Value::Object(params)) => params,
-            Some(_) => return error(id, INVALID_PARAMS, "params must be an object"),
+        let Some(params) = object(params, &empty) else {
+            return error(id, INVALID_PARAMS, "params must be an object");
         };
+        self.dispatch(id, method, params)
+    }
+
+    /// The answer to method `method`.
+    fn dispatch(&mut self, id: &Value, method: &str, params: &Map<String, Value>) -> String {
         match method {
             "initialize" => {
                 self.initialized = true;
@@ -129,16 +141,57 @@ impl Server {
             return error(id, INVALID_PARAMS, "tool name must be a string");
         };
         let empty = Map::new();
-        let arguments = match params.get("arguments") {
-            None => &empty,
-            Some(Value::Object(arguments)) => arguments,
-            Some(_) => return error(id, INVALID_PARAMS, "arguments must be an object"),
+        let Some(arguments) = object(params.get("arguments"), &empty) else {
+            return error(id, INVALID_PARAMS, "arguments must be an object");
         };
-        match tools::call(name, arguments, self.allow_index, &self.roots) {
-            Some(Ok(outcome)) => tool_result(id, &outcome),
-            Some(Err(())) => error(id, INTERNAL_ERROR, "the result could not be encoded"),
-            None => error(id, INVALID_PARAMS, "unknown tool"),
-        }
+        tool_reply(
+            id,
+            tools::call(name, arguments, self.allow_index, &self.roots),
+        )
+    }
+}
+
+/// The reply to a message that is not a JSON object.
+fn not_an_object(message: &Value) -> String {
+    let text = if message.is_array() {
+        "batches are not supported"
+    } else {
+        "a message must be a JSON object"
+    };
+    error(&Value::Null, INVALID_REQUEST, text)
+}
+
+/// True for a client's response: no method, and a result or an error.
+fn is_response(message: &Map<String, Value>) -> bool {
+    !message.contains_key("method")
+        && (message.contains_key("result") || message.contains_key("error"))
+}
+
+/// True for the methods a server answers before `initialize`.
+fn before_initialize(method: &str) -> bool {
+    method == "initialize" || method == "ping"
+}
+
+/// `value` as an object: `empty` when it is absent, none when it is
+/// anything but an object.
+fn object<'a>(
+    value: Option<&'a Value>,
+    empty: &'a Map<String, Value>,
+) -> Option<&'a Map<String, Value>> {
+    match value {
+        None => Some(empty),
+        Some(Value::Object(map)) => Some(map),
+        Some(_) => None,
+    }
+}
+
+/// The reply to a tool call: its result, the refusal of an unknown tool,
+/// or the internal error of a result that could not be encoded.
+fn tool_reply(id: &Value, outcome: Option<Result<tools::Outcome, ()>>) -> String {
+    match outcome {
+        Some(Ok(outcome)) => tool_result(id, &outcome),
+        Some(Err(())) => error(id, INTERNAL_ERROR, "the result could not be encoded"),
+        None => error(id, INVALID_PARAMS, "unknown tool"),
     }
 }
 

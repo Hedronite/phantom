@@ -18,7 +18,7 @@ mod roots;
 mod rpc;
 mod tools;
 
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -27,26 +27,38 @@ use std::process::ExitCode;
 /// empty. A root that is not a directory stops the server before it reads
 /// a line.
 pub(crate) fn serve(allow_index: bool, roots: &[PathBuf]) -> ExitCode {
-    let roots = match roots::Roots::new(roots) {
-        Ok(roots) => roots,
-        Err(message) => return fatal(&message),
-    };
-    let mut input = io::stdin().lock();
-    let mut output = io::stdout().lock();
-    let mut server = rpc::Server::new(allow_index, roots);
+    match roots::Roots::new(roots) {
+        Ok(roots) => answer(
+            &mut rpc::Server::new(allow_index, roots),
+            &mut io::stdin().lock(),
+            &mut io::stdout().lock(),
+        ),
+        Err(message) => fatal(&message),
+    }
+}
+
+/// Answers each line of `input` on `output` until `input` ends, or until
+/// a read or a write fails.
+fn answer(server: &mut rpc::Server, input: &mut impl BufRead, output: &mut impl Write) -> ExitCode {
     loop {
-        let line = match frame::read_line(&mut input, frame::MAX_LINE) {
+        let line = match frame::read_line(input, frame::MAX_LINE) {
             Ok(frame::Line::Eof) => return ExitCode::SUCCESS,
             Ok(line) => line,
             Err(err) => return fatal(&format!("cannot read stdin: {err}")),
         };
-        let Some(reply) = server.handle(line) else {
-            continue;
-        };
-        if let Err(err) = writeln!(output, "{reply}").and_then(|()| output.flush()) {
+        if let Err(err) = reply(server, line, output) {
             return fatal(&format!("cannot write stdout: {err}"));
         }
     }
+}
+
+/// Writes the reply to `line`, if it has one, and flushes it.
+fn reply(server: &mut rpc::Server, line: frame::Line, output: &mut impl Write) -> io::Result<()> {
+    let Some(reply) = server.handle(line) else {
+        return Ok(());
+    };
+    writeln!(output, "{reply}")?;
+    output.flush()
 }
 
 /// The one stderr line of a server that cannot go on, and exit 1.
@@ -54,4 +66,64 @@ fn fatal(message: &str) -> ExitCode {
     // If stderr is gone too, there is nowhere left to report it.
     let _ = writeln!(io::stderr().lock(), "phantom-fractal mcp: {message}");
     ExitCode::from(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Cursor, Read, Write};
+
+    use super::*;
+
+    fn server() -> rpc::Server {
+        rpc::Server::new(
+            false,
+            roots::Roots::new(&[]).expect("the working directory"),
+        )
+    }
+
+    /// Input that cannot be read, and output that cannot be written.
+    struct Broken;
+
+    impl Read for Broken {
+        fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::BrokenPipe))
+        }
+    }
+
+    impl Write for Broken {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::BrokenPipe))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    const PING: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";
+
+    #[test]
+    fn the_end_of_input_ends_the_server_with_exit_0() {
+        let mut output = Vec::new();
+        let code = answer(&mut server(), &mut Cursor::new(PING), &mut output);
+        assert_eq!(code, ExitCode::SUCCESS);
+        let reply = String::from_utf8(output).expect("utf-8");
+        assert_eq!(reply.lines().count(), 1, "{reply}");
+        assert!(
+            reply.ends_with('\n') && reply.contains("\"result\":{}"),
+            "{reply}"
+        );
+    }
+
+    #[test]
+    fn a_failed_read_or_write_ends_the_server_with_exit_1() {
+        let code = answer(
+            &mut server(),
+            &mut io::BufReader::new(Broken),
+            &mut Vec::new(),
+        );
+        assert_eq!(code, ExitCode::from(1));
+        let code = answer(&mut server(), &mut Cursor::new(PING), &mut Broken);
+        assert_eq!(code, ExitCode::from(1));
+    }
 }

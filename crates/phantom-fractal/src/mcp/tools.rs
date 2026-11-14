@@ -9,6 +9,7 @@
 //! argument. Every string argument has a [`max_length`], in its schema and
 //! in the check, so an over-long one never reaches the store.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 
 use phantom_fractal_analyze::{ImpactOptions, PATH_DEFAULT_DEPTH, PATH_MAX_DEPTH, PATH_MIN_DEPTH};
@@ -474,9 +475,10 @@ pub(crate) fn call(
 
 fn find_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<FindRequest, Failure> {
     let args = Args::new(arguments, &["query", "repo", "max_tokens"])?;
-    let query = args.required_string("query")?;
-    let repo = args.string("repo")?;
-    let max_tokens = args.max_tokens()?;
+    let query = args.read(args.required_string("query"));
+    let repo = args.read(args.string("repo"));
+    let max_tokens = args.read(args.max_tokens());
+    args.checked()?;
     Ok(FindRequest {
         query,
         repo: roots.indexed(repo.as_deref())?,
@@ -486,14 +488,11 @@ fn find_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<FindReq
 
 fn show_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<ShowRequest, Failure> {
     let args = Args::new(arguments, &["symbol", "id", "repo", "source", "max_tokens"])?;
-    let target = match (args.string("symbol")?, args.string("id")?) {
-        (Some(symbol), None) => Target::Name(symbol),
-        (None, Some(key)) => Target::Id(key),
-        _ => return Err(usage("give exactly one of symbol and id")),
-    };
-    let repo = args.string("repo")?;
-    let source = args.boolean("source")?.unwrap_or(false);
-    let max_tokens = args.max_tokens()?;
+    let target = args.target()?;
+    let repo = args.read(args.string("repo"));
+    let source = args.read(args.boolean("source")).unwrap_or(false);
+    let max_tokens = args.read(args.max_tokens());
+    args.checked()?;
     Ok(ShowRequest {
         target,
         repo: roots.indexed(repo.as_deref())?,
@@ -504,9 +503,10 @@ fn show_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<ShowReq
 
 fn calls_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<CallsRequest, Failure> {
     let args = Args::new(arguments, &["symbol", "repo", "max_tokens"])?;
-    let symbol = args.required_string("symbol")?;
-    let repo = args.string("repo")?;
-    let max_tokens = args.max_tokens()?;
+    let symbol = args.read(args.required_string("symbol"));
+    let repo = args.read(args.string("repo"));
+    let max_tokens = args.read(args.max_tokens());
+    args.checked()?;
     Ok(CallsRequest {
         symbol,
         repo: roots.indexed(repo.as_deref())?,
@@ -527,16 +527,12 @@ fn impact_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<Impac
             "max_tokens",
         ],
     )?;
-    let defaults = ImpactOptions::default();
-    let options = ImpactOptions {
-        max_depth: args.depth()?.unwrap_or(defaults.max_depth),
-        min_confidence: args.min_confidence()?.unwrap_or(defaults.min_confidence),
-        include_tests: args.boolean("include_tests")?.unwrap_or(true),
-    };
-    let symbol = args.required_string("symbol")?;
-    let repo = args.string("repo")?;
-    let summary = args.boolean("summary")?.unwrap_or(false);
-    let max_tokens = args.max_tokens()?;
+    let options = args.read(args.impact_options());
+    let symbol = args.read(args.required_string("symbol"));
+    let repo = args.read(args.string("repo"));
+    let summary = args.read(args.boolean("summary")).unwrap_or(false);
+    let max_tokens = args.read(args.max_tokens());
+    args.checked()?;
     Ok(ImpactRequest {
         symbol,
         repo: roots.indexed(repo.as_deref())?,
@@ -548,18 +544,16 @@ fn impact_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<Impac
 
 fn rank_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<RankRequest, Failure> {
     let args = Args::new(arguments, &["kind", "focus", "limit", "repo", "max_tokens"])?;
-    let kind = match args.string("kind")? {
-        None => RankKind::Symbols,
-        Some(text) => {
-            RankKind::parse(&text).ok_or_else(|| usage("kind must be symbols or files"))?
-        }
-    };
-    let focus = args.focus()?;
+    let kind = args
+        .read(args.choice("kind", RankKind::parse, "kind must be symbols or files"))
+        .unwrap_or(RankKind::Symbols);
+    let focus = args.read(args.focus());
     let limit = args
-        .integer("limit", LIMIT_MIN, LIMIT_MAX)?
+        .read(args.integer("limit", LIMIT_MIN, LIMIT_MAX))
         .unwrap_or(DEFAULT_LIMIT);
-    let repo = args.string("repo")?;
-    let max_tokens = args.max_tokens()?;
+    let repo = args.read(args.string("repo"));
+    let max_tokens = args.read(args.max_tokens());
+    args.checked()?;
     Ok(RankRequest {
         kind,
         focus,
@@ -571,17 +565,20 @@ fn rank_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<RankReq
 
 fn map_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<MapRequest, Failure> {
     let args = Args::new(arguments, &["budget", "focus", "detail", "repo"])?;
-    let detail = match args.string("detail")? {
-        None => Default::default(),
-        Some(text) => {
-            ops::map::detail(&text).ok_or_else(|| usage("detail must be files, symbols or full"))?
-        }
-    };
-    let budget = args
-        .integer("budget", BUDGET_MIN, BUDGET_MAX)?
-        .ok_or_else(|| usage("budget is required"))?;
-    let focus = args.focus()?;
-    let repo = args.string("repo")?;
+    let detail = args
+        .read(args.choice(
+            "detail",
+            ops::map::detail,
+            "detail must be files, symbols or full",
+        ))
+        .unwrap_or_default();
+    let budget = args.read(required(
+        "budget",
+        args.integer("budget", BUDGET_MIN, BUDGET_MAX),
+    ));
+    let focus = args.read(args.focus());
+    let repo = args.read(args.string("repo"));
+    args.checked()?;
     Ok(MapRequest {
         budget,
         focus,
@@ -598,13 +595,14 @@ fn cochange_request(
         arguments,
         &["file", "min_lift", "limit", "repo", "max_tokens"],
     )?;
-    let file = args.required_string("file")?;
-    let min_lift = args.min_lift()?.unwrap_or(DEFAULT_MIN_LIFT);
+    let file = args.read(args.required_string("file"));
+    let min_lift = args.read(args.min_lift()).unwrap_or(DEFAULT_MIN_LIFT);
     let limit = args
-        .integer("limit", cochange::LIMIT_MIN, cochange::LIMIT_MAX)?
+        .read(args.integer("limit", cochange::LIMIT_MIN, cochange::LIMIT_MAX))
         .unwrap_or(cochange::DEFAULT_LIMIT);
-    let repo = args.string("repo")?;
-    let max_tokens = args.max_tokens()?;
+    let repo = args.read(args.string("repo"));
+    let max_tokens = args.read(args.max_tokens());
+    args.checked()?;
     Ok(CochangeRequest {
         file,
         min_lift,
@@ -627,16 +625,12 @@ fn diff_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<DiffReq
             "repo",
         ],
     )?;
-    let defaults = ImpactOptions::default();
-    let options = ImpactOptions {
-        max_depth: args.depth()?.unwrap_or(defaults.max_depth),
-        min_confidence: args.min_confidence()?.unwrap_or(defaults.min_confidence),
-        include_tests: args.boolean("include_tests")?.unwrap_or(true),
-    };
-    let against = args.string("against")?;
-    let summary = args.boolean("summary_only")?.unwrap_or(false);
-    let max_tokens = args.max_tokens()?;
-    let repo = args.string("repo")?;
+    let options = args.read(args.impact_options());
+    let against = args.read(args.string("against"));
+    let summary = args.read(args.boolean("summary_only")).unwrap_or(false);
+    let max_tokens = args.read(args.max_tokens());
+    let repo = args.read(args.string("repo"));
+    args.checked()?;
     Ok(DiffRequest {
         against,
         repo: roots.indexed(repo.as_deref())?,
@@ -651,18 +645,19 @@ fn path_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<PathReq
         arguments,
         &["from", "to", "max_depth", "max_tokens", "repo"],
     )?;
-    let from = args.required_string("from")?;
-    let to = args.required_string("to")?;
+    let from = args.read(args.required_string("from"));
+    let to = args.read(args.required_string("to"));
     let max_depth = args
-        .integer(
+        .read(args.integer(
             "max_depth",
             u64::from(PATH_MIN_DEPTH),
             u64::from(PATH_MAX_DEPTH),
-        )?
+        ))
         // The range above fits in u8.
         .map_or(PATH_DEFAULT_DEPTH, |depth| depth as u8);
-    let max_tokens = args.max_tokens()?;
-    let repo = args.string("repo")?;
+    let max_tokens = args.read(args.max_tokens());
+    let repo = args.read(args.string("repo"));
+    args.checked()?;
     Ok(PathRequest {
         from,
         to,
@@ -691,9 +686,10 @@ fn status_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<Statu
 /// `index_repo` takes a root whether or not it has an index yet.
 fn index_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<IndexRequest, Failure> {
     let args = Args::new(arguments, &["path", "cochange_days", "cochange_commits"])?;
-    let path = args.required_string("path")?;
-    let days = args.integer("cochange_days", 1, u64::from(Window::MAX_DAYS))?;
-    let commits = args.integer("cochange_commits", 1, u64::from(Window::MAX_COMMITS))?;
+    let path = args.read(args.required_string("path"));
+    let days = args.read(args.integer("cochange_days", 1, u64::from(Window::MAX_DAYS)));
+    let commits = args.read(args.integer("cochange_commits", 1, u64::from(Window::MAX_COMMITS)));
+    args.checked()?;
     // The ranges above fit in u32.
     let window = Window {
         days: days.map_or(Window::DEFAULT_DAYS, |days| days as u32),
@@ -725,6 +721,11 @@ fn usage(message: &str) -> Failure {
     Failure::new(ErrorKind::Usage, message)
 }
 
+/// The value argument `name` holds, or the usage failure for a missing one.
+fn required<T>(name: &str, value: Result<Option<T>, Failure>) -> Result<T, Failure> {
+    value?.ok_or_else(|| usage(&format!("{name} is required")))
+}
+
 /// The most Unicode scalar values string argument `name`, or each string
 /// of array argument `name`, may hold: 256 for a base, 4096 for a path or
 /// file, and 1024 for anything else.
@@ -749,14 +750,23 @@ fn bounded(name: &str, text: &str) -> Result<String, Failure> {
 /// A tool's arguments, checked against the names it takes. Messages name
 /// only the tool's own argument names, never a value or key the client
 /// sent.
+///
+/// [`Args::read`] takes each reader's result and keeps the first failure
+/// met, in the order the reads are made, so a tool reads its arguments as
+/// one list and [`Args::checked`] then reports the first bad one, as if
+/// each read had returned at once.
 struct Args<'a> {
     map: &'a Map<String, Value>,
+    first: RefCell<Option<Failure>>,
 }
 
 impl<'a> Args<'a> {
     fn new(map: &'a Map<String, Value>, allowed: &[&str]) -> Result<Self, Failure> {
         if map.keys().all(|key| allowed.contains(&key.as_str())) {
-            Ok(Self { map })
+            Ok(Self {
+                map,
+                first: RefCell::new(None),
+            })
         } else {
             Err(usage(&format!(
                 "unknown argument; this tool takes {}",
@@ -773,9 +783,55 @@ impl<'a> Args<'a> {
         }
     }
 
+    /// The value `value` holds, or its default when it holds a failure,
+    /// which is kept when it is the first.
+    fn read<T: Default>(&self, value: Result<T, Failure>) -> T {
+        value.unwrap_or_else(|failure| {
+            self.first.borrow_mut().get_or_insert(failure);
+            T::default()
+        })
+    }
+
+    /// The first failure [`Args::read`] kept, if any.
+    fn checked(&self) -> Result<(), Failure> {
+        self.first.take().map_or(Ok(()), Err)
+    }
+
     fn required_string(&self, name: &str) -> Result<String, Failure> {
+        required(name, self.string(name))
+    }
+
+    /// String `name`, read by `parse` as one of a fixed set, or the usage
+    /// failure `message` for any other string.
+    fn choice<T>(
+        &self,
+        name: &str,
+        parse: impl Fn(&str) -> Option<T>,
+        message: &str,
+    ) -> Result<Option<T>, Failure> {
         self.string(name)?
-            .ok_or_else(|| usage(&format!("{name} is required")))
+            .map(|text| parse(&text).ok_or_else(|| usage(message)))
+            .transpose()
+    }
+
+    /// `show_symbol`'s target: exactly one of `symbol` and `id`.
+    fn target(&self) -> Result<Target, Failure> {
+        match (self.string("symbol")?, self.string("id")?) {
+            (Some(symbol), None) => Ok(Target::Name(symbol)),
+            (None, Some(key)) => Ok(Target::Id(key)),
+            _ => Err(usage("give exactly one of symbol and id")),
+        }
+    }
+
+    /// `depth`, `min_confidence` and `include_tests`, read in that order,
+    /// with the command line's defaults.
+    fn impact_options(&self) -> Result<ImpactOptions, Failure> {
+        let defaults = ImpactOptions::default();
+        Ok(ImpactOptions {
+            max_depth: self.depth()?.unwrap_or(defaults.max_depth),
+            min_confidence: self.min_confidence()?.unwrap_or(defaults.min_confidence),
+            include_tests: self.boolean("include_tests")?.unwrap_or(true),
+        })
     }
 
     fn boolean(&self, name: &str) -> Result<Option<bool>, Failure> {
