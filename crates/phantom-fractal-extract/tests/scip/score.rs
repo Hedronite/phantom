@@ -535,7 +535,7 @@ pub fn score_with(
         }
         out.push('}');
     }
-    out.push_str("}");
+    out.push('}');
     out.push('}');
     Ok(out)
 }
