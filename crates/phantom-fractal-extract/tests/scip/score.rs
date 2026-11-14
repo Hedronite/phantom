@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use phantom_fractal_store::{EdgeRow, ScoreCallRef, SymbolSpan};
 
+use crate::scip::foreign::{Members, MissContext};
 use crate::scip::wire::ScipIndex;
 
 /// The miss buckets (W12 D4): the W11 coarse method and macro buckets
@@ -23,7 +24,7 @@ use crate::scip::wire::ScipIndex;
 /// its `in_module`/`orphan` split, a miss lands in exactly one, and
 /// the buckets sum to the misses. The report map sorts the keys; the
 /// ret and ret? hints arrive in G2a and read zero before it.
-pub const MISS_BUCKETS: [&str; 14] = [
+pub const MISS_BUCKETS: [&str; 17] = [
     "other",
     "trait-method callee",
     "unresolved path call",
@@ -38,6 +39,9 @@ pub const MISS_BUCKETS: [&str; 14] = [
     "identifier with no hint",
     "self.field",
     "call or chained receiver",
+    "shared module file",
+    "glob import in scope",
+    "re-exported path",
 ];
 
 /// The last name in a SCIP symbol string's descriptors. The tail past
@@ -87,6 +91,25 @@ fn innermost<'a>(
 /// document with no mapped definition of that symbol falls back to
 /// every mapping.
 pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<String, String> {
+    let members = match std::env::var("PHANTOM_SCORE_MEMBERS") {
+        Ok(path) => {
+            let bytes = std::fs::read(&path).map_err(|err| format!("members: {err}"))?;
+            Some(Members::from_metadata(&bytes)?)
+        }
+        Err(_) => None,
+    };
+    score_with(index, store, members.as_ref())
+}
+
+/// The full scorer over one parsed SCIP index, one indexed store, and
+/// the optional member scope the runner passes. With no scope every
+/// export document is in scope, which is the W12 reading.
+pub fn score_with(
+    index: &ScipIndex,
+    store: &phantom_fractal_store::Store,
+    members: Option<&Members>,
+) -> Result<String, String> {
+    let in_scope = |document: &str| members.is_none_or(|list| list.in_scope(document));
     let all = store
         .symbol_spans()
         .map_err(|err| format!("store: {err}"))?;
@@ -101,6 +124,7 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
     // definition, each mapping to the innermost named span of its
     // own document.
     let mut definitions: BTreeMap<(String, String), BTreeSet<i64>> = BTreeMap::new();
+    let mut definitions_all: BTreeMap<(String, String), BTreeSet<i64>> = BTreeMap::new();
     for document in &index.documents {
         for occurrence in &document.occurrences {
             if !occurrence.is_definition {
@@ -112,10 +136,16 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
                 continue;
             };
             if let Some(span) = innermost(&spans, &document.relative_path, line, Some(name)) {
-                definitions
+                definitions_all
                     .entry((occurrence.symbol.clone(), document.relative_path.clone()))
                     .or_default()
                     .insert(span.id);
+                if in_scope(&document.relative_path) {
+                    definitions
+                        .entry((occurrence.symbol.clone(), document.relative_path.clone()))
+                        .or_default()
+                        .insert(span.id);
+                }
             }
         }
     }
@@ -127,14 +157,25 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
             .or_default()
             .extend(callees.iter().copied());
     }
+    let every_all: BTreeMap<String, BTreeSet<i64>> = {
+        let mut all: BTreeMap<String, BTreeSet<i64>> = BTreeMap::new();
+        for ((symbol, _document), callees) in &definitions_all {
+            all.entry(symbol.clone())
+                .or_default()
+                .extend(callees.iter().copied());
+        }
+        all
+    };
 
     // The truth set: a reference's caller is the span around it; its
     // callees are whatever the referenced symbol mapped to. The W10
     // fan-out truth (`truth_wide`) keeps the fallback pair the
     // document scope narrows away, for `recall_unscoped`.
     let mut truth: BTreeSet<(i64, i64)> = BTreeSet::new();
+    let mut truth_all: BTreeSet<(i64, i64)> = BTreeSet::new();
     let mut truth_wide: BTreeSet<(i64, i64)> = BTreeSet::new();
     for document in &index.documents {
+        let scoped = in_scope(&document.relative_path);
         for occurrence in &document.occurrences {
             if occurrence.is_definition {
                 continue;
@@ -147,16 +188,29 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
             // one whose document carried none takes every mapped
             // callee, the shipped behaviour.
             let empty = BTreeSet::new();
-            let local = definitions
+            let local = definitions_all
                 .get(&(occurrence.symbol.clone(), document.relative_path.clone()))
                 .unwrap_or(&empty);
             let callees = if local.is_empty() {
-                every.get(&occurrence.symbol).unwrap_or(&empty)
+                every_all.get(&occurrence.symbol).unwrap_or(&empty)
             } else {
                 local
             };
             for callee in callees {
-                truth.insert((caller.id, *callee));
+                truth_all.insert((caller.id, *callee));
+            }
+            if scoped {
+                let local = definitions
+                    .get(&(occurrence.symbol.clone(), document.relative_path.clone()))
+                    .unwrap_or(&empty);
+                let callees = if local.is_empty() {
+                    every.get(&occurrence.symbol).unwrap_or(&empty)
+                } else {
+                    local
+                };
+                for callee in callees {
+                    truth.insert((caller.id, *callee));
+                }
             }
             // The W10 fan-out: the document claim dropped, every mapped
             // callee stays a truth pair — the `recall_unscoped` set.
@@ -165,15 +219,51 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
                 .map(|set| set.iter().collect::<Vec<_>>())
                 .unwrap_or_default()
             {
-                truth_wide.insert((caller.id, *callee));
+                if scoped {
+                    truth_wide.insert((caller.id, *callee));
+                }
             }
         }
     }
 
-    // Phantom `call` edges: the pair carry is the hit.
-    let edges = store
+    // Phantom `call` edges: the pair carry is the hit. A document
+    // outside every member leaves the edge set too, and the dropped
+    // edges count (W13 D4).
+    let edges_all = store
         .edges_of_kind("call")
         .map_err(|err| format!("store: {err}"))?;
+    let mut out_of_scope_edges = 0usize;
+    let edges: Vec<&EdgeRow> = if members.is_some() {
+        let mut kept = Vec::new();
+        for edge in &edges_all {
+            let in_scope = matches!(
+                (by_id.get(&edge.src_id), by_id.get(&edge.dst_id)),
+                (Some(a), Some(b)) if in_scope(a.path.as_str()) && in_scope(b.path.as_str())
+            );
+            if in_scope {
+                kept.push(edge);
+            } else {
+                out_of_scope_edges += 1;
+            }
+        }
+        kept
+    } else {
+        edges_all.iter().collect()
+    };
+    let out_of_scope_truth = if members.is_some() {
+        truth_all.len() - truth.len()
+    } else {
+        0
+    };
+    let out_of_scope_documents = if members.is_some() {
+        index
+            .documents
+            .iter()
+            .filter(|document| !in_scope(&document.relative_path))
+            .count()
+    } else {
+        0
+    };
     let hits: BTreeSet<(i64, i64)> = edges
         .iter()
         .map(|edge| (edge.src_id, edge.dst_id))
@@ -195,14 +285,51 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
         )
     };
 
+    // The occurrences each document mentions (W13 D4): the span ids
+    // its occurrences map to. An edge is covered when its caller
+    // document mentions either endpoint; feature-off code carries no
+    // occurrences, so its edges have no truth and read uncovered.
+    let mut mentioned: BTreeMap<&str, BTreeSet<i64>> = BTreeMap::new();
+    for document in &index.documents {
+        let entry = mentioned
+            .entry(document.relative_path.as_str())
+            .or_default();
+        for occurrence in &document.occurrences {
+            let empty = BTreeSet::new();
+            let ids = definitions
+                .get(&(occurrence.symbol.clone(), document.relative_path.clone()))
+                .unwrap_or(&empty);
+            let ids = if ids.is_empty() {
+                every.get(&occurrence.symbol).unwrap_or(&empty)
+            } else {
+                ids
+            };
+            entry.extend(ids.iter().copied());
+        }
+    }
+    let edge_covered = |edge: &EdgeRow| {
+        by_id.get(&edge.src_id).is_some_and(|span| {
+            mentioned
+                .get(span.path.as_str())
+                .is_some_and(|ids| ids.contains(&edge.src_id) || ids.contains(&edge.dst_id))
+        })
+    };
+
     // Per-reason and per-band edge-carry counts, full and covered. The
     // covered counts are kept per reason and per band, as F1 asks.
     let mut reasons: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     let mut bands: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     let mut covered: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     let mut covered_bands: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    let mut uncovered = 0usize;
+    let mut graded_bands: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    let mut graded_reasons: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for edge in &edges {
         let is_covered = covered_pair((edge.src_id, edge.dst_id));
+        let is_mentioned = edge_covered(edge);
+        if !is_mentioned {
+            uncovered += 1;
+        }
         pair_into(&mut reasons, edge.reason.clone(), &truth, edge);
         if is_covered {
             pair_into(&mut covered, edge.reason.clone(), &truth, edge);
@@ -211,6 +338,10 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
             pair_into(&mut bands, band.to_owned(), &truth, edge);
             if is_covered {
                 pair_into(&mut covered_bands, band.to_owned(), &truth, edge);
+            }
+            if is_mentioned {
+                pair_into(&mut graded_bands, band.to_owned(), &truth, edge);
+                pair_into(&mut graded_reasons, edge.reason.clone(), &truth, edge);
             }
         }
     }
@@ -234,11 +365,16 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
         .collect();
 
     // The miss buckets over the truth set minus the hits, each with
-    // the caller's file-module split (`in_module`, `orphan`).
+    // the caller's file-module split (`in_module`, `orphan`). The
+    // split map records, for every miss a W13 bucket took from a W12
+    // bucket, which one it took it from, so a reader can add the W13
+    // count back to its W12 reading.
+    let foreign = MissContext::from_store(store)?;
     let mut misses: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
     for bucket in MISS_BUCKETS {
         misses.insert(bucket, (0, 0));
     }
+    let mut split_taken: BTreeMap<&'static str, BTreeMap<&'static str, usize>> = BTreeMap::new();
     for pair in truth.difference(&hits) {
         let Some(caller) = by_id.get(&pair.0) else {
             misses.get_mut("other").expect("named bucket").0 += 1;
@@ -260,7 +396,25 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
         let refs = store
             .score_call_refs(pair.0)
             .map_err(|err| format!("store: {err}"))?;
-        let bucket = miss_bucket(&refs, callee_name.as_str(), is_trait);
+        let callee_file = callee.file_id;
+        let (bucket, old_bucket) = miss_bucket(
+            &foreign,
+            MissInput {
+                refs: &refs,
+                callee_name: callee_name.as_str(),
+                is_trait,
+                caller_file: caller.file_id,
+                callee_file,
+                callee_id: pair.1,
+            },
+        );
+        if bucket != old_bucket {
+            *split_taken
+                .entry(bucket)
+                .or_default()
+                .entry(old_bucket)
+                .or_insert(0usize) += 1;
+        }
         let slot = misses.get_mut(bucket).expect("named bucket");
         if in_module {
             slot.0 += 1;
@@ -275,14 +429,22 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
         .ref_ids_of_kind("macro_arg")
         .map_err(|err| format!("store: {err}"))?;
     let mut origin = (0usize, 0usize);
+    let mut graded_origin = (0usize, 0usize);
     for edge in &edges {
         if edge
             .ref_id
             .is_some_and(|ref_id| macro_arg_refs.contains(&ref_id))
         {
             origin.0 += 1;
-            if truth.contains(&(edge.src_id, edge.dst_id)) {
+            let hit = truth.contains(&(edge.src_id, edge.dst_id));
+            if hit {
                 origin.1 += 1;
+            }
+            if edge_covered(edge) {
+                graded_origin.0 += 1;
+                if hit {
+                    graded_origin.1 += 1;
+                }
             }
         }
     }
@@ -326,6 +488,54 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
     }
     out.push_str("},\"from_macro_arg\":");
     out.push_str(&triple(&origin));
+    out.push_str(",\"out_of_scope_documents\":");
+    out.push_str(&out_of_scope_documents.to_string());
+    out.push_str(",\"out_of_scope_truth\":");
+    out.push_str(&out_of_scope_truth.to_string());
+    out.push_str(",\"out_of_scope_edges\":");
+    out.push_str(&out_of_scope_edges.to_string());
+    out.push_str(",\"uncovered\":");
+    out.push_str(&uncovered.to_string());
+    out.push_str(",\"graded\":{");
+    for (position, (band, count)) in graded_bands.iter().enumerate() {
+        if position > 0 {
+            out.push(',');
+        }
+        let full = bands.get(band).copied().unwrap_or((0, 0));
+        out.push_str(&json(band));
+        out.push(':');
+        out.push_str(&graded_full(count, &full));
+    }
+    out.push_str(",\"from_macro_arg\":");
+    out.push_str(&graded_full(&graded_origin, &origin));
+    out.push_str(",\"reasons\":{");
+    for (position, (reason, count)) in graded_reasons.iter().enumerate() {
+        if position > 0 {
+            out.push(',');
+        }
+        let full = reasons.get(reason).copied().unwrap_or((0, 0));
+        out.push_str(&json(reason));
+        out.push(':');
+        out.push_str(&graded_full(count, &full));
+    }
+    out.push_str("},\"split\":{");
+    for (position, (taken, sources)) in split_taken.iter().enumerate() {
+        if position > 0 {
+            out.push(',');
+        }
+        out.push_str(&json(taken));
+        out.push_str(":{");
+        for (at, (source, count)) in sources.iter().enumerate() {
+            if at > 0 {
+                out.push(',');
+            }
+            out.push_str(&json(source));
+            out.push(':');
+            out.push_str(&count.to_string());
+        }
+        out.push('}');
+    }
+    out.push_str("}}");
     out.push('}');
     Ok(out)
 }
@@ -416,13 +626,11 @@ fn split(truth: usize, hits: usize) -> String {
     )
 }
 
-/// One missed pair's bucket, read from the caller's own call refs;
-/// the callee's name and trait mark are the caller's whole context.
-pub(crate) fn miss_bucket(
-    refs: &[ScoreCallRef],
-    callee_name: &str,
-    is_trait: bool,
-) -> &'static str {
+/// One missed pair's W12 bucket, read from the caller's own call
+/// refs; the callee's name and trait mark are the caller's whole
+/// context. The W13 ladder reads this first, so the split map can say
+/// which W12 bucket every split took from.
+pub(crate) fn w12_bucket(refs: &[ScoreCallRef], callee_name: &str, is_trait: bool) -> &'static str {
     let candidates: Vec<&ScoreCallRef> = refs
         .iter()
         .filter(|reference| last_segment_text(&reference.text) == callee_name)
@@ -532,6 +740,60 @@ fn is_field_of_self(reference: &ScoreCallRef) -> bool {
         .receiver
         .as_deref()
         .is_some_and(|text| text.starts_with("self.") && !text.contains('('))
+}
+
+/// One missed pair's bucket under the W13 ladder (W13 D4): the
+/// `shared module file` property reads first, whatever the family;
+/// then the W12 ladder, with the path-call misses that a glob use or
+/// a re-export explains split out of `unresolved path call`. Answers
+/// the W13 bucket and the W12 bucket it would have read.
+pub(crate) struct MissInput<'a> {
+    pub refs: &'a [ScoreCallRef],
+    pub callee_name: &'a str,
+    pub is_trait: bool,
+    pub caller_file: i64,
+    pub callee_file: i64,
+    pub callee_id: i64,
+}
+
+pub(crate) fn miss_bucket(
+    foreign: &MissContext,
+    input: MissInput<'_>,
+) -> (&'static str, &'static str) {
+    let old = w12_bucket(input.refs, input.callee_name, input.is_trait);
+    let new = if foreign.shared.contains(&input.caller_file)
+        || foreign.shared.contains(&input.callee_file)
+    {
+        "shared module file"
+    } else if old == "unresolved path call" {
+        let Some(call) = input.refs.iter().find(|reference| {
+            reference.kind == "call" && last_segment_text(&reference.text) == input.callee_name
+        }) else {
+            return (old, old);
+        };
+        if foreign.glob_reaches(input.caller_file, &call.scope, input.callee_id) {
+            "glob import in scope"
+        } else if foreign.reexported(input.caller_file, &call.scope, &call.text) {
+            "re-exported path"
+        } else {
+            old
+        }
+    } else {
+        old
+    };
+    (new, old)
+}
+
+/// One graded group: the covered-edge triple with the full-edge
+/// triple beside it (W13 D4).
+fn graded_full(count: &(usize, usize), full: &(usize, usize)) -> String {
+    format!(
+        "{{\"edges\":{},\"corroborated\":{},\"precision\":{},\"full\":{}}}",
+        count.0,
+        count.1,
+        ratio(count.1, count.0),
+        triple(full)
+    )
 }
 
 /// The last `::` segment of a ref text, so a callee is named as a call
