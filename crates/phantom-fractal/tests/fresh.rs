@@ -585,7 +585,9 @@ fn index_lists_typed_method_after_crate_path() {
 /// stale in `status`, which writes nothing, until the next pass stamps it
 /// again (SPEC-w10 G2c). A stamp-8 index, from the version before test
 /// targets, is refused by reads with the old `no_index`, and `doctor`
-/// reports it as it did a stamp-7 one (SPEC-w11 G1c).
+/// reports it as it did a stamp-7 one (SPEC-w11 G1c). So is a stamp-9
+/// index, from the version before calls inside macro arguments resolved
+/// (SPEC-w12 G1c).
 #[test]
 fn status_flags_an_index_from_another_extractor_version() {
     for git in [false, true] {
@@ -616,7 +618,7 @@ fn status_flags_an_index_from_another_extractor_version() {
         let fresh = doctor();
         let extractor = fresh.iter().find(|check| check["name"] == "extractor");
         assert_eq!(extractor.expect("extractor")["detail"], "10", "git {git}");
-        for stamp in [7, 8] {
+        for stamp in [7, 8, 9] {
             world.store().set_extractor_version(stamp).expect("stamp");
             let db = world.db();
             status(true, stamp);
