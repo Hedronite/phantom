@@ -379,6 +379,8 @@ pub fn caller_macro_invocation() {
     one_macro!();
 }
 pub fn caller_macro_path() {
+    // The local shadow keeps the macro-arg call unplaced at every head.
+    let one = 0;
     assert_eq!(one(), 0);
 }
 pub fn caller_nohint(n: i32) {

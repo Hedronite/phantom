@@ -326,7 +326,7 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
     }
     out.push_str("},\"from_macro_arg\":");
     out.push_str(&triple(&origin));
-    out.push_str("}");
+    out.push('}');
     Ok(out)
 }
 
