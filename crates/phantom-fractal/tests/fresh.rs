@@ -380,7 +380,7 @@ fn status_has_the_spec_keys_and_no_path() {
         );
         assert_eq!(
             data["versions"],
-            json!({ "schema": 3, "extractor": 10, "envelope": 1 })
+            json!({ "schema": 3, "extractor": 11, "envelope": 1 })
         );
         assert_eq!(
             data["epochs"],
@@ -614,10 +614,10 @@ fn status_flags_an_index_from_another_extractor_version() {
                 .filter(|check| check["name"] == "extractor" || check["name"] == "databases")
                 .collect::<Vec<_>>()
         };
-        status(false, 10);
+        status(false, 11);
         let fresh = doctor();
         let extractor = fresh.iter().find(|check| check["name"] == "extractor");
-        assert_eq!(extractor.expect("extractor")["detail"], "10", "git {git}");
+        assert_eq!(extractor.expect("extractor")["detail"], "11", "git {git}");
         for stamp in [7, 8, 9] {
             world.store().set_extractor_version(stamp).expect("stamp");
             let db = world.db();
@@ -632,7 +632,7 @@ fn status_flags_an_index_from_another_extractor_version() {
             assert_eq!(doctor(), fresh, "git {git} stamp {stamp}");
             assert_eq!(world.db(), db, "git {git} stamp {stamp}: a read wrote");
             world.index();
-            status(false, 10);
+            status(false, 11);
         }
     }
 }
