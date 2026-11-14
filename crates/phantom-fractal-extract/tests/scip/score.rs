@@ -14,18 +14,30 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use phantom_fractal_store::{EdgeRow, SymbolCallRef, SymbolSpan};
+use phantom_fractal_store::{EdgeRow, ScoreCallRef, SymbolSpan};
 
 use crate::scip::wire::ScipIndex;
 
-/// The miss buckets, in the order the report prints them.
-pub const MISS_BUCKETS: [&str; 6] = [
-    "non-self method call with no hint",
-    "hinted but not placed",
-    "unresolved path call",
-    "macro argument",
-    "trait-method callee",
+/// The miss buckets (W12 D4): the W11 coarse method and macro buckets
+/// split by the receiver shape and the hint kind. Every bucket keeps
+/// its `in_module`/`orphan` split, a miss lands in exactly one, and
+/// the buckets sum to the misses. The report map sorts the keys; the
+/// ret and ret? hints arrive in G2a and read zero before it.
+pub const MISS_BUCKETS: [&str; 14] = [
     "other",
+    "trait-method callee",
+    "unresolved path call",
+    "macro_arg path shape",
+    "macro_arg method shape",
+    "macro invocation",
+    "identifier with hint type",
+    "identifier with hint ctor",
+    "identifier with hint ctor?",
+    "identifier with hint ret",
+    "identifier with hint ret?",
+    "identifier with no hint",
+    "self.field",
+    "call or chained receiver",
 ];
 
 /// The last name in a SCIP symbol string's descriptors. The tail past
@@ -245,12 +257,33 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
             .map_err(|err| format!("store: {err}"))?
             .map(|facts| facts.trait_name.is_some())
             .unwrap_or(false);
-        let bucket = miss_bucket(store, *pair, callee_name.as_str(), is_trait)?;
+        let refs = store
+            .score_call_refs(pair.0)
+            .map_err(|err| format!("store: {err}"))?;
+        let bucket = miss_bucket(&refs, callee_name.as_str(), is_trait);
         let slot = misses.get_mut(bucket).expect("named bucket");
         if in_module {
             slot.0 += 1;
         } else {
             slot.1 += 1;
+        }
+    }
+
+    // The origin line (W12 D4): the edges whose source ref is a
+    // macro_arg ref, with the same corroborated reading as the bands.
+    let macro_arg_refs = store
+        .ref_ids_of_kind("macro_arg")
+        .map_err(|err| format!("store: {err}"))?;
+    let mut origin = (0usize, 0usize);
+    for edge in &edges {
+        if edge
+            .ref_id
+            .is_some_and(|ref_id| macro_arg_refs.contains(&ref_id))
+        {
+            origin.0 += 1;
+            if truth.contains(&(edge.src_id, edge.dst_id)) {
+                origin.1 += 1;
+            }
         }
     }
 
@@ -291,7 +324,9 @@ pub fn score(index: &ScipIndex, store: &phantom_fractal_store::Store) -> Result<
         out.push(':');
         out.push_str(&split_pair(count));
     }
-    out.push_str("}}");
+    out.push_str("},\"from_macro_arg\":");
+    out.push_str(&triple(&origin));
+    out.push_str("}");
     Ok(out)
 }
 
@@ -383,51 +418,120 @@ fn split(truth: usize, hits: usize) -> String {
 
 /// One missed pair's bucket, read from the caller's own call refs;
 /// the callee's name and trait mark are the caller's whole context.
-fn miss_bucket(
-    store: &phantom_fractal_store::Store,
-    pair: (i64, i64),
+pub(crate) fn miss_bucket(
+    refs: &[ScoreCallRef],
     callee_name: &str,
     is_trait: bool,
-) -> Result<&'static str, String> {
-    let refs: Vec<SymbolCallRef> = store
-        .symbol_call_refs(pair.0)
-        .map_err(|err| format!("store: {err}"))?;
-    let candidates: Vec<&SymbolCallRef> = refs
+) -> &'static str {
+    let candidates: Vec<&ScoreCallRef> = refs
         .iter()
         .filter(|reference| last_segment_text(&reference.text) == callee_name)
         .collect();
     if candidates.is_empty() {
-        return Ok("other");
+        return "other";
     }
-    if candidates
+    // The macro-argument shapes first: a call inside a macro argument
+    // is the more specific signal than the invocation that carries it,
+    // and a macro_arg ref with a receiver is the method shape, without
+    // one the path shape.
+    let macro_args: Vec<&ScoreCallRef> = candidates
         .iter()
-        .any(|reference| reference.kind == "macro_arg" || reference.kind == "macro")
+        .copied()
+        .filter(|reference| reference.kind == "macro_arg")
+        .collect();
+    if macro_args
+        .iter()
+        .any(|reference| reference.receiver.is_some())
     {
-        return Ok("macro argument");
+        return "macro_arg method shape";
+    }
+    if !macro_args.is_empty() {
+        return "macro_arg path shape";
+    }
+    if candidates.iter().any(|reference| reference.kind == "macro") {
+        return "macro invocation";
     }
     if candidates
         .iter()
         .any(|reference| reference.kind == "call" && !reference.placed)
     {
-        return Ok("unresolved path call");
+        return "unresolved path call";
     }
-    let methods: Vec<&SymbolCallRef> = candidates
+    let methods: Vec<&ScoreCallRef> = candidates
         .iter()
-        .filter(|reference| reference.kind == "method_call")
         .copied()
+        .filter(|reference| reference.kind == "method_call")
         .collect();
     if !methods.is_empty() {
         if is_trait {
-            return Ok("trait-method callee");
+            return "trait-method callee";
         }
-        if methods.iter().any(|reference| reference.receiver.is_some()) {
-            return Ok("hinted but not placed");
-        }
-        if methods.iter().any(|reference| reference.receiver.is_none()) {
-            return Ok("non-self method call with no hint");
+        return method_shape(&methods);
+    }
+    "other"
+}
+
+/// The receiver-shape split of the unplaced method-call buckets (W12
+/// D4). The hint kind wins first - the old hinted-but-not-placed
+/// split - then the unhinted identifier, `self.field`, the call or
+/// chained receiver, and the catch-all. The first bucket any ref
+/// matches in that order is the answer, so a caller with several
+/// same-named calls buckets deterministically.
+fn method_shape(methods: &[&ScoreCallRef]) -> &'static str {
+    let kinds: Vec<Option<&str>> = methods
+        .iter()
+        .map(|reference| {
+            reference
+                .receiver_type
+                .as_deref()
+                .map(|hint| hint.split(':').next().unwrap_or(""))
+        })
+        .collect();
+    for (kind, bucket) in [
+        ("type", "identifier with hint type"),
+        ("ctor", "identifier with hint ctor"),
+        ("ctor?", "identifier with hint ctor?"),
+        ("ret", "identifier with hint ret"),
+        ("ret?", "identifier with hint ret?"),
+    ] {
+        if kinds.contains(&Some(kind)) {
+            return bucket;
         }
     }
-    Ok("other")
+    if kinds.iter().any(Option::is_some) {
+        // A hint kind outside the five is its own caller shape; the
+        // catch-all holds it until a bucket of its own earns a case.
+        return "other";
+    }
+    if methods.iter().any(|reference| {
+        reference
+            .receiver
+            .as_deref()
+            .is_some_and(|text| text.chars().all(|c| c.is_alphanumeric() || c == '_'))
+    }) {
+        return "identifier with no hint";
+    }
+    if methods.iter().any(|reference| is_field_of_self(reference)) {
+        return "self.field";
+    }
+    if methods.iter().any(|reference| {
+        reference
+            .receiver
+            .as_deref()
+            .is_some_and(|text| text.contains('(') || text.contains('.'))
+    }) {
+        return "call or chained receiver";
+    }
+    "other"
+}
+
+/// True when the receiver expression starts at `self` and reads a
+/// field of it: `self.f`, not a bare `self` and not a call on one.
+fn is_field_of_self(reference: &ScoreCallRef) -> bool {
+    reference
+        .receiver
+        .as_deref()
+        .is_some_and(|text| text.starts_with("self.") && !text.contains('('))
 }
 
 /// The last `::` segment of a ref text, so a callee is named as a call
