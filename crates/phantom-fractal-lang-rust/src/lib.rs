@@ -16,6 +16,7 @@ mod bindings;
 mod detail;
 mod imports;
 mod macro_args;
+mod placed;
 mod receivers;
 mod resolve;
 mod scan;

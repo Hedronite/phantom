@@ -23,6 +23,9 @@
 //!
 //! The walk for one call stops after [`MAX_HINT_VISITS`] visits, and the
 //! call then gets no hint (SPEC-w11 G0b).
+//!
+//! A `let x = f(…)` binding, a path-call receiver and a `self.f` receiver
+//! take the hints of [`crate::placed`] (SPEC-w12 G2a).
 
 use std::collections::{HashMap, HashSet};
 
@@ -30,6 +33,7 @@ use tree_sitter::Node;
 
 use crate::bindings::bind_pattern;
 use crate::compact;
+use crate::placed::{self, Cures};
 
 /// The most nodes the walk for one call visits (SPEC-w11 G0b). Each
 /// ancestor of the receiver counts one, as does each statement of an
@@ -67,6 +71,7 @@ impl Budget {
 #[derive(Default)]
 pub(crate) struct Blocks<'tree> {
     seen: HashMap<usize, Block<'tree>>,
+    cures: Cures<'tree>,
 }
 
 /// One block's named children, in order.
@@ -86,25 +91,28 @@ struct Statement<'tree> {
     clears: HashSet<String>,
 }
 
-impl<'tree> Blocks<'tree> {
-    fn block(&mut self, block: Node<'tree>, src: &[u8]) -> &Block<'tree> {
-        self.seen.entry(block.id()).or_insert_with(|| {
-            let mut cursor = block.walk();
-            let statements: Vec<Statement<'tree>> = block
-                .named_children(&mut cursor)
-                .map(|node| statement(node, src))
-                .collect();
-            let position = statements
-                .iter()
-                .enumerate()
-                .map(|(at, statement)| (statement.node.id(), at))
-                .collect();
-            Block {
-                statements,
-                position,
-            }
-        })
-    }
+/// The summary of `block`, read the first time a walk enters it.
+fn block<'tree, 'seen>(
+    seen: &'seen mut HashMap<usize, Block<'tree>>,
+    block: Node<'tree>,
+    src: &[u8],
+) -> &'seen Block<'tree> {
+    seen.entry(block.id()).or_insert_with(|| {
+        let mut cursor = block.walk();
+        let statements: Vec<Statement<'tree>> = block
+            .named_children(&mut cursor)
+            .map(|node| statement(node, src))
+            .collect();
+        let position = statements
+            .iter()
+            .enumerate()
+            .map(|(at, statement)| (statement.node.id(), at))
+            .collect();
+        Block {
+            statements,
+            position,
+        }
+    })
 }
 
 fn statement<'tree>(node: Node<'tree>, src: &[u8]) -> Statement<'tree> {
@@ -132,6 +140,24 @@ fn statement<'tree>(node: Node<'tree>, src: &[u8]) -> Statement<'tree> {
     }
 }
 
+/// The hint for a method call whose receiver is `value`: an identifier by
+/// the binding walk, a path call or `self.f` by [`crate::placed`], and
+/// anything else none.
+pub(crate) fn receiver_hint<'tree>(
+    value: Node<'tree>,
+    src: &[u8],
+    blocks: &mut Blocks<'tree>,
+) -> Option<String> {
+    match value.kind() {
+        "identifier" => hint(value, src, blocks),
+        "call_expression" | "try_expression" => {
+            placed::call_hint(value, value, src, &mut blocks.cures)
+        }
+        "field_expression" => placed::field_hint(value, src, &mut blocks.cures),
+        _ => None,
+    }
+}
+
 /// The hint for a method call whose receiver is the identifier `receiver`.
 pub(crate) fn hint<'tree>(
     receiver: Node<'tree>,
@@ -149,7 +175,14 @@ pub(crate) fn hint<'tree>(
             return None;
         }
         let binding = match node.kind() {
-            "block" => in_block(blocks.block(node, src), child, &name, src, &mut budget),
+            "block" => in_block(
+                block(&mut blocks.seen, node, src),
+                child,
+                &name,
+                src,
+                &mut budget,
+                &mut blocks.cures,
+            ),
             "closure_expression" if is_field(node, "body", child) => node
                 .child_by_field_name("parameters")
                 .map_or(Binding::Other, |params| {
@@ -182,12 +215,13 @@ pub(crate) fn hint<'tree>(
 }
 
 /// The statements of `block` before the one holding `child`, nearest first.
-fn in_block(
-    block: &Block<'_>,
-    child: Node<'_>,
+fn in_block<'tree>(
+    block: &Block<'tree>,
+    child: Node<'tree>,
     name: &str,
     src: &[u8],
     budget: &mut Budget,
+    cures: &mut Cures<'tree>,
 ) -> Binding {
     let before = block
         .position
@@ -199,7 +233,7 @@ fn in_block(
             return Binding::Spent;
         }
         if statement.plain.as_deref() == Some(name) {
-            return Binding::Binds(let_hint(statement.node, src));
+            return Binding::Binds(let_hint(statement.node, src, cures));
         }
         if statement.clears.contains(name) {
             return Binding::Binds(None);
@@ -210,13 +244,13 @@ fn in_block(
 
 /// The hint of a `let` whose pattern is a plain identifier: from its type,
 /// or else from its value.
-fn let_hint(statement: Node<'_>, src: &[u8]) -> Option<String> {
+fn let_hint<'tree>(statement: Node<'tree>, src: &[u8], cures: &mut Cures<'tree>) -> Option<String> {
     match (
         statement.child_by_field_name("type"),
         statement.child_by_field_name("value"),
     ) {
         (Some(ty), _) => type_hint(ty, statement, src),
-        (None, Some(value)) => value_hint(value, statement, src),
+        (None, Some(value)) => value_hint(value, statement, src, cures),
         (None, None) => None,
     }
 }
@@ -290,7 +324,7 @@ fn in_condition(node: Node<'_>, name: &str, src: &[u8]) -> Binding {
 
 /// `type:T` for a path type `T`, or for `&T`, `&mut T` or one of
 /// [`WRAPPERS`] around one. Only one level is unwrapped.
-fn type_hint(ty: Node<'_>, at: Node<'_>, src: &[u8]) -> Option<String> {
+pub(crate) fn type_hint(ty: Node<'_>, at: Node<'_>, src: &[u8]) -> Option<String> {
     let inner = match ty.kind() {
         "reference_type" => {
             let inner = ty.child_by_field_name("type")?;
@@ -319,8 +353,14 @@ fn type_hint(ty: Node<'_>, at: Node<'_>, src: &[u8]) -> Option<String> {
 }
 
 /// `type:T` for `T { .. }`, `ctor:T::f` for `T::f(..)` and `ctor?:T::f` for
-/// `T::f(..)?`.
-fn value_hint(value: Node<'_>, at: Node<'_>, src: &[u8]) -> Option<String> {
+/// `T::f(..)?`, and for `f(..)` and `f(..)?` the hints of
+/// [`placed::call_hint`].
+fn value_hint<'tree>(
+    value: Node<'tree>,
+    at: Node<'tree>,
+    src: &[u8],
+    cures: &mut Cures<'tree>,
+) -> Option<String> {
     match value.kind() {
         "struct_expression" => {
             let name = value.child_by_field_name("name")?;
@@ -330,20 +370,13 @@ fn value_hint(value: Node<'_>, at: Node<'_>, src: &[u8]) -> Option<String> {
             };
             Some(format!("type:{}", type_path(path, at, src)?))
         }
-        "call_expression" => Some(format!("ctor:{}", ctor(value, at, src)?)),
-        "try_expression" => {
-            let call = value.named_child(0)?;
-            (call.kind() == "call_expression")
-                .then(|| ctor(call, at, src))
-                .flatten()
-                .map(|path| format!("ctor?:{path}"))
-        }
+        "call_expression" | "try_expression" => placed::call_hint(value, at, src, cures),
         _ => None,
     }
 }
 
 /// `T::f` for a call whose callee is a path of two or more segments.
-fn ctor(call: Node<'_>, at: Node<'_>, src: &[u8]) -> Option<String> {
+pub(crate) fn ctor(call: Node<'_>, at: Node<'_>, src: &[u8]) -> Option<String> {
     let mut function = call.child_by_field_name("function")?;
     if function.kind() == "generic_function" {
         function = function.child_by_field_name("function")?;
@@ -378,7 +411,7 @@ fn type_path(path: Node<'_>, at: Node<'_>, src: &[u8]) -> Option<String> {
 }
 
 /// The self type of the impl whose method holds `at`, as a plain path.
-fn self_type(at: Node<'_>, src: &[u8]) -> Option<String> {
+pub(crate) fn self_type(at: Node<'_>, src: &[u8]) -> Option<String> {
     let function = enclosing(at, "function_item")?;
     let owner = function
         .parent()
@@ -419,7 +452,7 @@ fn generic_parameters(at: Node<'_>, src: &[u8]) -> HashSet<String> {
 }
 
 /// The nearest ancestor of `node`, or `node` itself, of `kind`.
-fn enclosing<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
+pub(crate) fn enclosing<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
     let mut current = Some(node);
     while let Some(candidate) = current {
         if candidate.kind() == kind {

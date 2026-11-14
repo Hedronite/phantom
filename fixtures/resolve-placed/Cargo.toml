@@ -1,0 +1,5 @@
+# Receiver-placement fixture for SPEC-w12 G2a. Never built or run.
+[package]
+name = "placed"
+version = "0.1.0"
+edition = "2024"

@@ -16,6 +16,7 @@ use phantom_fractal_lang::{
 };
 
 use super::segments;
+use super::signature::{first_segment, generic_parameters, ok_type, return_type};
 use crate::STD_METHOD_NAMES;
 
 /// How deep `use` chains are followed before a lookup gives up.
@@ -377,6 +378,9 @@ impl<'a> Index<'a> {
     /// `type:T` names `T`. `ctor:T::f` names `T` when `f` is the one
     /// inherent method `T::f` and its signature returns `Self` or `T`;
     /// `ctor?:T::f` when it returns `Result` or `Option` of `Self` or `T`.
+    /// Past that, `ctor` names another workspace struct or enum `f`
+    /// returns, and a `ctor` whose `T` names no type, as `ret` does; `ret:f`
+    /// and `ret?:f` name what the path call `f` returns (SPEC-w12 G2a).
     /// Anything else places nothing.
     pub(crate) fn place_typed(&self, call: &CallRef, hint: &str) -> Option<Id> {
         let module = self.place_of(&call.file, &call.scope)?;
@@ -385,6 +389,8 @@ impl<'a> Index<'a> {
             ("type", path) => self.data_type(module, &segments(path)?)?,
             ("ctor", path) => self.constructed(module, path, false)?,
             ("ctor?", path) => self.constructed(module, path, true)?,
+            ("ret", path) => self.returned(module, path, false)?,
+            ("ret?", path) => self.returned(module, path, true)?,
             _ => return None,
         };
         let methods: Vec<Id> = self
@@ -421,11 +427,15 @@ impl<'a> Index<'a> {
 
     /// The type `T` of a `ctor` hint `T::f`, when `f` is the one inherent
     /// method of `T` so named and returns `Self` or `T`, or with `tried` a
-    /// `Result` or `Option` of one.
+    /// `Result` or `Option` of one. Past that (SPEC-w12 G2a): another
+    /// workspace struct or enum `R` that `f` returns (D6 (d)), and, when `T`
+    /// names no type, what the path call `T::f` returns (D6 (b)).
     fn constructed(&self, module: Id, path: &str, tried: bool) -> Option<Id> {
         let mut segs = segments(path)?;
         let name = segs.pop()?;
-        let ty = self.data_type(module, &segs)?;
+        let Some(ty) = self.data_type(module, &segs) else {
+            return self.returned(module, path, tried);
+        };
         let methods: Vec<Id> = self
             .inherent
             .get(name.as_str())?
@@ -443,7 +453,42 @@ impl<'a> Index<'a> {
             return Some(ty);
         }
         let home = self.place_of(&method.file, &method.scope)?;
-        (self.data_type(home, &segments(&returned)?)? == ty).then_some(ty)
+        let found = self.data_type(home, &segments(&returned)?)?;
+        if found == ty {
+            return Some(ty);
+        }
+        (!generic_parameters(method).contains(first_segment(&returned))).then_some(found)
+    }
+
+    /// The struct or enum the path call `path` returns from `module`
+    /// (SPEC-w12 G2a, D6 (b), (c)): `path` names one workspace fn or method
+    /// by the call tiers, whose signature returns a path type, or with
+    /// `tried` a `Result` or `Option` of one, that names one struct or enum
+    /// from the fn's own module. A reference, a tuple, `impl` or `dyn`,
+    /// and a generic parameter of the fn place nothing, and so does `Self`,
+    /// which names no type from a module.
+    fn returned(&self, module: Id, path: &str, tried: bool) -> Option<Id> {
+        let walked = self.walk(module, &segments(path)?, 0, true).ok()?;
+        let functions: Vec<Id> = walked
+            .entities
+            .iter()
+            .filter_map(|entity| self.function(*entity))
+            .collect();
+        let [one] = functions[..] else {
+            return None;
+        };
+        let function = self.symbols.get(&one)?;
+        let returned = return_type(function.signature.as_deref()?)?;
+        let returned = if tried { ok_type(&returned)? } else { returned };
+        if returned.starts_with(['&', '*', '(', '['])
+            || returned.starts_with("impl")
+            || returned.starts_with("dyn")
+            || generic_parameters(function).contains(first_segment(&returned))
+        {
+            return None;
+        }
+        let home = self.place_of(&function.file, &function.scope)?;
+        self.data_type(home, &segments(&returned)?)
     }
 
     /// The one struct or enum `segs` names from `module`, by the walk
@@ -749,58 +794,6 @@ fn bound_name(binding: &UseBinding) -> Option<&str> {
 
 fn last_segment(path: &str) -> &str {
     path.rsplit("::").next().unwrap_or(path)
-}
-
-/// The return type in a stored signature, whitespace removed: the text
-/// after the first `->` outside brackets, up to a `where` clause. None
-/// without one.
-fn return_type(signature: &str) -> Option<String> {
-    let mut depth = 0_usize;
-    let mut chars = signature.char_indices().peekable();
-    while let Some((at, ch)) = chars.next() {
-        match ch {
-            '-' if chars.peek().is_some_and(|(_, next)| *next == '>') => {
-                chars.next();
-                if depth == 0 {
-                    let rest = &signature[at + 2..];
-                    let rest = rest.split(" where ").next().unwrap_or(rest);
-                    let text: String = rest.split_whitespace().collect();
-                    return (!text.is_empty()).then_some(text);
-                }
-            }
-            '(' | '[' | '<' => depth += 1,
-            ')' | ']' | '>' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    None
-}
-
-/// `X` for `Result<X, ..>` or `Option<X>`, by the outer type's last path
-/// segment.
-fn ok_type(returned: &str) -> Option<String> {
-    let (outer, inner) = returned.split_once('<')?;
-    let inner = inner.strip_suffix('>')?;
-    let mut depth = 0_usize;
-    let mut arguments = vec![String::new()];
-    for ch in inner.chars() {
-        match ch {
-            '<' | '(' | '[' => depth += 1,
-            '>' | ')' | ']' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                arguments.push(String::new());
-                continue;
-            }
-            _ => {}
-        }
-        if let Some(last) = arguments.last_mut() {
-            last.push(ch);
-        }
-    }
-    match (last_segment(outer), &arguments[..]) {
-        ("Result", [ok, ..]) | ("Option", [ok]) if !ok.is_empty() => Some(ok.clone()),
-        _ => None,
-    }
 }
 
 /// Unresolved beats external: a binding that names the workspace but

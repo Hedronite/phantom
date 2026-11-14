@@ -3,12 +3,13 @@ title: Expected edges — resolve-typed fixture
 type: fixture
 status: ground-truth
 created: "2026-10-30"
-updated: "2026-10-30"
+updated: "2026-11-14"
 owner: fullstack
 spec: "[[foundry/phantom/specs/SPEC-w10]]"
 cross_refs:
   - "[[foundry/phantom/checklists/CHECKLIST-w10]]"
   - "[[foundry/phantom/rubrics/RUBRIC-w10]]"
+  - "[[foundry/phantom/specs/SPEC-w12]]"
 tags:
   - phantom
   - fixture
@@ -50,7 +51,7 @@ A symbol is written `<package>/<target>:<module path>::<name>`, with the impl ow
 | `in_closure` | parameter `c: Counter`, the call in a closure body | `type:Counter` | `Counter::read` |
 | `two_traits` | parameter `c: Counter`; `go` comes from both `impl Left` and `impl Right` | `type:Counter` | none |
 | `trait_impl_method` | parameter `r: Gauge`; `peek` comes only from `impl Reader for Gauge` | `type:Gauge` | `Gauge::peek` |
-| `clears::untyped_let` | `let c = make()` | none | none |
+| `clears::untyped_let` | `let c = make()`, and `make` returns `Counter` | `ret:make` (W12 G2a) | `Counter::read` |
 | `clears::inferred_let` | `let c: _ = make()` | none | none |
 | `clears::in_match` | `Some(c)` in a `match` arm | none | none |
 | `clears::in_if_let` | `if let Some(c)` | none | none |
@@ -80,6 +81,7 @@ Every function in `clears.rs` also has a parameter `c: Counter`, apart from `imp
 - `typed/lib:crate::by_ref -> typed/lib:crate::Counter::read typed-method`
 - `typed/lib:crate::by_scoped -> typed/lib:crate::Counter::read typed-method`
 - `typed/lib:crate::clears::inferred_let -> typed/lib:crate::make use-alias`
+- `typed/lib:crate::clears::untyped_let -> typed/lib:crate::Counter::read typed-method`
 - `typed/lib:crate::clears::untyped_let -> typed/lib:crate::make use-alias`
 - `typed/lib:crate::ctor_named -> typed/lib:crate::Counter::fresh assoc`
 - `typed/lib:crate::ctor_named -> typed/lib:crate::Counter::read typed-method`
@@ -109,13 +111,13 @@ Every function in `clears.rs` also has a parameter `c: Counter`, apart from `imp
 
 ## Counts
 
-- edges: 39
+- edges: 40
 - unresolved: 1
 - external: 5
 - no_source: 0
-- method_calls: 17
+- method_calls: 16
 - macros: 0
 - modules: 3
 - orphans: 0
 
-`unresolved` is the call `f()` in `in_closure`, whose name a `let` binds. `external` is the two `todo()`, the two `Ok(..)` and the `Some(..)`. `method_calls` is the 17 calls on a receiver other than `self` that got no edge: 4 in `lib.rs` (`let_wrapped`'s `c`, `ctor_not_self`, `ctor_untried`, `two_traits`) and 13 in `clears.rs`, one per function plus `o.pop()`.
+`unresolved` is the call `f()` in `in_closure`, whose name a `let` binds. `external` is the two `todo()`, the two `Ok(..)` and the `Some(..)`. `method_calls` is the 16 calls on a receiver other than `self` that got no edge: 4 in `lib.rs` (`let_wrapped`'s `c`, `ctor_not_self`, `ctor_untried`, `two_traits`) and 12 in `clears.rs`, one per function but `untyped_let`, plus `o.pop()`.

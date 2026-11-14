@@ -189,13 +189,12 @@ fn self_is_the_impl_self_type() {
 fn every_other_binding_clears_the_hint() {
     let base = "fn f(x: T, o: O) {";
     let cases = [
-        ("untyped let", "let x = g(); x.m();"),
+        ("untyped let", "let x = o.g(); x.m();"),
         ("inferred let", "let x: _ = g(); x.m();"),
         ("let without type or value", "let x; x.m();"),
         ("method value", "let x = y.make(); x.m();"),
         ("field value", "let x = y.inner; x.m();"),
         ("unwrapped ctor", "let x = T::new().unwrap(); x.m();"),
-        ("free function ctor", "let x = make(); x.m();"),
         ("tried method", "let x = y.make()?; x.m();"),
         ("match", "match o { Some(x) => x.m(), None => {} }"),
         ("match binding", "match o { x @ _ => x.m() }"),
@@ -259,7 +258,7 @@ fn the_nearest_binding_before_the_call_wins() {
             "fn f(x: T) { let x = U::new(); x.m(); }",
             Some("ctor:U::new"),
         ),
-        ("clearing let", "fn f(x: T) { let x = g(); x.m(); }", None),
+        ("clearing let", "fn f(x: T) { let x = o.g(); x.m(); }", None),
         (
             "let after the call",
             "fn f(x: T) { x.m(); let x = g(); }",

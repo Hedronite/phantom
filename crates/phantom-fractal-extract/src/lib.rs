@@ -43,8 +43,9 @@ pub use walk::{Candidate, MAX_FILE_BYTES, SkipReason, Skipped, Walk, is_secret, 
 /// adds the `import` and `impl` links; version 8 adds receiver type hints
 /// and the `typed-method` edges; version 9 adds `test` targets and their
 /// module trees; version 10 places `macro_arg` refs, with their receivers,
-/// hints and shadowing.
-pub const EXTRACTOR_VERSION: u32 = 10;
+/// hints and shadowing; version 11 adds the return, path-call and
+/// same-file field hints.
+pub const EXTRACTOR_VERSION: u32 = 11;
 
 /// What one [`index`] pass did, by repo-relative path, in walk order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

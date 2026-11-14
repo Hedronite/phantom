@@ -28,8 +28,14 @@
 //! by `self-method`, and any other method name as a method call, by its
 //! receiver hint or else by `unique-method`. One that no tier places is
 //! not counted.
+//!
+//! The hints of SPEC-w12 G2a, `ret:f` and `ret?:f` and any hint on a
+//! receiver that is not one identifier, are tried only after the base
+//! tier: such a call takes `unique-method` when that places it, and
+//! `typed-method` by its hint only when it does not.
 
 mod lookup;
+mod signature;
 
 use std::collections::HashSet;
 
@@ -127,12 +133,28 @@ pub fn resolve(input: &ResolveInput) -> (Vec<Edge>, ResolveCounts) {
 }
 
 /// A method call on a receiver other than `self`: by its receiver hint, or
-/// with none by its name alone.
+/// with none by its name alone. A hint of SPEC-w12 G2a never changes what
+/// the name alone places: it is tried only when that places nothing.
 fn place_method(index: &Index, call: &CallRef) -> Option<(Id, Reason)> {
+    let unique = || Some((index.place_unique(call)?, Reason::UniqueMethod));
     match call.receiver_type.as_deref() {
+        Some(hint) if placed_after_base(call, hint) => {
+            unique().or_else(|| Some((index.place_typed(call, hint)?, Reason::TypedMethod)))
+        }
         Some(hint) => Some((index.place_typed(call, hint)?, Reason::TypedMethod)),
-        None => Some((index.place_unique(call)?, Reason::UniqueMethod)),
+        None => unique(),
     }
+}
+
+/// True for a hint that the base tiers never gave (SPEC-w12 G2a): a `ret`
+/// hint, or any hint on a receiver that is not one identifier, as `self.f`,
+/// `f(..)` and `T::f(..)` are.
+fn placed_after_base(call: &CallRef, hint: &str) -> bool {
+    let one_identifier = call.receiver.as_deref().is_some_and(|receiver| {
+        let name = receiver.strip_prefix("r#").unwrap_or(receiver);
+        !name.is_empty() && name.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
+    });
+    hint.starts_with("ret:") || hint.starts_with("ret?:") || !one_identifier
 }
 
 /// A call-shaped name inside a macro's tokens, by its shape: a path, which

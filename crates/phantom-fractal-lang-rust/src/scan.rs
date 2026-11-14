@@ -248,7 +248,7 @@ fn method_callee<'tree>(
         last_segment: name,
         at: field,
         receiver: value.map(|value| compact(value, src)),
-        receiver_type: value.and_then(|value| receivers::hint(value, src, blocks)),
+        receiver_type: value.and_then(|value| receivers::receiver_hint(value, src, blocks)),
         single_segment: false,
     })
 }
