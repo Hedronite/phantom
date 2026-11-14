@@ -44,8 +44,9 @@ pub use walk::{Candidate, MAX_FILE_BYTES, SkipReason, Skipped, Walk, is_secret, 
 /// and the `typed-method` edges; version 9 adds `test` targets and their
 /// module trees; version 10 places `macro_arg` refs, with their receivers,
 /// hints and shadowing; version 11 adds the return, path-call and
-/// same-file field hints.
-pub const EXTRACTOR_VERSION: u32 = 11;
+/// same-file field hints; version 12 adds the `use-glob` edges and the
+/// parse budget.
+pub const EXTRACTOR_VERSION: u32 = 12;
 
 /// What one [`index`] pass did, by repo-relative path, in walk order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -88,11 +89,12 @@ pub struct ReasonCounts {
     pub crate_path: u64,
     pub typed_method: u64,
     pub unique_method: u64,
+    pub use_glob: u64,
 }
 
 impl ReasonCounts {
     /// Every reason in declaration order.
-    pub const REASONS: [Reason; 9] = [
+    pub const REASONS: [Reason; 10] = [
         Reason::PathExact,
         Reason::Local,
         Reason::UseAlias,
@@ -102,6 +104,7 @@ impl ReasonCounts {
         Reason::CratePath,
         Reason::TypedMethod,
         Reason::UniqueMethod,
+        Reason::UseGlob,
     ];
 
     /// The count of each reason among `edges`.
@@ -130,6 +133,7 @@ impl ReasonCounts {
             Reason::CratePath => &mut self.crate_path,
             Reason::TypedMethod => &mut self.typed_method,
             Reason::UniqueMethod => &mut self.unique_method,
+            Reason::UseGlob => &mut self.use_glob,
         }
     }
 }

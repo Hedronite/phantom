@@ -201,6 +201,10 @@ pub enum Reason {
     /// `x.m()` with no placed hint, to the one workspace method named `m`
     /// (SPEC-w10 G3a).
     UniqueMethod,
+    /// A bare first segment that only a `use p::*` of a workspace module
+    /// supplies, with exactly one item of that name across the globbed
+    /// modules (SPEC-w13 G2a).
+    UseGlob,
 }
 
 impl Reason {
@@ -216,6 +220,7 @@ impl Reason {
             Self::CratePath => "crate-path",
             Self::TypedMethod => "typed-method",
             Self::UniqueMethod => "unique-method",
+            Self::UseGlob => "use-glob",
         }
     }
 }

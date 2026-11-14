@@ -17,6 +17,8 @@ use phantom_fractal_lang::{
 };
 
 use super::segments;
+
+mod cures;
 use super::signature::{first_segment, generic_parameters, ok_type, return_type};
 use crate::STD_METHOD_NAMES;
 

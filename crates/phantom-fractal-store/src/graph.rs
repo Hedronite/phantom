@@ -112,6 +112,7 @@ pub(crate) fn reason_from_text(reason: &str) -> Result<Reason, StoreError> {
         "crate-path" => Ok(Reason::CratePath),
         "typed-method" => Ok(Reason::TypedMethod),
         "unique-method" => Ok(Reason::UniqueMethod),
+        "use-glob" => Ok(Reason::UseGlob),
         other => Err(StoreError::UnknownReason(other.to_owned())),
     }
 }
@@ -127,6 +128,7 @@ pub(crate) fn reason_to_text(reason: Reason) -> &'static str {
         Reason::CratePath => "crate-path",
         Reason::TypedMethod => "typed-method",
         Reason::UniqueMethod => "unique-method",
+        Reason::UseGlob => "use-glob",
     }
 }
 

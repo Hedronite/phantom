@@ -96,6 +96,8 @@ struct EdgesByReason {
     typed_method: u64,
     #[serde(rename = "unique-method")]
     unique_method: u64,
+    #[serde(rename = "use-glob")]
+    use_glob: u64,
 }
 
 impl From<ReasonCounts> for EdgesByReason {
@@ -110,6 +112,7 @@ impl From<ReasonCounts> for EdgesByReason {
             crate_path: counts.crate_path,
             typed_method: counts.typed_method,
             unique_method: counts.unique_method,
+            use_glob: counts.use_glob,
         }
     }
 }

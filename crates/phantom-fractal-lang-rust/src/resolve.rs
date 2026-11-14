@@ -52,6 +52,7 @@ pub fn confidence(reason: Reason) -> f64 {
         Reason::PathExact => 1.0,
         Reason::Local | Reason::UseAlias | Reason::CratePath => 0.95,
         Reason::Assoc | Reason::SelfMethod | Reason::SelfAssoc => 0.9,
+        Reason::UseGlob => 0.85,
         Reason::TypedMethod => 0.8,
         Reason::UniqueMethod => 0.5,
     }
@@ -111,7 +112,7 @@ pub fn resolve(input: &ResolveInput) -> (Vec<Edge>, ResolveCounts) {
                     counts.no_source += 1;
                     continue;
                 };
-                (source, index.place(call, source))
+                (source, index.place_cured(call, source))
             }
         };
         match placed {
@@ -162,7 +163,7 @@ fn placed_after_base(call: &CallRef, hint: &str) -> bool {
 /// any other method name by [`place_method`].
 fn place_macro_arg(index: &Index, call: &CallRef, source: Id) -> Placed {
     match call.receiver.as_deref() {
-        None => index.place(call, source),
+        None => index.place_cured(call, source),
         Some("self") => match segments(&call.text).and_then(|segs| segs.last().cloned()) {
             Some(name) => index.place_self(source, &name, Reason::SelfMethod),
             None => Placed::Unresolved,
