@@ -41,7 +41,7 @@ pub use crate::graph::{CallHit, EdgeRow, Package, SymbolMatch};
 pub use crate::lock::{LockState, WriterLock, lock_state};
 pub use crate::rank::{MapFile, MapRow, RankEdge, RankImportEdge, RankSymbolRow};
 pub use crate::rows::FileStat;
-pub use crate::scoring::ScoreCallRef;
+pub use crate::scoring::{ModuleRow, ScoreCallRef, UseRow};
 
 /// Producer stamp written into `meta`.
 pub const PRODUCER: &str = "phantom-fractal";

@@ -9,5 +9,6 @@
 
 #![allow(dead_code)]
 
+pub mod foreign;
 pub mod score;
 pub mod wire;
