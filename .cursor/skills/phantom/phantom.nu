@@ -6,7 +6,7 @@
 # as its own argv element: nothing is joined into a shell string.
 #
 # Every command prints one JSON line and exits with its `exit`:
-#   { ok: true, command, data, meta }
+#   { ok: true, command, data, meta, exit: 0 }
 #   { ok: false, command, error, kind, stderr, exit }
 # A failure copies the CLI's `error.kind`, and its `matches` (the ambiguous
 # candidates) and `did_you_mean`, onto the envelope unchanged.
@@ -16,11 +16,20 @@
 # `--flag=value`, and names and paths after `--`, so a value that starts
 # with `-` is never read as a flag. A usage error runs nothing.
 #
+# `help`, and `--help` or `-h` before `--` anywhere, print the command
+# table and run nothing. The global flags `--repo`, `--limit` and `--depth`
+# may also come before the command; they are handed to it unchanged, so a
+# command that does not take one says so as a usage error.
+#
+# A name in `where`'s display shape, `file.rs:LINE Owner::name`, is read
+# as the path-qualified `file.rs::Owner::name`. No name the CLI resolves
+# has that shape, so no answered query changes.
+#
 # CLI each command actually runs:
 #   where        show [--repo=R] -- NAME, then find -- NAME on not_found
 #   callers      callers [--repo=R] -- NAME
 #   callees      callees [--repo=R] -- NAME
-#   impact       impact [--depth=N] [--min-confidence=X] [--no-tests] [--repo=R] -- NAME
+#   impact       impact [--depth=N] [--min-confidence=X] [--no-tests] [--limit=N] [--repo=R] -- NAME
 #   diff-impact  impact --diff [--against=REF] [--depth=N] [--min-confidence=X] [--no-tests] [--repo=R]
 #   path         path [--max-depth=N] [--repo=R] -- FROM TO
 #   cochange     cochange --count [--limit=N] [--repo=R] -- FILE
@@ -34,6 +43,41 @@
 
 const COUNT_NOTE = "raw counts: for every tracked file, the non-merge commits it shares with FILE in the scanned window, no decay and no lift floor; commits over scope.bulk_skip files are skipped and counted in scan.skipped_bulk; history, not dependency"
 const RUST_NOTE = "--rust: indexed Rust files only, decay-weighted (90 days) and lift-filtered; together_decayed is a weight, not a commit count; for raw counts over every tracked file, drop --rust"
+
+const HELP_FLAGS = ["--help" "-h"]
+const GLOBAL_FLAGS = ["--repo" "--limit" "--depth"]
+# Keys the CLI adds at the end of `callers` and `impact` only when it
+# flags a re-exported target; copied through in this order.
+const FLAG_KEYS = ["reexported" "confirm_with_grep"]
+# The list usage errors name, as W14 printed it; `help` is in SKILL.md.
+const COMMANDS = ["where" "callers" "callees" "impact" "diff-impact" "path" "cochange" "map" "rank" "show" "status" "index"]
+
+# The command table `help` prints. It runs nothing.
+const HELP = {
+  commands: [
+    { usage: "where NAME", answers: "where X is defined: file:line, kind, signature; every candidate of a bare name" }
+    { usage: "callers NAME [--limit N]", answers: "who calls X, grouped by caller, with sites and files" }
+    { usage: "callees NAME [--limit N]", answers: "what X calls, and how many calls were unresolved" }
+    { usage: "impact NAME [--depth 1..5] [--limit N] [--no-tests]", answers: "what breaks if X changes: callers by depth, tests apart, risk" }
+    { usage: "diff-impact [--against REF]", answers: "what the uncommitted change reaches" }
+    { usage: "path FROM TO", answers: "how A reaches B" }
+    { usage: "cochange FILE [--limit N]", answers: "which tracked files change in the same commits: raw counts" }
+    { usage: "cochange --rust FILE [--limit N] [--min-lift X]", answers: "which Rust files tend to move with FILE: weights" }
+    { usage: "map [--budget N] [--focus PATH]", answers: "orient: ranked files and their symbols" }
+    { usage: "rank [--files] [--limit N] [--focus PATH]", answers: "the most central symbols or files" }
+    { usage: "show NAME [--source]", answers: "one symbol with its callers and callees" }
+    { usage: "status", answers: "is the index current" }
+    { usage: "index [PATH]", answers: "writes the index; run only when a human asked" }
+  ]
+  flags: "--repo R, --limit N and --depth N go before or after the command; a word after -- is never a flag"
+  names: "NAME: a bare name, Type::method, module::name, or a display from any reply; on kind ambiguous, rerun with one of matches[].display"
+  envelope: "one JSON line: ok, command, data, meta, exit; or ok false, command, error, kind, stderr, exit"
+  read: "SKILL.md beside this script says when to trust each answer"
+}
+
+def help-envelope [] {
+  { ok: true, command: "help", data: $HELP, meta: null }
+}
 
 def phantom-bin [] {
   let over = ($env.PHANTOM_FRACTAL_BIN? | default "")
@@ -55,10 +99,12 @@ def missing-phantom [command: string, detail: string] {
   }
 }
 
-# Print the envelope as one line and exit with its code (0 when absent).
+# Print the envelope as one line and exit with its code. A success gains
+# `exit: 0` as its last key; every other key is as it was.
 def finish [e: record] {
-  print ($e | to json --raw)
-  exit ($e.exit? | default 0)
+  let out = if ($e.ok? | default false) and ($e.exit? == null) { $e | upsert exit 0 } else { $e }
+  print ($out | to json --raw)
+  exit ($out.exit? | default 0)
 }
 
 # Run the CLI once with `--json`. The arguments are a list, never a string.
@@ -140,8 +186,10 @@ def valued-name [tok: string, valued: list<string>] {
 
 # Flags before `--`, in either `--flag value` or `--flag=value` form, in
 # any order with the positionals. After `--` every word is positional, and
-# a known flag there is a usage error. Unknown flags are usage errors.
-# Returns { ok: true, on, values, pos } or a usage envelope.
+# a known flag there is a usage error. Unknown flags are usage errors, and
+# `--help` or `-h` is the help envelope.
+# Returns { ok: true, on, values, pos }, or an envelope to print as it is:
+# only an envelope has a `command` key.
 def parse-args [
   command: string
   line: string
@@ -162,6 +210,8 @@ def parse-args [
     if $tok == "--" and not $after {
       $after = true
       $i = $i + 1
+    } else if (not $after) and ($tok in $HELP_FLAGS) {
+      return (help-envelope)
     } else if $after and $known {
       return (usage $command $"($tok) is a flag and must come before --. Usage: ($line)")
     } else if $after {
@@ -192,6 +242,11 @@ def parse-args [
     }
   }
   { ok: true, on: $on, values: $values, pos: $pos }
+}
+
+# An envelope parse-args returned in place of the parsed arguments.
+def printable [p: record] {
+  "command" in ($p | columns)
 }
 
 def opt [p: record, name: string] {
@@ -336,7 +391,12 @@ def calls-data [data: record, key: string, limit: any] {
   if "unresolved_calls" in ($data | columns) {
     $out = ($out | upsert unresolved_calls $data.unresolved_calls)
   }
-  $out
+  $out | merge (copy-keys $data $FLAG_KEYS)
+}
+
+# The CLI's `keys` that `data` holds, in that order, values unchanged.
+def copy-keys [data: record, keys: list<string>] {
+  $keys | where {|k| $k in ($data | columns) } | reduce --fold {} {|k, acc| $acc | upsert $k ($data | get $k) }
 }
 
 def reached [h: record] {
@@ -365,7 +425,7 @@ def impact-data [data: record] {
     by_depth: $by_depth
     tests: ($tests | each {|h| reached $h })
     files: ($files ++ $test_files | where {|f| $f != null } | uniq | sort)
-  }
+  } | merge (copy-keys $data (["limit"] ++ $FLAG_KEYS))
 }
 
 def iso [t: any] {
@@ -394,6 +454,13 @@ def node [n: any] {
 
 def repo-arg [p: record] { pass $p "--repo" }
 
+# `file.rs:LINE Owner::name`, the display `where` answers in, as the
+# path-qualified `file.rs::Owner::name`; any other name as it is.
+def symbol-name [name: string] {
+  let m = ($name | parse --regex '\A(?<file>[\w./-]+\.rs):[0-9]+ (?<qual>[\w:]+)\z')
+  if ($m | is-empty) { $name } else { $"(($m | first).file)::(($m | first).qual)" }
+}
+
 def one-name [command: string, line: string, p: record] {
   if ($p.pos | length) != 1 { usage $command $"one name required. Usage: ($line)" } else { null }
 }
@@ -414,10 +481,10 @@ def where-hit [s: record] {
 def --wrapped "main where" [...args: string] {
   let line = "where [--repo R] NAME"
   let p = (parse-args "where" $line $args [] ["--repo"])
-  if not $p.ok { finish $p }
+  if (printable $p) { finish $p }
   let bad = (one-name "where" $line $p)
   if $bad != null { finish $bad }
-  let name = ($p.pos | first)
+  let name = (symbol-name ($p.pos | first))
   let shown = (call "where" (["show"] ++ (repo-arg $p) ++ ["--" $name]))
   if $shown.ok {
     finish ($shown | upsert data { hits: [(where-hit $shown.data.symbol)], total: 1 })
@@ -445,12 +512,12 @@ def --wrapped "main where" [...args: string] {
 def calls-command [command: string, args: list<string>, key: string] {
   let line = $"($command) [--limit N] [--repo R] NAME"
   let p = (parse-args $command $line $args [] ["--limit" "--repo"])
-  if not $p.ok { finish $p }
+  if (printable $p) { finish $p }
   let bad = (one-name $command $line $p)
   if $bad != null { finish $bad }
   let limit = (int-opt $p "--limit")
   if $limit.error != "" { finish (usage $command $"($limit.error). Usage: ($line)") }
-  let e = (call $command ([$command] ++ (repo-arg $p) ++ ["--" ($p.pos | first)]))
+  let e = (call $command ([$command] ++ (repo-arg $p) ++ ["--" (symbol-name ($p.pos | first))]))
   if not $e.ok { finish $e }
   finish ($e | upsert data (calls-data $e.data $key $limit.value))
 }
@@ -467,14 +534,14 @@ def impact-args [p: record] {
 }
 
 def --wrapped "main impact" [...args: string] {
-  let line = "impact [--depth 1..5] [--min-confidence X] [--no-tests] [--repo R] NAME"
-  let p = (parse-args "impact" $line $args $IMPACT_SWITCHES $IMPACT_VALUED)
-  if not $p.ok { finish $p }
+  let line = "impact [--depth 1..5] [--limit N] [--min-confidence X] [--no-tests] [--repo R] NAME"
+  let p = (parse-args "impact" $line $args $IMPACT_SWITCHES ($IMPACT_VALUED ++ ["--limit"]))
+  if (printable $p) { finish $p }
   let bad = (one-name "impact" $line $p)
   if $bad != null { finish $bad }
-  let ints = (check-ints "impact" $line $p ["--depth"])
+  let ints = (check-ints "impact" $line $p ["--depth" "--limit"])
   if $ints != null { finish $ints }
-  let e = (call "impact" (["impact"] ++ (impact-args $p) ++ ["--" ($p.pos | first)]))
+  let e = (call "impact" (["impact"] ++ (impact-args $p) ++ (pass $p "--limit") ++ ["--" (symbol-name ($p.pos | first))]))
   if not $e.ok { finish $e }
   let d = $e.data
   finish ($e | upsert data ({ symbol: (symbol-row ($d.symbol? | default null)) } | merge (impact-data $d)))
@@ -483,7 +550,7 @@ def --wrapped "main impact" [...args: string] {
 def --wrapped "main diff-impact" [...args: string] {
   let line = "diff-impact [--against REF] [--depth 1..5] [--min-confidence X] [--no-tests] [--repo R]"
   let p = (parse-args "diff-impact" $line $args $IMPACT_SWITCHES ($IMPACT_VALUED ++ ["--against"]))
-  if not $p.ok { finish $p }
+  if (printable $p) { finish $p }
   if not ($p.pos | is-empty) { finish (usage "diff-impact" $"no name is taken. Usage: ($line)") }
   let ints = (check-ints "diff-impact" $line $p ["--depth"])
   if $ints != null { finish $ints }
@@ -504,11 +571,11 @@ def --wrapped "main diff-impact" [...args: string] {
 def --wrapped "main path" [...args: string] {
   let line = "path [--max-depth 1..20] [--repo R] FROM TO"
   let p = (parse-args "path" $line $args [] ["--max-depth" "--repo"])
-  if not $p.ok { finish $p }
+  if (printable $p) { finish $p }
   if ($p.pos | length) != 2 { finish (usage "path" $"FROM and TO required. Usage: ($line)") }
   let ints = (check-ints "path" $line $p ["--max-depth"])
   if $ints != null { finish $ints }
-  let e = (call "path" (["path"] ++ (pass $p "--max-depth") ++ (repo-arg $p) ++ ["--"] ++ $p.pos))
+  let e = (call "path" (["path"] ++ (pass $p "--max-depth") ++ (repo-arg $p) ++ ["--"] ++ ($p.pos | each {|n| symbol-name $n })))
   if not $e.ok { finish $e }
   let d = $e.data
   let hops = ($d.hops? | default [] | each {|h|
@@ -530,7 +597,7 @@ def --wrapped "main path" [...args: string] {
 def --wrapped "main cochange" [...args: string] {
   let line = "cochange [--count | --rust] [--limit N] [--min-lift X (with --rust)] [--repo R] FILE"
   let p = (parse-args "cochange" $line $args ["--count" "--rust"] ["--limit" "--min-lift" "--repo"])
-  if not $p.ok { finish $p }
+  if (printable $p) { finish $p }
   if ($p.pos | length) != 1 { finish (usage "cochange" $"one file required. Usage: ($line)") }
   let ints = (check-ints "cochange" $line $p ["--limit"])
   if $ints != null { finish $ints }
@@ -561,7 +628,7 @@ def --wrapped "main cochange" [...args: string] {
 def --wrapped "main map" [...args: string] {
   let line = "map [--budget N] [--focus PATH]... [--detail files|symbols|full] [--repo R]"
   let p = (parse-args "map" $line $args [] ["--budget" "--focus" "--detail" "--repo"])
-  if not $p.ok { finish $p }
+  if (printable $p) { finish $p }
   if not ($p.pos | is-empty) { finish (usage "map" $"no positional is taken. Usage: ($line)") }
   let ints = (check-ints "map" $line $p ["--budget"])
   if $ints != null { finish $ints }
@@ -574,7 +641,7 @@ def --wrapped "main map" [...args: string] {
 def --wrapped "main rank" [...args: string] {
   let line = "rank [--files] [--limit N] [--focus PATH]... [--repo R]"
   let p = (parse-args "rank" $line $args ["--files"] ["--limit" "--focus" "--repo"])
-  if not $p.ok { finish $p }
+  if (printable $p) { finish $p }
   if not ($p.pos | is-empty) { finish (usage "rank" $"no positional is taken. Usage: ($line)") }
   let ints = (check-ints "rank" $line $p ["--limit"])
   if $ints != null { finish $ints }
@@ -599,10 +666,10 @@ def --wrapped "main rank" [...args: string] {
 def --wrapped "main show" [...args: string] {
   let line = "show [--source] [--repo R] NAME"
   let p = (parse-args "show" $line $args ["--source"] ["--repo"])
-  if not $p.ok { finish $p }
+  if (printable $p) { finish $p }
   let bad = (one-name "show" $line $p)
   if $bad != null { finish $bad }
-  let e = (call "show" (["show"] ++ (switch $p "--source") ++ (repo-arg $p) ++ ["--" ($p.pos | first)]))
+  let e = (call "show" (["show"] ++ (switch $p "--source") ++ (repo-arg $p) ++ ["--" (symbol-name ($p.pos | first))]))
   if not $e.ok { finish $e }
   let d = $e.data
   let callers = ($d.callers? | default {})
@@ -621,7 +688,7 @@ def --wrapped "main show" [...args: string] {
 def --wrapped "main status" [...args: string] {
   let line = "status [--repo R]"
   let p = (parse-args "status" $line $args [] ["--repo"])
-  if not $p.ok { finish $p }
+  if (printable $p) { finish $p }
   if not ($p.pos | is-empty) { finish (usage "status" $"no positional is taken. Usage: ($line)") }
   let e = (call "status" (["status"] ++ (repo-arg $p)))
   if not $e.ok { finish $e }
@@ -640,17 +707,61 @@ def --wrapped "main status" [...args: string] {
 def --wrapped "main index" [...args: string] {
   let line = "index [PATH]"
   let p = (parse-args "index" $line $args [] [])
-  if not $p.ok { finish $p }
+  if (printable $p) { finish $p }
   if ($p.pos | length) > 1 { finish (usage "index" $"at most one path. Usage: ($line)") }
   let path = if ($p.pos | is-empty) { "." } else { $p.pos | first }
   finish (call "index" ["index" "--" $path])
 }
 
+def --wrapped "main help" [...args: string] { finish (help-envelope) }
+
+# The command, after any global flags, and the words it is handed: the
+# global flags first, then the words that followed the command.
+def split-command [args: list<string>] {
+  mut i = 0
+  mut lead = []
+  let n = ($args | length)
+  while $i < $n {
+    let tok = ($args | get $i)
+    let named = (valued-name $tok $GLOBAL_FLAGS)
+    if $tok in $HELP_FLAGS {
+      return { help: true }
+    } else if $named != "" and ($tok | str starts-with $"($named)=") {
+      $lead = ($lead | append $tok)
+      $i = $i + 1
+    } else if $named != "" {
+      if ($i + 1) >= $n { return { error: $"($named) needs a value, then a command" } }
+      $lead = ($lead | append [$tok ($args | get ($i + 1))])
+      $i = $i + 2
+    } else if ($tok | str starts-with "-") {
+      return { error: $"unknown flag ($tok) before the command; only --repo, --limit and --depth may come first" }
+    } else {
+      return { command: $tok, rest: ($lead ++ ($args | skip ($i + 1))) }
+    }
+  }
+  if ($lead | is-empty) { { error: "a command is required" } } else { { error: "a command is required after the flags" } }
+}
+
 def --wrapped main [...args: string] {
-  let known = "where, callers, callees, impact, diff-impact, path, cochange, map, rank, show, status, index"
-  if ($args | is-empty) {
-    finish (usage "" $"a command is required: ($known)")
-  } else {
-    finish (usage ($args | first) $"unknown command ($args | first). Commands: ($known)")
+  let known = ($COMMANDS | str join ", ")
+  let s = (split-command $args)
+  if ($s.help? | default false) { finish (help-envelope) }
+  if ($s.error? != null) { finish (usage "" $"($s.error): ($known)") }
+  let rest = $s.rest
+  match $s.command {
+    "help" => { main help ...$rest }
+    "where" => { main where ...$rest }
+    "callers" => { main callers ...$rest }
+    "callees" => { main callees ...$rest }
+    "impact" => { main impact ...$rest }
+    "diff-impact" => { main diff-impact ...$rest }
+    "path" => { main path ...$rest }
+    "cochange" => { main cochange ...$rest }
+    "map" => { main map ...$rest }
+    "rank" => { main rank ...$rest }
+    "show" => { main show ...$rest }
+    "status" => { main status ...$rest }
+    "index" => { main index ...$rest }
+    _ => { finish (usage $s.command $"unknown command ($s.command). Commands: ($known)") }
   }
 }
