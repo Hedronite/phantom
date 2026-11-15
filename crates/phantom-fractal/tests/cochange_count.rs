@@ -194,6 +194,20 @@ fn count_takes_a_limit_and_a_budget_and_writes_nothing() {
         json!(full["partners"].as_array().expect("partners")[..2])
     );
     assert_eq!(two["truncated"], true);
+    // `src/a.rs` has 9 partners: a limit of 9 lists them all, untruncated.
+    let nine = data(
+        &repo.root,
+        store.path(),
+        &["cochange", "src/a.rs", "--count", "--limit", "9"],
+    );
+    assert_eq!(nine["partners"], full["partners"]);
+    assert_eq!(nine["truncated"], false);
+    let eight = data(
+        &repo.root,
+        store.path(),
+        &["cochange", "src/a.rs", "--count", "--limit", "8"],
+    );
+    assert_eq!(eight["truncated"], true);
     // A budget just under what the whole reply costs drops some partners.
     let (_, line) = cli(
         &repo.root,

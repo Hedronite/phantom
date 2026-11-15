@@ -149,25 +149,15 @@ pub(crate) struct PartnerOut {
 /// The partners of `request.file`, best lift first, then the most changes
 /// together, then path, fitted to `request.max_tokens`.
 pub(crate) fn cochange(request: &CochangeRequest) -> Result<Reply<CochangeResult>, Failure> {
-    check_limit(request.limit)?;
-    if !min_lift_in_range(request.min_lift) {
-        return Err(Failure::new(ErrorKind::Usage, min_lift_usage()));
-    }
-    budget::check(request.max_tokens)?;
+    checked(request)?;
     let store = current_store(&request.repo)?;
     let file = indexed_file(&store, &request.file)?;
     let scan = scan(&store)?;
-    let limit = usize::try_from(request.limit).unwrap_or(usize::MAX);
-    let mut partners = if scan.is_some() {
-        partners(&store, &file, request.min_lift, request.limit + 1)?
+    let (partners, truncated) = if scan.is_some() {
+        listed(&store, &file, request)?
     } else {
-        Vec::new()
+        (Vec::new(), false)
     };
-    let truncated = partners.len() > limit;
-    partners.truncate(limit);
-    for partner in &mut partners {
-        partner.together_decayed = Some(partner.together);
-    }
     let result = CochangeResult {
         file,
         scan,
@@ -177,6 +167,33 @@ pub(crate) fn cochange(request: &CochangeRequest) -> Result<Reply<CochangeResult
         tokens: None,
     };
     answer(result, &store, &request.repo, request.max_tokens)
+}
+
+/// `Usage` unless the limit, `min_lift` and `max_tokens` are in range.
+fn checked(request: &CochangeRequest) -> Result<(), Failure> {
+    check_limit(request.limit)?;
+    if !min_lift_in_range(request.min_lift) {
+        return Err(Failure::new(ErrorKind::Usage, min_lift_usage()));
+    }
+    budget::check(request.max_tokens)
+}
+
+/// `file`'s first `request.limit` partners of at least `request.min_lift`,
+/// each with its weight as `together_decayed` too, and whether there were
+/// more.
+fn listed(
+    store: &Store,
+    file: &str,
+    request: &CochangeRequest,
+) -> Result<(Vec<PartnerOut>, bool), Failure> {
+    let limit = usize::try_from(request.limit).unwrap_or(usize::MAX);
+    let mut partners = partners(store, file, request.min_lift, request.limit + 1)?;
+    let truncated = partners.len() > limit;
+    partners.truncate(limit);
+    for partner in &mut partners {
+        partner.together_decayed = Some(partner.together);
+    }
+    Ok((partners, truncated))
 }
 
 /// `Usage` unless `limit` is [`LIMIT_MIN`] to [`LIMIT_MAX`].
@@ -295,7 +312,17 @@ pub(crate) fn partners(
 mod tests {
     use phantom_fractal_git::{BULK_FILES, HALF_LIFE_DAYS, MIN_TOGETHER};
 
-    use super::Scope;
+    use super::{Scope, check_limit};
+
+    #[test]
+    fn a_limit_is_1_to_100() {
+        for limit in [0, 101, u64::MAX] {
+            assert!(check_limit(limit).is_err(), "{limit}");
+        }
+        for limit in [1, 20, 100] {
+            assert!(check_limit(limit).is_ok(), "{limit}");
+        }
+    }
 
     #[test]
     fn the_scopes_name_the_git_crate_constants() {
