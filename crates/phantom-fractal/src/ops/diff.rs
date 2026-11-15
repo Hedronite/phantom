@@ -19,7 +19,7 @@ use serde::Serialize;
 
 use super::budget::{self, Shed, Tokens, drop_last};
 use super::impact::{
-    CountsOut, GroupOut, OptionsOut, ReasonOut, TestOut, counts_out, group_out, options_out,
+    CountsOut, GroupOut, OptionsOut, ReasonOut, Shown, TestOut, counts_out, group_out, options_out,
     reason_out, test_out,
 };
 use super::lookup::current_index;
@@ -197,13 +197,13 @@ pub(crate) fn impact_diff(request: &DiffRequest) -> Result<Reply<DiffResult>, Fa
         let groups = answer
             .groups
             .into_iter()
-            .map(|group| group_out(&names, group))
+            .map(|group| group_out(&names, group, Shown::Plain))
             .collect();
         let tests = options.include_tests.then(|| {
             answer
                 .tests
                 .into_iter()
-                .map(|hit| test_out(&names, hit))
+                .map(|hit| test_out(&names, hit, Shown::Plain))
                 .collect()
         });
         (Some(groups), tests)

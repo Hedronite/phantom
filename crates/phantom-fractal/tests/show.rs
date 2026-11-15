@@ -510,7 +510,9 @@ fn show_agrees_with_the_store_and_the_call_commands() {
                 let full = env["data"]["hits"].as_array().expect("hits");
                 let shown_hits = data[side]["hits"].as_array().expect("hits");
                 let cap = full.len().min(20);
-                assert_eq!(shown_hits.as_slice(), &full[..cap], "{what} {side}");
+                // `display` is the one key `callers` and `callees` add.
+                let plain: Vec<Value> = full[..cap].iter().map(without_display).collect();
+                assert_eq!(shown_hits.as_slice(), plain.as_slice(), "{what} {side}");
                 assert_eq!(data[side]["truncated"], full.len() > 20, "{what} {side}");
             }
         }
@@ -587,14 +589,22 @@ fn exits_are_usage_no_index_not_found_and_ambiguous() {
             assert!(out.stdout.is_empty(), "{bin} {args:?} wrote stdout");
             assert!(!out.stderr.is_empty(), "{bin} {args:?} wrote no error");
         }
-        for args in [
-            &["show", "nosuch"][..],
-            &["show", "--id", "src/lib.rs#nosuch#function#0"],
+        // A missed name carries its suggestions (SPEC-w14 G1b); a missed
+        // stable key carries no data.
+        for (args, data) in [
+            (
+                &["show", "nosuch"][..],
+                serde_json::json!({ "did_you_mean": [] }),
+            ),
+            (
+                &["show", "--id", "src/lib.rs#nosuch#function#0"],
+                Value::Null,
+            ),
         ] {
             let (code, _, env) = fixture.run(bin, args);
             assert_eq!(code, Some(3), "{bin} {args:?}: {env}");
             assert_eq!(env["error"]["kind"], "not_found", "{env}");
-            assert_eq!(env["data"], Value::Null, "{env}");
+            assert_eq!(env["data"], data, "{env}");
         }
     }
 
@@ -770,4 +780,13 @@ fn a_type_with_exactly_100_members_is_not_truncated() {
         );
         assert_eq!(wide["members"]["truncated"], truncated, "{count} members");
     }
+}
+
+/// A `callers` or `callees` hit without the `display` key they add.
+fn without_display(hit: &Value) -> Value {
+    let mut hit = hit.clone();
+    if let Some(object) = hit.as_object_mut() {
+        object.remove("display");
+    }
+    hit
 }

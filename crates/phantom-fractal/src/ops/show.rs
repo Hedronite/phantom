@@ -247,10 +247,16 @@ fn source(
     Ok(Some(read_source(store, &root, detail)?))
 }
 
-fn calls(mut hits: Vec<CallOut>, unresolved_calls: Option<i64>) -> Calls {
+/// One side's edges as `show` lists them, without the `display` that
+/// `callers` and `callees` add.
+fn calls(hits: Vec<CallOut>, unresolved_calls: Option<i64>) -> Calls {
     let count = hits.len();
     let truncated = count > SHOW_CALL_CAP;
-    hits.truncate(SHOW_CALL_CAP);
+    let hits = hits
+        .into_iter()
+        .take(SHOW_CALL_CAP)
+        .map(CallOut::plain)
+        .collect();
     Calls {
         count,
         hits,

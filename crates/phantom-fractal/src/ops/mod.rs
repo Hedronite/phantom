@@ -11,6 +11,7 @@ pub(crate) mod budget;
 pub(crate) mod calls;
 pub(crate) mod cochange;
 pub(crate) mod diff;
+mod distinct;
 pub(crate) mod doctor;
 pub(crate) mod find;
 pub(crate) mod fresh;
@@ -48,7 +49,7 @@ pub(crate) use status::{StatusRequest, status};
 pub(crate) use version::{VersionRequest, version};
 
 use crate::ops::budget::Shed;
-use crate::ops::lookup::Candidates;
+use crate::ops::lookup::{Candidates, DidYouMean};
 
 /// A successful op's `data`, and its `meta` when the op read an index.
 pub(crate) struct Reply<T> {
@@ -85,13 +86,22 @@ pub(crate) fn answer<T: Shed>(
     Ok(Reply::with_meta(data, meta))
 }
 
-/// An envelope error. `message` and `candidates` never hold an absolute
-/// path.
+/// An envelope error. `message` and `data` never hold an absolute path.
 pub(crate) struct Failure {
     kind: ErrorKind,
     message: String,
-    /// The envelope's `data` for an `Ambiguous` lookup.
-    candidates: Option<Candidates>,
+    /// The envelope's `data`, for a lookup that found none or several.
+    data: Option<FailureData>,
+}
+
+/// The `data` a failed lookup carries.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum FailureData {
+    /// An `Ambiguous` lookup's candidates.
+    Candidates(Candidates),
+    /// A `NotFound` lookup's suggestions.
+    DidYouMean(DidYouMean),
 }
 
 impl Failure {
@@ -99,15 +109,24 @@ impl Failure {
         Self {
             kind,
             message: message.into(),
-            candidates: None,
+            data: None,
         }
     }
 
     /// `Ambiguous`, with the candidates as the envelope's `data`.
     fn ambiguous(message: impl Into<String>, candidates: Candidates) -> Self {
         Self {
-            candidates: Some(candidates),
+            data: Some(FailureData::Candidates(candidates)),
             ..Self::new(ErrorKind::Ambiguous, message)
+        }
+    }
+
+    /// `NotFound` for a lookup, with its suggestions as the envelope's
+    /// `data`.
+    fn not_found(message: impl Into<String>, suggestions: DidYouMean) -> Self {
+        Self {
+            data: Some(FailureData::DidYouMean(suggestions)),
+            ..Self::new(ErrorKind::NotFound, message)
         }
     }
 }
@@ -149,11 +168,11 @@ pub(crate) fn envelope<T: Serialize>(
         Err(Failure {
             kind,
             message,
-            candidates,
+            data,
         }) => {
-            let envelope = match candidates {
-                Some(candidates) => Envelope::failure_with_data(kind, message, candidates),
-                None => Envelope::<Candidates>::failure(kind, message),
+            let envelope = match data {
+                Some(data) => Envelope::failure_with_data(kind, message, data),
+                None => Envelope::<FailureData>::failure(kind, message),
             };
             (serde_json::to_string(&envelope), kind.exit_code())
         }

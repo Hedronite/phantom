@@ -20,16 +20,36 @@ const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/impac
 const EXPECTED: &str = include_str!("../../../fixtures/impact/EXPECTED.md");
 
 /// The `data` keys of a full answer, of `--no-tests`, and of `--summary`.
-const KEYS: [&str; 8] = [
-    "counts", "exact", "groups", "options", "reasons", "risk", "symbol", "tests",
+const KEYS: [&str; 11] = [
+    "callers_distinct",
+    "counts",
+    "exact",
+    "files",
+    "groups",
+    "options",
+    "reasons",
+    "risk",
+    "sites",
+    "symbol",
+    "tests",
 ];
-const NO_TESTS_KEYS: [&str; 7] = [
-    "counts", "exact", "groups", "options", "reasons", "risk", "symbol",
+const NO_TESTS_KEYS: [&str; 10] = [
+    "callers_distinct",
+    "counts",
+    "exact",
+    "files",
+    "groups",
+    "options",
+    "reasons",
+    "risk",
+    "sites",
+    "symbol",
 ];
 const SUMMARY_KEYS: [&str; 6] = ["counts", "exact", "options", "reasons", "risk", "symbol"];
 
-const HIT_KEYS: [&str; 8] = [
+const HIT_KEYS: [&str; 9] = [
     "confidence",
+    "display",
     "kind",
     "line",
     "name",

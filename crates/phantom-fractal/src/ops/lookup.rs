@@ -39,6 +39,14 @@ pub(crate) struct Candidates {
     total: usize,
 }
 
+/// `data` of a lookup's `NotFound` failure: up to [`CANDIDATE_CAP`]
+/// symbols whose bare name is the query's last segment, each in the shape
+/// of an `Ambiguous` candidate. The list is empty when there are none.
+#[derive(Serialize)]
+pub(crate) struct DidYouMean {
+    did_you_mean: Vec<SymbolOut>,
+}
+
 /// Qualified names for every stored symbol, built from the resolver input.
 pub(crate) struct Names {
     symbols: HashMap<Id, Symbol>,
@@ -59,6 +67,11 @@ impl Names {
                 .map(|module| (module.id, module.path))
                 .collect(),
         }
+    }
+
+    /// The names of every symbol `store` holds.
+    pub(crate) fn of_store(store: &Store) -> Result<Self, Failure> {
+        Ok(Self::new(store.resolve_input()?))
     }
 
     /// The qualified name of symbol `id`, when the resolver input holds it.
@@ -85,6 +98,28 @@ impl Names {
         }
         parts.push(&symbol.name);
         parts.join("::")
+    }
+
+    /// `src/tui/app.rs::App::start_watcher`: the declaring file, then the
+    /// inline scope, owner and name within it.
+    pub(crate) fn display(symbol: &Symbol) -> String {
+        let mut parts: Vec<&str> = vec![&symbol.file];
+        if !symbol.scope.is_empty() {
+            parts.push(&symbol.scope);
+        }
+        if let Some(owner) = &symbol.owner {
+            parts.push(owner);
+        }
+        parts.push(&symbol.name);
+        parts.join("::")
+    }
+
+    /// [`Names::display`] of symbol `id`, or `file::name` when the
+    /// resolver input does not hold it.
+    pub(crate) fn display_of(&self, id: Id, file: &str, name: &str) -> String {
+        self.symbols
+            .get(&id)
+            .map_or_else(|| format!("{file}::{name}"), Self::display)
     }
 }
 
@@ -119,8 +154,9 @@ pub(crate) fn current_store(repo: &Path) -> Result<Store, Failure> {
     Ok(store)
 }
 
-/// The one stored symbol `query` names. None is `NotFound`; more than one
-/// is `Ambiguous`, with up to [`CANDIDATE_CAP`] candidates.
+/// The one stored symbol `query` names. None is `NotFound`, with up to
+/// [`CANDIDATE_CAP`] `did_you_mean` suggestions; more than one is
+/// `Ambiguous`, with up to [`CANDIDATE_CAP`] candidates.
 pub(crate) fn lookup(store: &Store, names: &Names, query: &str) -> Result<SymbolMatch, Failure> {
     find_one(store, names, query, false)
 }
@@ -143,27 +179,17 @@ fn find_one(
     let mut matches = store.symbols_matching(query)?;
     matches.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
     match matches.len() {
-        0 => Err(Failure::new(
-            ErrorKind::NotFound,
-            format!("no symbol named {query}"),
-        )),
+        0 => {
+            let did_you_mean = listed(store, names, suggestions(store, query)?, keyed)?;
+            Err(Failure::not_found(
+                format!("no symbol named {query}"),
+                DidYouMean { did_you_mean },
+            ))
+        }
         1 => Ok(matches.remove(0)),
         total => {
-            let mut candidates = Vec::new();
-            for found in matches.into_iter().take(CANDIDATE_CAP) {
-                let stable_key = if keyed {
-                    store
-                        .symbol_detail(found.id)?
-                        .map(|detail| detail.stable_key)
-                } else {
-                    None
-                };
-                candidates.push(SymbolOut {
-                    stable_key,
-                    ..symbol_out(names, found)
-                });
-            }
-            let listed: Vec<String> = candidates
+            let candidates = listed(store, names, matches, keyed)?;
+            let spelled: Vec<String> = candidates
                 .iter()
                 .map(|candidate| match candidate.line {
                     Some(line) => format!("{} ({}:{line})", candidate.name, candidate.path),
@@ -176,13 +202,49 @@ fn find_one(
             } else {
                 String::new()
             };
-            let message = format!("{total} symbols match {query}: {}{tail}", listed.join(", "));
+            let message = format!(
+                "{total} symbols match {query}: {}{tail}",
+                spelled.join(", ")
+            );
             Err(Failure::ambiguous(
                 message,
                 Candidates { candidates, total },
             ))
         }
     }
+}
+
+/// The first [`CANDIDATE_CAP`] of `found`, named, each with its stable
+/// key when `keyed`.
+fn listed(
+    store: &Store,
+    names: &Names,
+    found: Vec<SymbolMatch>,
+    keyed: bool,
+) -> Result<Vec<SymbolOut>, Failure> {
+    let mut out = Vec::new();
+    for found in found.into_iter().take(CANDIDATE_CAP) {
+        let stable_key = if keyed {
+            store
+                .symbol_detail(found.id)?
+                .map(|detail| detail.stable_key)
+        } else {
+            None
+        };
+        out.push(SymbolOut {
+            stable_key,
+            ..symbol_out(names, found)
+        });
+    }
+    Ok(out)
+}
+
+/// The store's suggestions for a missed `query`: symbols whose bare name
+/// is its last segment, by file and then line.
+fn suggestions(store: &Store, query: &str) -> Result<Vec<SymbolMatch>, Failure> {
+    let mut found = store.did_you_mean(query)?;
+    found.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
+    Ok(found)
 }
 
 pub(crate) fn symbol_out(names: &Names, found: SymbolMatch) -> SymbolOut {

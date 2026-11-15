@@ -7,7 +7,10 @@
 //! in the SPEC's drop order, one at a time, until the estimate fits, and
 //! `tokens` spliced in with `used` settled on the estimate of that very
 //! line. The estimate and the packing budget are computed here too, from
-//! their definitions, not from the analyze crate.
+//! their definitions, not from the analyze crate. The keys SPEC-w14 G1b
+//! adds to `callers`, `callees` and `impact` go first, as a whole: the
+//! reply is whole when it fits, and else is built as before from the
+//! reply with those keys cut out.
 
 use std::fs;
 use std::io::Write;
@@ -442,20 +445,69 @@ fn drops(op: &str, line: &str) -> Vec<(usize, usize)> {
     }
 }
 
+/// The member `key` of the object at `at`, with the comma before it. It
+/// is never the object's first member.
+fn key_span(raw: &[u8], at: usize, key: &str) -> Option<(usize, usize)> {
+    let fields = members(raw, at);
+    let index = fields.iter().position(|(name, _, _)| name == key)?;
+    assert!(index > 0, "{key} is the first member");
+    Some((fields[index - 1].2, fields[index].2))
+}
+
+/// The SPEC-w14 G1b keys of `op`'s reply, as byte ranges of `line`: each
+/// hit's `display`, and `data`'s `callers_distinct`, `files` and `sites`.
+fn extras(op: &str, line: &str) -> Vec<(usize, usize)> {
+    let raw = line.as_bytes();
+    let (data, _) = member(raw, 0, "data").expect("data");
+    let hits = |object: usize| {
+        member(raw, object, "hits").map_or_else(Vec::new, |(start, _)| elements(raw, start))
+    };
+    let objects = match op {
+        "callers" | "callees" => hits(data),
+        "impact" => {
+            let mut out = Vec::new();
+            if let Some((groups, _)) = member(raw, data, "groups") {
+                for (group, _) in elements(raw, groups) {
+                    out.extend(hits(group));
+                }
+            }
+            if let Some((tests, _)) = member(raw, data, "tests") {
+                out.extend(elements(raw, tests));
+            }
+            out
+        }
+        _ => return Vec::new(),
+    };
+    let mut out: Vec<(usize, usize)> = objects
+        .into_iter()
+        .filter_map(|(hit, _)| key_span(raw, hit, "display"))
+        .collect();
+    for key in ["callers_distinct", "files", "sites"] {
+        out.extend(key_span(raw, data, key));
+    }
+    out
+}
+
+/// `line` with the byte ranges `spans` cut out.
+fn cut(line: &str, spans: &[(usize, usize)]) -> String {
+    let mut spans = spans.to_vec();
+    spans.sort_unstable();
+    let mut kept = String::new();
+    let mut cursor = 0;
+    for (start, end) in spans {
+        kept.push_str(&line[cursor..start]);
+        cursor = end;
+    }
+    kept.push_str(&line[cursor..]);
+    kept
+}
+
 /// `line` with the first `count` drops cut out and `tokens` added at the
 /// end of `data`, with `used` settled on the estimate of the result.
 fn trimmed(line: &str, drops: &[(usize, usize)], count: usize, max: u64) -> String {
     let raw = line.as_bytes();
     let (_, data_end) = member(raw, 0, "data").expect("data");
-    let mut cut: Vec<(usize, usize)> = drops[..count].to_vec();
-    cut.sort_unstable();
-    let mut kept = String::new();
-    let mut cursor = 0;
-    for (start, end) in cut {
-        kept.push_str(&line[cursor..start]);
-        cursor = end;
-    }
-    kept.push_str(&line[cursor..data_end - 1]);
+    let kept = cut(&line[..data_end - 1], &drops[..count]);
     let mut used = 0;
     loop {
         let candidate = format!(
@@ -470,9 +522,23 @@ fn trimmed(line: &str, drops: &[(usize, usize)], count: usize, max: u64) -> Stri
     }
 }
 
-/// What a budgeted run must print: the reply after the fewest drops that
-/// fit, or none when nothing fits.
+/// What a budgeted run must print: the whole reply when it fits; else the
+/// reply without its SPEC-w14 keys after the fewest drops that fit, or
+/// none when nothing fits.
 fn expected(op: &str, line: &str, max: u64) -> Option<String> {
+    let extras = extras(op, line);
+    if extras.is_empty() {
+        return fewest(op, line, max);
+    }
+    let whole = trimmed(line, &[], 0, max);
+    if estimate(&whole) <= room(max) {
+        return Some(whole);
+    }
+    fewest(op, &cut(line, &extras), max)
+}
+
+/// The reply after the fewest drops that fit, or none when nothing fits.
+fn fewest(op: &str, line: &str, max: u64) -> Option<String> {
     let drops = drops(op, line);
     (0..=drops.len())
         .map(|count| trimmed(line, &drops, count, max))
