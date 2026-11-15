@@ -13,7 +13,7 @@ pub(crate) const INSTRUCTIONS: &str = "Phantom answers questions about a Rust tr
 - How X reaches Y: symbol_path, by name or stable key.
 - What a change to X reaches: impact. What the uncommitted change reaches: diff_impact, on a git root.
 - What matters most here: top_ranked; an overview that fits your context: repo_map with a budget in tokens.
-- What usually changes with a file: cochange. It is decay-weighted, lift-filtered and over indexed Rust files only; for raw commit counts use git.
+- What usually changes with a file: cochange. It is decay-weighted, lift-filtered and over indexed Rust files only; for raw commit counts over every tracked file use mode count, or git.
 - Names: a bare name such as parse, Type::method such as App::watch_dir, or a module path such as tui::app::App::watch_dir or app::watch_dir.
 - On ambiguous, pick a candidate and call show_symbol with its stable_key as id. On not_found, read did_you_mean.
 - A caller reached only through a re-export or a macro may be missing: confirm with one grep when completeness matters.
@@ -64,11 +64,16 @@ pub(crate) const REPO_MAP: &str = "Start here in an unfamiliar tree: a ranked ma
     listing directories and grepping for `pub fn`.";
 
 pub(crate) const COCHANGE: &str = "Which files tend to change with this file in recent history, \
-    from the git history `index` read on a git root: decay-weighted, lift-filtered, indexed Rust \
-    files only, not a raw commit count; for raw counts use git. It will not list docs, manifests \
-    or lock files. Each partner has its lift, the decayed weight of the commits they changed in \
-    together, the confidence that a change to `file` comes with one to it, and the last time \
-    they changed together. Without a scan, `scan` is null and there are no partners.";
+    from the git history `index` read on a git root. Use instead of `git log --name-only` and \
+    counting by hand. By default: decay-weighted, lift-filtered, indexed Rust files only, not a \
+    raw commit count; for raw counts use git, or `mode: count`. It will not list docs, \
+    manifests or lock files. Each partner has its lift, the decayed weight of the commits they \
+    changed in together (`together_decayed`, also as `together`), the confidence that a change \
+    to `file` comes with one to it, and the last time they changed together; `scope` says what \
+    the scores are over. With `mode: count`, `file` may be any file tracked at HEAD (one that is \
+    not, deleted or never added, is `not_found` and points to `git log`), and each partner is \
+    a tracked file with the number of kept commits it shared with `file`: no decay, no lift \
+    floor, merges left out, bulk commits skipped and counted. Without a scan, `scan` is null and there are no partners.";
 
 pub(crate) const DIFF_IMPACT: &str = "What does the uncommitted change reach. Use before committing \
     instead of grepping for the callers of each edited function: the work tree is compared with \

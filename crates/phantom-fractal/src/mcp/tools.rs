@@ -27,9 +27,9 @@ use crate::ops::cochange::{
 use crate::ops::map::{BUDGET_MAX, BUDGET_MIN};
 use crate::ops::rank::{DEFAULT_LIMIT, FOCUS_MAX, LIMIT_MAX, LIMIT_MIN, focus_cap};
 use crate::ops::{
-    self, CallsRequest, CochangeRequest, DiffRequest, Failure, FindRequest, ImpactRequest,
-    IndexRequest, MapRequest, PathRequest, RankKind, RankRequest, Reply, ShowRequest,
-    StatusRequest, Target,
+    self, CallsRequest, CochangeRequest, CountRequest, DiffRequest, Failure, FindRequest,
+    ImpactRequest, IndexRequest, MapRequest, PathRequest, RankKind, RankRequest, Reply,
+    ShowRequest, StatusRequest, Target,
 };
 
 /// One tool call's envelope line and whether it reports a failure.
@@ -231,12 +231,20 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
                         "description": "An indexed file, relative to the repo, such as \
                             `src/lib.rs`.",
                     },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["decayed", "count"],
+                        "default": "decayed",
+                        "description": "`decayed`: the stored, decay-weighted, lift-filtered \
+                            partners among indexed Rust files. `count`: for every tracked file, \
+                            the commits it shared with `file`, with no decay and no lift floor.",
+                    },
                     "min_lift": {
                         "type": "number",
                         "minimum": 0,
                         "maximum": MIN_LIFT_MAX,
                         "default": DEFAULT_MIN_LIFT,
-                        "description": "The lowest lift listed.",
+                        "description": "The lowest lift listed, in mode `decayed` only.",
                     },
                     "limit": {
                         "type": "integer",
@@ -428,7 +436,7 @@ pub(crate) fn call(
         "impact" => run(impact_request(arguments, roots), ops::impact),
         "top_ranked" => run(rank_request(arguments, roots), ops::rank),
         "repo_map" => run(map_request(arguments, roots), ops::map),
-        "cochange" => run(cochange_request(arguments, roots), ops::cochange),
+        "cochange" => cochange_call(arguments, roots),
         "diff_impact" => run(diff_request(arguments, roots), ops::impact_diff),
         "symbol_path" => run(path_request(arguments, roots), ops::symbol_path),
         "repo_status" => run(status_request(arguments, roots), ops::status),
@@ -555,15 +563,42 @@ fn map_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<MapReque
     })
 }
 
+/// `cochange` in its `mode`: the stored decayed partners, or the raw
+/// counts.
+fn cochange_call(arguments: &Map<String, Value>, roots: &Roots) -> Result<Outcome, ()> {
+    match cochange_request(arguments, roots) {
+        Ok((request, true)) => run(Ok(count_request(request)), ops::cochange_count),
+        other => run(other.map(|(request, _)| request), ops::cochange),
+    }
+}
+
+/// The same file, limit, tree and budget, for `mode: "count"`.
+fn count_request(request: CochangeRequest) -> CountRequest {
+    CountRequest {
+        file: request.file,
+        limit: request.limit,
+        repo: request.repo,
+        max_tokens: request.max_tokens,
+    }
+}
+
+/// The request, and whether `mode` is `count`. `min_lift` is for mode
+/// `decayed` only.
 fn cochange_request(
     arguments: &Map<String, Value>,
     roots: &Roots,
-) -> Result<CochangeRequest, Failure> {
+) -> Result<(CochangeRequest, bool), Failure> {
     let args = Args::new(
         arguments,
-        &["file", "min_lift", "limit", "repo", "max_tokens"],
+        &["file", "mode", "min_lift", "limit", "repo", "max_tokens"],
     )?;
     let file = args.read(args.required_string("file"));
+    let count = args
+        .read(args.choice("mode", count_mode, "mode must be decayed or count"))
+        .unwrap_or(false);
+    if count && arguments.contains_key("min_lift") {
+        args.read::<()>(Err(usage("min_lift is for mode decayed only")));
+    }
     let min_lift = args.read(args.min_lift()).unwrap_or(DEFAULT_MIN_LIFT);
     let limit = args
         .read(args.integer("limit", cochange::LIMIT_MIN, cochange::LIMIT_MAX))
@@ -571,13 +606,23 @@ fn cochange_request(
     let repo = args.read(args.string("repo"));
     let max_tokens = args.read(args.max_tokens());
     args.checked()?;
-    Ok(CochangeRequest {
+    let request = CochangeRequest {
         file,
         min_lift,
         limit,
         repo: roots.indexed(repo.as_deref())?,
         max_tokens,
-    })
+    };
+    Ok((request, count))
+}
+
+/// `mode`: true for `count`, false for `decayed`.
+fn count_mode(mode: &str) -> Option<bool> {
+    match mode {
+        "count" => Some(true),
+        "decayed" => Some(false),
+        _ => None,
+    }
 }
 
 fn diff_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<DiffRequest, Failure> {

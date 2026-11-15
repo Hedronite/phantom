@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use phantom_fractal_store::{FileRow, PairRow};
 
-use crate::history::{Change, DAY, History};
+use crate::history::{Change, Commit, DAY, History};
 use crate::{Scan, Window};
 
 /// A commit with more kept files than this is bulk: skipped and counted.
@@ -43,15 +43,22 @@ pub fn decay(age_days: f64) -> f64 {
 
 /// Historical names mapped to the file each is now. A name absent from
 /// the map is its own current name; `None` means no current file.
+/// Historical names mapped to the file each is now, kept across the
+/// walk: the same map the count mode reads (W14 G3a).
 #[derive(Default)]
-struct Aliases(BTreeMap<String, Option<String>>);
+pub(crate) struct Aliases(BTreeMap<String, Option<String>>);
 
 impl Aliases {
-    fn current(&self, path: &str) -> Option<String> {
+    /// The name a path has now, or its own name when it never moved.
+    pub(crate) fn current(&self, path: &str) -> Option<String> {
         match self.0.get(path) {
             Some(current) => current.clone(),
             None => Some(path.to_owned()),
         }
+    }
+    /// Records that a name now maps to another, or to nothing.
+    pub(crate) fn link(&mut self, from: String, to: Option<String>) {
+        self.0.insert(from, to);
     }
 }
 
@@ -68,6 +75,55 @@ struct PairTally {
     last: Option<(String, i64)>,
 }
 
+/// The current names one commit touches, updating the rename aliases,
+/// and the renames it carried, each as `(from, current)`: one walk for
+/// the decayed scan and the raw count mode alike.
+pub(crate) fn touched(
+    commit: &Commit,
+    aliases: &mut Aliases,
+) -> (BTreeSet<String>, Vec<(String, Option<String>)>) {
+    let mut touched = BTreeSet::new();
+    // Names that, before this commit, belonged to no current file, and
+    // renames that carry a current file to an older name.
+    let mut gone = Vec::new();
+    let mut carried = Vec::new();
+    for change in &commit.changes {
+        touch(change, aliases, &mut touched, &mut gone, &mut carried);
+    }
+    for path in gone {
+        aliases.0.insert(path, None);
+    }
+    for (from, current) in &carried {
+        aliases.0.insert(from.clone(), current.clone());
+    }
+    (touched, carried)
+}
+/// One change's paths, by their current names, and the alias bookkeeping
+/// it needs: the exhaustive `Change` dispatch.
+pub(crate) fn touch(
+    change: &Change,
+    aliases: &Aliases,
+    touched: &mut BTreeSet<String>,
+    gone: &mut Vec<String>,
+    carried: &mut Vec<(String, Option<String>)>,
+) {
+    match change {
+        Change::Modified(path) => touched.extend(aliases.current(path)),
+        Change::Added(path) => {
+            touched.extend(aliases.current(path));
+            gone.push(path.clone());
+        }
+        Change::Deleted(path) => gone.push(path.clone()),
+        Change::Renamed { from, to } => {
+            let current = aliases.current(to);
+            if let Some(current) = &current {
+                touched.insert(current.clone());
+            }
+            gone.push(to.clone());
+            carried.push((from.clone(), current));
+        }
+    }
+}
 /// The scan of `history`, counting only `indexed` paths.
 pub(crate) fn score(history: &History, window: &Window, indexed: &BTreeSet<String>) -> Scan {
     let mut aliases = Aliases::default();
@@ -78,40 +134,12 @@ pub(crate) fn score(history: &History, window: &Window, indexed: &BTreeSet<Strin
     let mut skipped_bulk = 0;
 
     for commit in &history.commits {
-        // The files this commit changed, by their current names.
-        let mut touched = BTreeSet::new();
-        // Names that, before this commit, belonged to no current file,
-        // and renames that carry a current file to an older name.
-        let mut gone = Vec::new();
-        let mut carried = Vec::new();
-        for change in &commit.changes {
-            match change {
-                Change::Modified(path) => touched.extend(aliases.current(path)),
-                Change::Added(path) => {
-                    touched.extend(aliases.current(path));
-                    gone.push(path.clone());
-                }
-                Change::Deleted(path) => gone.push(path.clone()),
-                Change::Renamed { from, to } => {
-                    let current = aliases.current(to);
-                    if let Some(current) = &current {
-                        touched.insert(current.clone());
-                        renamed_from
-                            .entry(current.clone())
-                            .or_insert_with(|| from.clone());
-                    }
-                    gone.push(to.clone());
-                    carried.push((from.clone(), current));
-                }
+        let (touched, carried) = touched(commit, &mut aliases);
+        for (from, current) in carried {
+            if let Some(current) = current {
+                renamed_from.entry(current).or_insert(from);
             }
         }
-        for path in gone {
-            aliases.0.insert(path, None);
-        }
-        for (from, current) in carried {
-            aliases.0.insert(from, current);
-        }
-
         if commit.merge {
             continue;
         }

@@ -329,9 +329,10 @@ fn cochange_lists_partners_as_the_store_orders_them() {
     let (code, line) = world.line(&["cochange", "./src/a.rs"]);
     assert_eq!(code, Some(0), "{line}");
     let data_at = value_at(&line, "data", 0);
+    // `scope` follows the old keys (SPEC-w14 G3b).
     assert_eq!(
         raw_keys(&line, data_at),
-        ["file", "scan", "partners", "truncated"]
+        ["file", "scan", "partners", "truncated", "scope"]
     );
     let data = &serde_json::from_str::<Value>(&line).expect("cochange")["data"];
     assert_eq!(data["file"], "src/a.rs");
@@ -345,12 +346,15 @@ fn cochange_lists_partners_as_the_store_orders_them() {
             .expect("cochange_of")
             .into_iter()
             .map(|partner| {
+                // `together_decayed` is the store's `together` again,
+                // after the old keys (SPEC-w14 G3b).
                 json!({
                     "path": partner.path,
                     "together": partner.together,
                     "lift": partner.lift,
                     "conf": partner.conf_of,
                     "last_time": partner.last_time,
+                    "together_decayed": partner.together,
                 })
             })
             .collect()
@@ -362,7 +366,14 @@ fn cochange_lists_partners_as_the_store_orders_them() {
     let partner_at = value_at(&line, "partners", data_at) + 1;
     assert_eq!(
         raw_keys(&line, partner_at),
-        ["path", "together", "lift", "conf", "last_time"]
+        [
+            "path",
+            "together",
+            "lift",
+            "conf",
+            "last_time",
+            "together_decayed"
+        ]
     );
     // The limit cuts the list and says so; a lower floor lets more in.
     let count = partners.len().to_string();
@@ -421,7 +432,8 @@ fn cochange_exits_are_usage_no_index_and_not_found() {
     let line = String::from_utf8(output.stdout).expect("utf-8");
     assert_eq!(
         line,
-        "{\"ok\":true,\"data\":{\"file\":\"app/src/dup.rs\",\"scan\":null,\"partners\":[],\"truncated\":false},\
+        "{\"ok\":true,\"data\":{\"file\":\"app/src/dup.rs\",\"scan\":null,\"partners\":[],\"truncated\":false,\
+         \"scope\":{\"files\":\"indexed .rs\",\"weighting\":\"decay 90d\",\"min_commits\":3,\"bulk_skip\":30}},\
          \"meta\":{\"stale\":false,\"head\":null,\"index_head\":null,\"rank_epoch\":1},\"error\":null,\"schema\":1}\n"
     );
 }
@@ -444,7 +456,15 @@ fn show_lists_cochange_only_with_a_scan() {
         ]
     );
     let shown = &serde_json::from_str::<Value>(&line).expect("show")["data"]["cochange"];
-    let listed = world.data(&["cochange", "src/a.rs", "--limit", "5"]);
+    let mut listed = world.data(&["cochange", "src/a.rs", "--limit", "5"]);
+    // `together_decayed` is the one key `cochange` adds; `show` keeps the
+    // old partner shape.
+    for partner in listed["partners"].as_array_mut().expect("partners") {
+        partner
+            .as_object_mut()
+            .expect("partner")
+            .remove("together_decayed");
+    }
     assert_eq!(*shown, listed["partners"]);
     assert!(!shown.as_array().expect("partners").is_empty());
     let source = world.data(&["show", "fa", "--source"]);
@@ -466,10 +486,14 @@ fn show_lists_cochange_only_with_a_scan() {
     let listed = spokes.data(&["cochange", "src/hub.rs"]);
     assert_eq!(listed["partners"].as_array().expect("partners").len(), 8);
     let shown = spokes.data(&["show", "fhub"]);
-    assert_eq!(
-        shown["cochange"],
-        spokes.data(&["cochange", "src/hub.rs", "--limit", "5"])["partners"]
-    );
+    let mut first = spokes.data(&["cochange", "src/hub.rs", "--limit", "5"])["partners"].clone();
+    for partner in first.as_array_mut().expect("partners") {
+        partner
+            .as_object_mut()
+            .expect("partner")
+            .remove("together_decayed");
+    }
+    assert_eq!(shown["cochange"], first);
     // No scan, no key.
     let tree = TempDir::new("fixture");
     copy_tree(&Path::new(FIXTURES).join("impact"), tree.path());

@@ -313,6 +313,9 @@ fn usage_errors_are_envelopes_and_run_nothing() {
         &["diff-impact", "x"],
         &["path", "entry"],
         &["cochange"],
+        &["cochange", "--count", "--rust", "src/a.rs"],
+        &["cochange", "--min-lift", "1", "src/a.rs"],
+        &["cochange", "--count", "--min-lift=1", "src/a.rs"],
         &["map", "--budget", "big"],
         &["rank", "extra"],
         &["status", "--help"],
@@ -406,24 +409,139 @@ fn the_other_reads_reshape_and_write_nothing() {
     assert_eq!(support::database(&fx.data()), db, "a read wrote the index");
 }
 
-#[test]
-fn cochange_keeps_its_scope_note() {
-    let Some(nu) = nu() else { return };
+/// A git history (`support::history`) indexed, and the skill run in its root.
+fn history_fixture(nu: PathBuf) -> (Fixture, support::Repo) {
     let fx = Fixture::empty(nu, "skill-nu-git");
     let repo = support::Repo::new("skill-nu", &support::history());
     fx.index(&repo.root);
+    (fx, repo)
+}
+
+fn partner_paths(data: &Value) -> Vec<&str> {
+    data["partners"]
+        .as_array()
+        .expect("partners")
+        .iter()
+        .map(|p| p["path"].as_str().expect("path"))
+        .collect()
+}
+
+#[test]
+fn cochange_counts_every_tracked_file_by_default() {
+    let Some(nu) = nu() else { return };
+    let (fx, repo) = history_fixture(nu);
+    let (tree, db) = (support::snapshot(&repo.root), support::database(&fx.data()));
     let (code, envelope) = fx.run_with(&Bin::OnPath, &repo.root, &["cochange", "src/a.rs"]);
     assert_eq!(code, 0, "{envelope}");
     let data = &envelope["data"];
+    assert_eq!(data["mode"], "count", "{data}");
+    assert_eq!(
+        (&data["scope"]["files"], &data["scope"]["weighting"]),
+        (&json!("tracked"), &json!("none"))
+    );
     assert!(
-        data["scope"]
+        data["note"].as_str().expect("note").contains("no decay"),
+        "{data}"
+    );
+    // The first commit adds every file; then a shares 5 with b, 4 with c, 3 with g.
+    let partners = data["partners"].as_array().expect("partners");
+    assert_eq!(
+        partners[0],
+        json!({"path": "src/b.rs", "count": 6}),
+        "{data}"
+    );
+    assert_eq!(
+        partners[1],
+        json!({"path": "src/c.rs", "count": 5}),
+        "{data}"
+    );
+    assert_eq!(
+        partners[2],
+        json!({"path": "src/g.rs", "count": 4}),
+        "{data}"
+    );
+    assert!(
+        partner_paths(data).contains(&"Cargo.toml"),
+        "a tracked non-Rust file: {data}"
+    );
+    for partner in partners {
+        assert_eq!(
+            partner.as_object().expect("row").len(),
+            2,
+            "path and count only: {partner}"
+        );
+    }
+
+    let (code, explicit) = fx.run_with(
+        &Bin::OnPath,
+        &repo.root,
+        &["cochange", "--count", "src/a.rs"],
+    );
+    assert_eq!(
+        (code, &explicit["data"]),
+        (0, data),
+        "--count is the default"
+    );
+
+    let (code, manifest) = fx.run_with(&Bin::OnPath, &repo.root, &["cochange", "Cargo.toml"]);
+    assert_eq!(code, 0, "{manifest}");
+    assert!(
+        partner_paths(&manifest["data"]).contains(&"src/a.rs"),
+        "{manifest}"
+    );
+
+    let (code, one) = fx.run_with(
+        &Bin::OnPath,
+        &repo.root,
+        &["cochange", "--limit", "1", "src/a.rs"],
+    );
+    assert_eq!(
+        (code, partner_paths(&one["data"])),
+        (0, vec!["src/b.rs"]),
+        "{one}"
+    );
+    assert_eq!(one["data"]["truncated"], true, "{one}");
+
+    assert_eq!(
+        support::snapshot(&repo.root),
+        tree,
+        "cochange wrote the tree"
+    );
+    assert_eq!(
+        support::database(&fx.data()),
+        db,
+        "cochange wrote the index"
+    );
+}
+
+#[test]
+fn cochange_rust_is_the_labelled_decayed_mode() {
+    let Some(nu) = nu() else { return };
+    let (fx, repo) = history_fixture(nu);
+    let (tree, db) = (support::snapshot(&repo.root), support::database(&fx.data()));
+    let (code, envelope) = fx.run_with(
+        &Bin::OnPath,
+        &repo.root,
+        &["cochange", "--rust", "src/a.rs"],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    let data = &envelope["data"];
+    assert_eq!(data["mode"], "rust", "{data}");
+    assert_eq!(data["scope"]["files"], "indexed .rs", "{data}");
+    assert!(
+        data["note"]
             .as_str()
-            .expect("scope")
-            .contains("not a raw commit count")
+            .expect("note")
+            .contains("not a commit count"),
+        "{data}"
     );
     let partners = data["partners"].as_array().expect("partners");
     assert!(!partners.is_empty(), "{data}");
     for partner in partners {
+        assert!(
+            partner["path"].as_str().is_some_and(|p| p.ends_with(".rs")),
+            "{partner}"
+        );
         assert!(partner["together_decayed"].as_f64().is_some(), "{partner}");
         assert!(partner["lift"].as_f64().is_some(), "{partner}");
         assert!(
@@ -433,13 +551,40 @@ fn cochange_keeps_its_scope_note() {
             "{partner}"
         );
     }
-    let (code, envelope) = fx.run_with(&Bin::OnPath, &repo.root, &["cochange", "README.md"]);
+    let (code, lifted) = fx.run_with(
+        &Bin::OnPath,
+        &repo.root,
+        &["cochange", "--rust", "--min-lift", "0", "src/a.rs"],
+    );
+    assert_eq!(code, 0, "{lifted}");
+
+    let (code, envelope) = fx.run_with(
+        &Bin::OnPath,
+        &repo.root,
+        &["cochange", "--rust", "Cargo.toml"],
+    );
     assert_eq!(
         (code, envelope["kind"].as_str()),
         (3, Some("not_found")),
         "{envelope}"
     );
-    assert!(envelope["scope"].as_str().is_some(), "{envelope}");
+    assert!(
+        envelope["note"]
+            .as_str()
+            .is_some_and(|n| n.contains("drop --rust")),
+        "{envelope}"
+    );
+
+    assert_eq!(
+        support::snapshot(&repo.root),
+        tree,
+        "cochange --rust wrote the tree"
+    );
+    assert_eq!(
+        support::database(&fx.data()),
+        db,
+        "cochange --rust wrote the index"
+    );
 }
 
 #[test]

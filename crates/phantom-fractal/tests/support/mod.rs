@@ -80,6 +80,26 @@ impl Script {
     }
 
     pub fn commit(&mut self, time: i64, files: &[(&str, String)]) {
+        self.header(time);
+        let text = &mut self.text;
+        for (path, body) in files {
+            let _ = writeln!(text, "M 100644 inline {path}");
+            let _ = writeln!(text, "data {}\n{body}", body.len());
+        }
+    }
+}
+
+impl Script {
+    /// A commit at `time` that deletes `paths`.
+    pub fn delete(&mut self, time: i64, paths: &[&str]) {
+        self.header(time);
+        for path in paths {
+            let _ = writeln!(self.text, "D {path}");
+        }
+    }
+
+    /// The lines that open the next commit on `main`.
+    fn header(&mut self, time: i64) {
         self.marks += 1;
         let text = &mut self.text;
         let _ = writeln!(text, "commit refs/heads/main");
@@ -88,10 +108,6 @@ impl Script {
         let _ = writeln!(text, "data 7\nmessage");
         if self.continues && self.marks == 1 {
             let _ = writeln!(text, "from refs/heads/main^0");
-        }
-        for (path, body) in files {
-            let _ = writeln!(text, "M 100644 inline {path}");
-            let _ = writeln!(text, "data {}\n{body}", body.len());
         }
     }
 }

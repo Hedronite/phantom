@@ -11,6 +11,7 @@ mod agents;
 pub(crate) mod budget;
 pub(crate) mod calls;
 pub(crate) mod cochange;
+pub(crate) mod count;
 pub(crate) mod diff;
 mod distinct;
 pub(crate) mod doctor;
@@ -37,6 +38,7 @@ use serde::Serialize;
 
 pub(crate) use calls::{CallsRequest, callees, callers};
 pub(crate) use cochange::{CochangeRequest, cochange};
+pub(crate) use count::{CountRequest, cochange_count};
 pub(crate) use diff::{DiffRequest, impact_diff};
 pub(crate) use doctor::{DoctorRequest, doctor};
 pub(crate) use find::{FindRequest, find};

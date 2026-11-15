@@ -287,7 +287,7 @@ fn bad_cochange_arguments_are_usage() {
         ),
         (
             json!({ "file": "src/a.rs", "symbol": "a" }),
-            "unknown argument; this tool takes file, min_lift, limit, repo, max_tokens",
+            "unknown argument; this tool takes file, mode, min_lift, limit, repo, max_tokens",
         ),
         (
             json!({ "file": "src/a.rs", "min_lift": -1, "repo": "missing" }),

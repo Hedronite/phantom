@@ -492,18 +492,21 @@ On a git root, `index`'s `data` ends with `cochange: {head, commits_seen, skippe
 
 ### `cochange`
 
-`cochange FILE [--min-lift X] [--limit N] [--repo PATH] [--max-tokens N]` lists FILE's partners.
+`cochange FILE [--min-lift X] [--limit N] [--repo PATH] [--max-tokens N]` lists FILE's partners from the stored scan. `cochange FILE --count` gives raw counts instead, as [below](#cochange---count) describes.
 
 - **Arguments.** FILE is an indexed file, relative to the indexed tree; a leading `./` is allowed. `--min-lift` is a number from 0 to 1000, 1.5 by default. `--limit` is 1 to 100, 20 by default.
-- **Errors.** Any other value is usage, exit 1. A FILE that is not indexed is `not_found`, exit 3, and no index is `no_index`, exit 2.
+- **Errors.** Any other value is usage, exit 1. No index is `no_index`, exit 2. A FILE that is not indexed, such as a `README.md`, a `Cargo.toml` or a file deleted since, is `not_found`, exit 3, with the message `file is not indexed at HEAD: co-change is kept only for indexed Rust files; give a path relative to the repo, or for raw counts over every tracked file use cochange --count or git log`. The message never holds the path.
 - **It never writes.** The same index and arguments always give the same bytes.
 
 `data` holds these keys, in this order:
 
 - `file`: FILE as indexed.
 - `scan`: `{head, window: {days, max_commits}}` of the stored scan, or `null` when there is none. Then there are no partners.
-- `partners`: those with a lift of at least `--min-lift`, by lift, then `together`, both descending, then path. Each is `{path, together, lift, conf, last_time}`, where `last_time` is the last time the two changed together, in unix seconds.
+- `partners`: those with a lift of at least `--min-lift`, by lift, then `together`, both descending, then path. Each is `{path, together, lift, conf, last_time, together_decayed}`. `last_time` is the last time the two changed together, in unix seconds. `together_decayed` is `together` again, the decayed weight under a name that says it is not a count, and `together` stays as its alias.
 - `truncated`: true when more partners passed `--min-lift` than `partners` holds.
+- `scope`: what the scores are over, `{"files":"indexed .rs","weighting":"decay 90d","min_commits":3,"bulk_skip":30}`: indexed Rust files only, each commit weighted by a 90-day half-life decay, a partner needing at least 3 shared commits, and a commit that changes more than 30 such files skipped as bulk. These are not raw commit counts.
+
+`scope` and `together_decayed` came after the old keys. Under `--max-tokens` they go first, as a whole, before any partner, and the reply is then cut as it was before they existed. `show` lists its file's partners in the old shape, without `together_decayed`.
 
 Take a package of seven files, `src/a.rs` to `src/g.rs`, with this history:
 
@@ -515,10 +518,38 @@ Take a package of seven files, `src/a.rs` to `src/g.rs`, with this history:
 The first commit is 60 days before HEAD, and the other 22 follow one a day, the last of them HEAD. After `fract index .`, `fract cochange src/a.rs` prints:
 
 ```
-{"ok":true,"data":{"file":"src/a.rs","scan":{"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","window":{"days":365,"max_commits":5000}},"partners":[{"path":"src/b.rs","together":4.409608831523686,"lift":1.653768852502879,"conf":0.390804271509921,"last_time":1748531200},{"path":"src/c.rs","together":3.6674710638456927,"lift":1.6180491217030488,"conf":0.3250318593213367,"last_time":1748876800},{"path":"src/g.rs","together":2.8463629132931247,"lift":1.5602843906097092,"conf":0.2522606487972789,"last_time":1749136000}],"truncated":false},"meta":{"stale":false,"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","rank_epoch":1},"error":null,"schema":1}
+{"ok":true,"data":{"file":"src/a.rs","scan":{"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","window":{"days":365,"max_commits":5000}},"partners":[{"path":"src/b.rs","together":4.409608831523686,"lift":1.653768852502879,"conf":0.390804271509921,"last_time":1748531200,"together_decayed":4.409608831523686},{"path":"src/c.rs","together":3.6674710638456927,"lift":1.6180491217030488,"conf":0.3250318593213367,"last_time":1748876800,"together_decayed":3.6674710638456927},{"path":"src/g.rs","together":2.8463629132931247,"lift":1.5602843906097092,"conf":0.2522606487972789,"last_time":1749136000,"together_decayed":2.8463629132931247}],"truncated":false,"scope":{"files":"indexed .rs","weighting":"decay 90d","min_commits":3,"bulk_skip":30}},"meta":{"stale":false,"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","rank_epoch":1},"error":null,"schema":1}
 ```
 
 `a`'s partners have lifts near 1.6, so they are listed but none reaches the map's threshold of 2. `d` and `e` only ever change with each other, so the map's line for `src/d.rs` ends `  also-changes: e.rs`.
+
+### `cochange --count`
+
+`cochange FILE --count [--limit N] [--repo PATH] [--max-tokens N]` counts, for every other tracked file, the commits it shared with FILE, the way `git log --name-only` would show them:
+
+- **What counts.** Every tracked file, not only indexed Rust: a `Cargo.toml`, a `README.md` or a lock file is a partner like any other. FILE may be any file tracked at HEAD, indexed or not.
+- **Weights and floors.** One per kept commit, with no decay and no lift floor, so a single shared commit lists a partner.
+- **Which commits.** The ones the stored scan's window reads: the same days and commit cap, back from HEAD now. Merge commits add nothing. A commit that changes more than 30 tracked files is skipped as bulk and counted in `skipped_bulk`. A renamed file's older changes count under its current path.
+- **When it is computed.** At query time, from the history read in process. Nothing is stored and nothing is written, and the index stays as it is. Without a stored scan, or on a tree that is not a git root, `scan` is `null` and there are no partners.
+- **A file not tracked at HEAD.** A FILE that no tree at HEAD holds, deleted or never added, is `not_found`, exit 3, never an empty list. The message is `file is not tracked at HEAD, so it has no co-change count; for its history use git log -- FILE`. It names FILE as given, without a leading `./`, when that is a relative path, and as `FILE` when it is absolute, so no absolute path is printed.
+- **Arguments.** `--limit` and `--max-tokens` are as above, and partners are dropped from the end to fit. `--min-lift` has no meaning here, and `--count --min-lift` is usage, exit 1.
+
+`data` holds these keys, in this order:
+
+- `file`: FILE, without a leading `./`.
+- `mode`: `count`.
+- `scan`: `{head, window: {days, max_commits}, commits_seen, skipped_bulk}`. `head` is HEAD at the read, and `commits_seen` counts every commit the window walked, merges included.
+- `scope`: `{"files":"tracked","weighting":"none","min_commits":1,"bulk_skip":30}`.
+- `partners`: `{path, count}`, by count descending, then path.
+- `truncated`: true when more files shared a commit than `partners` holds.
+
+On the same history, `fract cochange src/a.rs --count` prints:
+
+```
+{"ok":true,"data":{"file":"src/a.rs","mode":"count","scan":{"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","window":{"days":365,"max_commits":5000},"commits_seen":23,"skipped_bulk":0},"scope":{"files":"tracked","weighting":"none","min_commits":1,"bulk_skip":30},"partners":[{"path":"src/b.rs","count":6},{"path":"src/c.rs","count":5},{"path":"src/g.rs","count":4},{"path":"Cargo.toml","count":1},{"path":"src/d.rs","count":1},{"path":"src/e.rs","count":1},{"path":"src/f.rs","count":1},{"path":"src/lib.rs","count":1}],"truncated":false},"meta":{"stale":false,"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","rank_epoch":1},"error":null,"schema":1}
+```
+
+`src/b.rs` shared six commits with `a`, the five pairs and the first commit, and every file the first commit added shared that one.
 
 ## Freshness
 
@@ -687,7 +718,7 @@ The server is read-only by default. It offers these tools:
 | `impact` | `symbol`, `repo?`, `depth?` (1 to 5, default 3), `min_confidence?` (above 0 and at most 1, default 0.2), `include_tests?` (default true), `summary?` (default false), `max_tokens?` | `impact` |
 | `top_ranked` | `kind?` (`symbols` or `files`, default `symbols`), `focus?` (an array of at most 100 paths), `limit?` (1 to 100, default 20), `repo?`, `max_tokens?` | `rank` |
 | `repo_map` | `budget` (1 to 100000), `focus?` (an array of at most 100 paths), `detail?` (`files`, `symbols`, or `full`, default `symbols`), `repo?` | `map` |
-| `cochange` | `file`, `min_lift?` (0 to 1000, default 1.5), `limit?` (1 to 100, default 20), `repo?`, `max_tokens?` | `cochange` |
+| `cochange` | `file`, `mode?` (`decayed` or `count`, default `decayed`), `min_lift?` (0 to 1000, default 1.5; `decayed` only), `limit?` (1 to 100, default 20), `repo?`, `max_tokens?` | `cochange`, or with `mode: "count"` `cochange --count` |
 | `diff_impact` | `against?` (a branch, a tag, or a commit id of at least 7 hex digits), `depth?`, `min_confidence?` and `include_tests?` as for `impact`, `summary_only?` (default false), `max_tokens?`, `repo?` | `impact --diff`, or `--against` |
 | `symbol_path` | `from`, `to`, `max_depth?` (1 to 20, default 10), `max_tokens?`, `repo?` | `path` |
 | `repo_status` | `repo?` | `status` |
@@ -697,7 +728,7 @@ The server is read-only by default. It offers these tools:
 - **`index_repo`:** `phantom-fractal mcp --allow-index` adds it, and only then is it listed or callable. It indexes only a root (see [Roots](#roots)), and writes the database in the data directory, as `index` does, and nothing else.
 - **Annotations:** the read tools are annotated `readOnlyHint: true` and `idempotentHint: true`. `index_repo` is annotated `readOnlyHint: false` and `destructiveHint: false`.
 - **Input schemas:** each tool's `inputSchema` sets `additionalProperties: false` and the ranges above. `max_tokens` is an integer from 1 to 100000, and `focus` declares `maxItems: 100`; 101 or more is a `usage` result.
-- **String bounds:** every string argument declares `maxLength`, counted in Unicode characters and checked before the index is read: `against` 256; `file`, `repo`, `path` and each `focus` entry 4096; `query`, `symbol`, `id`, `from`, `to`, `kind` and `detail` 1024. A longer one is a `usage` result, `NAME is longer than N characters`, that never repeats the value.
+- **String bounds:** every string argument declares `maxLength`, counted in Unicode characters and checked before the index is read: `against` 256; `file`, `repo`, `path` and each `focus` entry 4096; `query`, `symbol`, `id`, `from`, `to`, `kind`, `detail` and `mode` 1024. A longer one is a `usage` result, `NAME is longer than N characters`, that never repeats the value.
 - **`repo`:** see [Roots](#roots).
 - **Results:** a `tools/call` result has three parts:
   - `structuredContent` is the exact envelope the command line prints for the same operation and arguments on the same index, `meta` included;

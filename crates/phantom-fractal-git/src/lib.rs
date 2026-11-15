@@ -19,6 +19,7 @@
 #![forbid(unsafe_code)]
 
 mod changes;
+mod count;
 mod history;
 mod rename;
 mod score;
@@ -29,6 +30,7 @@ use std::fmt;
 use std::path::Path;
 
 pub use changes::{Base, Changed, Changes, ChangesError, FileChange, MIN_OID_HEX, changes};
+pub use count::{CountPartner, CountScan};
 pub use phantom_fractal_store::CochangeScan as Scan;
 pub use rename::{MIN_SIMILARITY_PERCENT, similarity};
 pub use score::{BULK_FILES, HALF_LIFE_DAYS, MIN_TOGETHER, TOP_PARTNERS, decay};
@@ -79,19 +81,32 @@ impl Default for Window {
     }
 }
 
-/// A repository that opened as a root but could not be read.
+/// What a git read answered: a failure, or (A8) a path that is not
+/// tracked at HEAD.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GitError(String);
+pub enum GitError {
+    /// A repository that opened as a root but could not be read.
+    Read(String),
+    /// The asked path is an entry of no tree at HEAD, so it has no
+    /// partners to count; the caller answers not_found and points at git.
+    NotTracked { path: String, head: String },
+}
 
 impl GitError {
     pub(crate) fn new(err: impl fmt::Display) -> Self {
-        Self(err.to_string())
+        Self::Read(err.to_string())
     }
 }
 
 impl fmt::Display for GitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "git history could not be read: {}", self.0)
+        match self {
+            Self::Read(err) => write!(f, "git history could not be read: {err}"),
+            Self::NotTracked { path, head } => write!(
+                f,
+                "{path} is not tracked at HEAD ({head}); use git log for its history"
+            ),
+        }
     }
 }
 
@@ -106,6 +121,35 @@ pub fn head(root: &Path) -> Result<Option<String>, GitError> {
     Ok(history::open(root)?.map(|(_, head)| head.to_string()))
 }
 
+/// The raw co-change counts of `path` at `root` over `window`: every other
+/// tracked path with the kept non-merge commits it shares, no decay, no
+/// lift floor, bulk commits skipped and counted, sorted by count then
+/// path. Computed at query time with the same in-process history walk
+/// [`mine`] uses; nothing is stored and nothing is written.
+///
+/// A8: a `path` that is not tracked at HEAD answers
+/// [`GitError::NotTracked`] with HEAD's id, never an empty partner list,
+/// so a caller can say so and point at git. `Ok(None)` in exactly the
+/// cases [`mine`] answers `None`.
+pub fn cochange_counts(
+    root: &Path,
+    window: &Window,
+    path: &str,
+) -> Result<Option<CountScan>, GitError> {
+    let Some(history) = history::read(root, window)? else {
+        return Ok(None);
+    };
+    let Some(tracked) = history::tracks(root, path)? else {
+        return Ok(None);
+    };
+    if !tracked {
+        return Err(GitError::NotTracked {
+            path: path.to_owned(),
+            head: history.head.clone(),
+        });
+    }
+    Ok(Some(count::count(&history, path)))
+}
 /// The co-change scan of `root`, counting only paths in `indexed_paths`
 /// (root-relative, `/`-separated, as the store keeps them).
 ///
