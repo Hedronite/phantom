@@ -135,6 +135,12 @@ fn find_row(row: &rusqlite::Row<'_>, id: i64) -> Result<FindRow, StoreError> {
         line: row.get(5)?,
     })
 }
+/// True when the first segment of a `display` spelling names a file: it
+/// carries a directory separator or a dot, so `src/tui/app.rs` and
+/// `build.rs` qualify while `std`, `crate` and `crate::util` do not.
+fn is_file_path(segment: &str) -> bool {
+    segment.contains('/') || segment.contains('.')
+}
 pub(crate) fn reason_from_text(reason: &str) -> Result<Reason, StoreError> {
     match reason {
         "path-exact" => Ok(Reason::PathExact),
@@ -701,14 +707,21 @@ impl crate::Store {
     /// name, with or without `crate::`. When those answer nothing, a
     /// method is tried as `<module>::<name>` from any `::` boundary of its
     /// file module path, so `app::watch_dir` resolves while every query
-    /// the exact forms answer keeps exactly its rows. `query` is bound,
-    /// never spliced.
+    /// the exact forms answer keeps exactly its rows. When the module
+    /// forms answer nothing too, the `display` spelling is tried: the
+    /// file, then the in-file `qual_name` or the bare name, as in
+    /// `src/tui/app.rs::App::start_watcher`. `query` is bound, never
+    /// spliced.
     pub fn symbols_matching(&self, query: &str) -> Result<Vec<SymbolMatch>, StoreError> {
         let exact = self.symbols_matching_exact(query)?;
         if !exact.is_empty() {
             return Ok(exact);
         }
-        self.symbols_matching_method(query)
+        let method = self.symbols_matching_method(query)?;
+        if !method.is_empty() {
+            return Ok(method);
+        }
+        self.symbols_matching_display(query)
     }
     /// The spellings the base answers: the bare name, the in-file
     /// qualified name, and the file module path joined to it, `crate::`
@@ -773,6 +786,34 @@ impl crate::Store {
              ORDER BY s.qual_name, f.path, s.id",
         )?;
         let queried = statement.query([module, name]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
+        collect_rows(&mut rows, |row| {
+            symbol_match_row(row, row.get::<_, i64>(0)?)
+        })
+    }
+    /// A symbol addressed by its `display` spelling: a repo-relative file
+    /// path, then the in-file `qual_name` (scope, owner and name) or the
+    /// bare name. The caller runs this only when every other form answers
+    /// nothing, so a query the base answers keeps exactly its rows.
+    fn symbols_matching_display(&self, query: &str) -> Result<Vec<SymbolMatch>, StoreError> {
+        let Some((file, name)) = query.split_once("::") else {
+            return Ok(Vec::new());
+        };
+        let file = file.strip_prefix("./").unwrap_or(file);
+        if name.is_empty() || !is_file_path(file) {
+            return Ok(Vec::new());
+        }
+        let mut statement = self.conn.prepare(
+            "SELECT s.id, s.kind, COALESCE(m.path, ''), s.qual_name, f.path, s.start_line
+             FROM symbols s
+             JOIN files f ON f.id = s.file_id
+             LEFT JOIN modules m ON m.id = s.module_id
+             WHERE f.path = ?1 AND (s.qual_name = ?2 OR s.name = ?2)
+             ORDER BY s.qual_name, f.path, s.id",
+        )?;
+        let queried = statement.query([file, name]);
         #[cfg(test)]
         let queried = crate::fault::tick(queried);
         let mut rows = queried?;

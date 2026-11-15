@@ -170,3 +170,124 @@ fn a_free_fn_keeps_the_module_spelling_from_a_same_file_method() {
     assert_eq!(method.len(), 1, "{method:?}");
     assert_eq!(method[0].kind, "method");
 }
+#[test]
+fn the_display_spelling_names_the_row_it_spells() {
+    let db = TempDb::new("displayspell");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = language();
+    // One `run` per file: the bare name lists three, the display spelling
+    // names the ones in the file it gives.
+    put(
+        &mut store,
+        &language,
+        "src/app.rs",
+        "pub struct App;\n\nimpl App {\n    pub fn run(&self) {}\n}\n",
+    );
+    put(
+        &mut store,
+        &language,
+        "src/other.rs",
+        "pub fn run() {}\n\npub struct Other;\n\nimpl Other {\n    pub fn run(&self) {}\n}\n",
+    );
+    write_modules(
+        &mut store,
+        &[
+            ("crate::app", "src/app.rs"),
+            ("crate::other", "src/other.rs"),
+        ],
+    );
+    // The display spelling names one method, with its file and its line.
+    let named = store
+        .symbols_matching("src/app.rs::App::run")
+        .expect("display method");
+    assert_eq!(named.len(), 1, "{named:?}");
+    assert_eq!(named[0].kind, "method");
+    assert_eq!(named[0].qual_name, "App::run");
+    assert_eq!(named[0].file, "src/app.rs");
+    assert!(named[0].line.is_some());
+    // The bare name inside a two-symbol file answers both rows, each with
+    // its path: the free fn and the method.
+    let both = store
+        .symbols_matching("src/other.rs::run")
+        .expect("display name");
+    assert_eq!(both.len(), 2, "{both:?}");
+    let kinds: Vec<&str> = both.iter().map(|hit| hit.kind.as_str()).collect();
+    assert_eq!(kinds, ["method", "function"], "{both:?}");
+    assert!(both.iter().all(|hit| hit.file == "src/other.rs"));
+    // A leading `./` and a file outside the tree answer as spelled.
+    assert_eq!(
+        store
+            .symbols_matching("./src/app.rs::App::run")
+            .expect("dot slash")
+            .len(),
+        1
+    );
+    assert!(
+        store
+            .symbols_matching("src/nope.rs::run")
+            .expect("no file")
+            .is_empty()
+    );
+    // The forms the base answers keep exactly their rows: the bare name,
+    // the type spelling, and a module path whose first segment is no file.
+    assert_eq!(store.symbols_matching("run").expect("bare").len(), 3);
+    let typed = store.symbols_matching("App::run").expect("type");
+    assert_eq!(typed.len(), 1, "{typed:?}");
+    assert_eq!(typed[0].file, "src/app.rs");
+    assert!(
+        store
+            .symbols_matching("std::vec::Vec")
+            .expect("std")
+            .is_empty()
+    );
+}
+#[test]
+fn a_display_spelling_takes_the_inline_scope_and_the_shared_file() {
+    let db = TempDb::new("displayscope");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = language();
+    // Two files with one `tests::check` apiece: the in-file scope spelling
+    // is ambiguous, and the display spelling names each.
+    for file in ["src/a.rs", "src/b.rs"] {
+        put(
+            &mut store,
+            &language,
+            file,
+            "mod tests {\n    pub fn check() {}\n}\n",
+        );
+    }
+    write_modules(
+        &mut store,
+        &[("crate::a", "src/a.rs"), ("crate::b", "src/b.rs")],
+    );
+    let scoped = store.symbols_matching("tests::check").expect("scope");
+    assert_eq!(scoped.len(), 2, "{scoped:?}");
+    let display = store
+        .symbols_matching("src/b.rs::tests::check")
+        .expect("display scope");
+    assert_eq!(display.len(), 1, "{display:?}");
+    assert_eq!(display[0].file, "src/b.rs");
+    assert_eq!(display[0].qual_name, "tests::check");
+    // The `dump` shape: a display spelling with the free fn's bare name
+    // still answers the method beside it, and the module spelling the base
+    // answers keeps exactly its row.
+    put(
+        &mut store,
+        &language,
+        "src/dump.rs",
+        "pub struct Store;\n\nimpl Store {\n    pub fn canonical_dump(&self) {}\n}\n\n\
+         pub fn canonical_dump() {}\n",
+    );
+    write_modules(&mut store, &[("crate::dump", "src/dump.rs")]);
+    let dump = store
+        .symbols_matching("src/dump.rs::canonical_dump")
+        .expect("display dump");
+    assert_eq!(dump.len(), 2, "{dump:?}");
+    let module = store
+        .symbols_matching("dump::canonical_dump")
+        .expect("module");
+    assert_eq!(module.len(), 1, "{module:?}");
+    assert_eq!(module[0].kind, "function");
+}
