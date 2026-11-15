@@ -180,3 +180,65 @@ fn a_path_that_never_existed_is_not_tracked() {
         other => panic!("an absent path must not count: {other:?}"),
     }
 }
+
+#[test]
+fn a_side_branch_hidden_by_history_simplification_still_counts() {
+    let mut script = Script::default();
+    let base = script.commit(
+        "main",
+        HEAD - 3 * DAY,
+        &[Op::Write("asked.rs", "1\n"), Op::Write("peer.rs", "1\n")],
+    );
+    let side = script.branch(
+        "side",
+        base,
+        HEAD - 2 * DAY,
+        &[
+            Op::Write("asked.rs", "2\n"),
+            Op::Write("side_only.rs", "1\n"),
+        ],
+    );
+    script.commit("main", HEAD - DAY, &[Op::Write("main_only.rs", "1\n")]);
+    // No ops: the merge takes the first parent's tree, so it is TREESAME
+    // for the asked file and a simplified path log would hide the side
+    // commit.
+    script.merge("main", side, HEAD, &[]);
+    let repo = Repo::new("raw-simplify", &script);
+    let scan = counts(&repo, "asked.rs");
+    assert_eq!(scan.commits_seen, 4, "{scan:?}");
+    assert_eq!(pairs(&scan), vec![("peer.rs", 1), ("side_only.rs", 1)]);
+}
+
+#[test]
+fn a_path_added_twice_on_two_branches_counts_both_commits() {
+    let mut script = Script::default();
+    let base = script.commit("main", HEAD - 3 * DAY, &[Op::Write("base.rs", "1\n")]);
+    let side = script.branch(
+        "side",
+        base,
+        HEAD - 2 * DAY,
+        &[
+            Op::Write("asked.rs", "1\n"),
+            Op::Write("side_mate.rs", "1\n"),
+        ],
+    );
+    // The same path is added again on the other side of the merge, as a
+    // rebased or cherry-picked copy does; the older add must not be
+    // suppressed by the newer one.
+    script.commit(
+        "main",
+        HEAD - DAY,
+        &[
+            Op::Write("asked.rs", "1\n"),
+            Op::Write("main_mate.rs", "1\n"),
+        ],
+    );
+    script.merge("main", side, HEAD, &[]);
+    let repo = Repo::new("raw-duplicate-add", &script);
+    let scan = counts(&repo, "asked.rs");
+    assert_eq!(
+        pairs(&scan),
+        vec![("main_mate.rs", 1), ("side_mate.rs", 1)],
+        "{scan:?}"
+    );
+}

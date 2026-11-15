@@ -49,11 +49,16 @@ pub fn decay(age_days: f64) -> f64 {
 pub(crate) struct Aliases(BTreeMap<String, Option<String>>);
 
 impl Aliases {
-    fn current(&self, path: &str) -> Option<String> {
+    /// The name a path has now, or its own name when it never moved.
+    pub(crate) fn current(&self, path: &str) -> Option<String> {
         match self.0.get(path) {
             Some(current) => current.clone(),
             None => Some(path.to_owned()),
         }
+    }
+    /// Records that a name now maps to another, or to nothing.
+    pub(crate) fn link(&mut self, from: String, to: Option<String>) {
+        self.0.insert(from, to);
     }
 }
 
@@ -95,7 +100,7 @@ pub(crate) fn touched(
 }
 /// One change's paths, by their current names, and the alias bookkeeping
 /// it needs: the exhaustive `Change` dispatch.
-fn touch(
+pub(crate) fn touch(
     change: &Change,
     aliases: &Aliases,
     touched: &mut BTreeSet<String>,

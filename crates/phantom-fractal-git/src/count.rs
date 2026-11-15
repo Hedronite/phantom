@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::history::{Commit, History};
-use crate::score::{Aliases, BULK_FILES, touched};
+use crate::score::{Aliases, BULK_FILES, touch};
 
 /// One partner of the asked file: a current tracked path and the kept
 /// commits it shared with the asked file.
@@ -26,6 +26,25 @@ pub struct CountScan {
     pub skipped_bulk: u64,
     /// Every partner with a shared kept commit, most shared first.
     pub partners: Vec<CountPartner>,
+}
+
+/// The current names one commit counts, updating rename aliases. A name
+/// is never forgotten: an `Add` or a `Delete` leaves the path counting
+/// under its own name, because the count must cover every non-merge
+/// commit in the window — rebased and cherry-picked copies included —
+/// where the decayed scan's walk suppresses a name that did not exist
+/// before an `Add`.
+fn touched(commit: &Commit, aliases: &mut Aliases) -> BTreeSet<String> {
+    let mut touched = BTreeSet::new();
+    let mut gone = Vec::new();
+    let mut carried = Vec::new();
+    for change in &commit.changes {
+        touch(change, aliases, &mut touched, &mut gone, &mut carried);
+    }
+    for (from, current) in carried {
+        aliases.link(from, current);
+    }
+    touched
 }
 
 /// Every partner of `asked` over `history`: one count per kept,
@@ -62,7 +81,7 @@ fn kept(
     aliases: &mut Aliases,
     skipped_bulk: &mut u64,
 ) -> Option<BTreeSet<String>> {
-    let (touched, _) = touched(commit, aliases);
+    let touched = touched(commit, aliases);
     if commit.merge {
         return None;
     }
