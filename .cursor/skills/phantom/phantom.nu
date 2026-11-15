@@ -23,7 +23,8 @@
 #   impact       impact [--depth=N] [--min-confidence=X] [--no-tests] [--repo=R] -- NAME
 #   diff-impact  impact --diff [--against=REF] [--depth=N] [--min-confidence=X] [--no-tests] [--repo=R]
 #   path         path [--max-depth=N] [--repo=R] -- FROM TO
-#   cochange     cochange [--limit=N] [--min-lift=X] [--repo=R] -- FILE
+#   cochange     cochange --count [--limit=N] [--repo=R] -- FILE
+#   cochange --rust  cochange [--limit=N] [--min-lift=X] [--repo=R] -- FILE
 #   map          map --budget=N [--focus=P]... [--detail=D] [--repo=R]
 #   rank         rank [--files] [--limit=N] [--focus=P]... [--repo=R]
 #   show         show [--source] [--repo=R] -- NAME
@@ -31,7 +32,8 @@
 #   index        index -- PATH
 # `index` writes the data directory. Run it only when a human asked.
 
-const SCOPE = "co-change history, not dependency: decay-weighted, lift-filtered, indexed Rust files only, not a raw commit count; for raw counts over every file, run git log --name-only"
+const COUNT_NOTE = "raw counts: for every tracked file, the non-merge commits it shares with FILE in the scanned window, no decay and no lift floor; commits over scope.bulk_skip files are skipped and counted in scan.skipped_bulk; history, not dependency"
+const RUST_NOTE = "--rust: indexed Rust files only, decay-weighted (90 days) and lift-filtered; together_decayed is a weight, not a commit count; for raw counts over every tracked file, drop --rust"
 
 def phantom-bin [] {
   let over = ($env.PHANTOM_FRACTAL_BIN? | default "")
@@ -523,22 +525,36 @@ def --wrapped "main path" [...args: string] {
   })
 }
 
+# Raw counts by default (`--count` says so explicitly); `--rust` is the
+# decayed, lift-filtered mode over indexed Rust files.
 def --wrapped "main cochange" [...args: string] {
-  let line = "cochange [--limit N] [--min-lift X] [--repo R] FILE"
-  let p = (parse-args "cochange" $line $args [] ["--limit" "--min-lift" "--repo"])
+  let line = "cochange [--count | --rust] [--limit N] [--min-lift X (with --rust)] [--repo R] FILE"
+  let p = (parse-args "cochange" $line $args ["--count" "--rust"] ["--limit" "--min-lift" "--repo"])
   if not $p.ok { finish $p }
   if ($p.pos | length) != 1 { finish (usage "cochange" $"one file required. Usage: ($line)") }
   let ints = (check-ints "cochange" $line $p ["--limit"])
   if $ints != null { finish $ints }
-  let e = (call "cochange" (["cochange"] ++ (pass $p "--limit") ++ (pass $p "--min-lift") ++ (repo-arg $p) ++ ["--" ($p.pos | first)]))
-  if not $e.ok { finish ($e | upsert scope $SCOPE) }
+  let rust = (has $p "--rust")
+  if $rust and (has $p "--count") { finish (usage "cochange" $"--count and --rust are two modes; give one. Usage: ($line)") }
+  if (not $rust) and (opt $p "--min-lift") != "" { finish (usage "cochange" $"--min-lift needs --rust: raw counts have no lift floor. Usage: ($line)") }
+  let mode = if $rust { [] } else { ["--count"] }
+  let note = if $rust { $RUST_NOTE } else { $COUNT_NOTE }
+  let e = (call "cochange" (["cochange"] ++ $mode ++ (pass $p "--limit") ++ (pass $p "--min-lift") ++ (repo-arg $p) ++ ["--" ($p.pos | first)]))
+  if not $e.ok { finish ($e | upsert note $note) }
   let d = $e.data
+  let partners = if $rust {
+    $d.partners? | default [] | each {|x| partner-row $x }
+  } else {
+    $d.partners? | default [] | each {|x| { path: ($x.path? | default null), count: ($x.count? | default null) } }
+  }
   finish ($e | upsert data {
     file: ($d.file? | default null)
-    partners: ($d.partners? | default [] | each {|x| partner-row $x })
+    mode: (if $rust { "rust" } else { "count" })
+    partners: $partners
     truncated: ($d.truncated? | default false)
     scan: ($d.scan? | default null)
-    scope: $SCOPE
+    scope: ($d.scope? | default null)
+    note: $note
   })
 }
 
