@@ -669,9 +669,9 @@ Each index is a directory under the data directory's `repos/`, named `<name>-<ha
 `doctor` checks the install and prints `data: {ok, checks, agents}`. Each check is `{name, ok, detail}`, in this order:
 
 1. `data_dir`: `repos/` and each index directory are private (no group or other bits, and not a link), the data directory is not writable by group or others, and every one of them, and every database file, is owned by the data directory's owner. No data directory yet is fine.
-2. `databases`: each `graph.db`, and its WAL and shared memory when present, is `0600`. Its schema, read from the SQLite header without opening the database, is not newer than this binary's. An older schema is noted, since `index` migrates it.
+2. `databases`: each `graph.db`, and its WAL and shared memory when present, is `0600`. Its schema, read from the SQLite header without opening the database, is not newer than this binary's. An older schema is noted. The detail names `index`, but any command that opens the index migrates it, a read included, once: after that it is at this binary's schema.
 3. `locks`: whether a writer holds each index. A held lock is not a fault.
-4. `extractor`: the extractor version this binary writes, 12.
+4. `extractor`: the extractor version this binary writes, 13.
 5. `grammar`: the tree-sitter-rust version the binary was built with.
 6. `network`: `none: Phantom has no network code`.
 7. `git`: for each index, whether HEAD reads at its stored tree, or why it was not checked. Only a HEAD that cannot be read is a fault.
@@ -750,7 +750,7 @@ The server is read-only by default. It offers these tools:
   - `impact --diff`: as `impact`, within `impact`, then `files_only` and `changed` from the end;
   - `show`: `source` as a whole, then the `cochange` partners, the callees' hits, the callers' hits, and the members' hits, each from the end.
 
-  Before any of these, `callers`, `callees`, and `impact` drop the keys added beside the old ones, as a whole: each hit's `display`, and `callers_distinct`, `files`, and `sites`, and `impact`'s `limit` and the `reexported` and `confirm_with_grep` flags. A reply that fits with them keeps them all; one that does not loses them all and is then cut exactly as it was before they existed. They are not counted in `omitted`.
+  Before any of these, `callers`, `callees`, and `impact` drop the keys added beside the old ones, in two stages, each as a whole. First go the newest: `impact`'s `limit` and the `reexported` and `confirm_with_grep` flags. A reply that fits without them is exactly the reply it was before they existed. Then go each hit's `display`, and `callers_distinct`, `files`, and `sites`; a reply that fits without those either is then cut exactly as it was before any of them existed. None is counted in `omitted`.
 
   The target symbol, the counts, `risk`, `exact`, `reasons`, the groups themselves, and every `truncated` flag stay. `truncated` still says only whether the command's own cap, or `impact --limit`, cut the list.
 - **`data.tokens`:** with a budget, `data` ends with `tokens: {max, used, omitted}`. `max` is the budget, `used` is the estimate of the printed line, `tokens` and `meta` included, and `omitted` counts the entries dropped. Without a budget there is no `tokens` key, and `data` is byte for byte what it was.
@@ -884,7 +884,7 @@ The answers are heuristic. Only resolved calls, trait impls, and imports are edg
 `phantom-fractal version` prints one line and exits 0:
 
 ```
-{"ok":true,"data":{"name":"phantom-fractal","version":"0.0.0","git_sha":"<40 lowercase hex, or null>","extractor_version":12,"store_schema":3},"error":null,"schema":1}
+{"ok":true,"data":{"name":"phantom-fractal","version":"0.0.0","git_sha":"<40 lowercase hex, or null>","extractor_version":13,"store_schema":4},"error":null,"schema":1}
 ```
 
 `phantom-fractal --json version`, `phantom-fractal version --json`, and `fract version` print the same line. `data` holds these fields, in this order:
@@ -894,8 +894,8 @@ The answers are heuristic. Only resolved calls, trait impls, and imports are edg
 | `name` | `phantom-fractal`, under `fract` too |
 | `version` | the CLI crate's version, `0.0.0` |
 | `git_sha` | the commit the binary was built from, as 40 lowercase hex characters, or `null` when unknown |
-| `extractor_version` | the extractor version the binary writes, 12 |
-| `store_schema` | the store schema version the binary writes, 3 |
+| `extractor_version` | the extractor version the binary writes, 13 |
+| `store_schema` | the store schema version the binary writes, 4 |
 
 `git_sha` is fixed at build time. `PHANTOM_FRACTAL_GIT_SHA`, when it holds 40 hex characters, sets it, for packagers. Otherwise it is the output of `git rev-parse HEAD` in the CLI crate's directory. With no git, no `.git` (as in a crates.io tarball), or a refused repository, it is `null`, and the build still succeeds.
 

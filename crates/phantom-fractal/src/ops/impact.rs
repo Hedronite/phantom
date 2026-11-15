@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use super::budget::{self, Shed, Tokens, drop_last};
 use super::distinct::{Distinct, Site};
-use super::lookup::{Names, Reexport, SymbolOut, current_index, lookup, symbol_out};
+use super::lookup::{Names, Reexport, SymbolOut, current_index, lookup_flagged, symbol_out};
 use super::{Failure, Reply};
 
 /// The smallest and largest `--limit`.
@@ -32,7 +32,8 @@ pub(crate) struct ImpactRequest {
     /// Drop `groups` and `tests` from the answer.
     pub(crate) summary: bool,
     /// The most hits listed over all groups, shallowest first, and the
-    /// most tests. Out of range is `Usage`. Without it nothing is cut.
+    /// most tests, [`LIMIT_MIN`] to [`LIMIT_MAX`]: the command line and the
+    /// MCP tool refuse any other value. Without it nothing is cut.
     pub(crate) limit: Option<u64>,
     /// The most estimated tokens the reply may cost.
     pub(crate) max_tokens: Option<u64>,
@@ -104,6 +105,11 @@ impl Shed for ImpactResult {
 
     fn set_tokens(&mut self, tokens: Tokens) {
         self.tokens = Some(tokens);
+    }
+
+    fn drop_new(&mut self) {
+        self.limit = None;
+        self.reexport = None;
     }
 
     fn drop_extras(&mut self) {
@@ -196,11 +202,9 @@ pub(crate) fn impact(request: &ImpactRequest) -> Result<Reply<ImpactResult>, Fai
             "depth must be 1 to 5 and min_confidence above 0 and at most 1",
         ));
     }
-    check_limit(request.limit)?;
     budget::check(request.max_tokens)?;
     let (store, names) = current_index(&request.repo)?;
-    let found = lookup(&store, &names, &request.symbol)?;
-    let reexport = Reexport::of(&store, found.id)?;
+    let (found, reexport) = lookup_flagged(&store, &names, &request.symbol)?;
     let options = request.options;
     let answer = phantom_fractal_analyze::impact(&store, found.id, &options)?;
     let (mut groups, mut tests) = if request.summary {
@@ -243,17 +247,6 @@ pub(crate) fn impact(request: &ImpactRequest) -> Result<Reply<ImpactResult>, Fai
         tokens: None,
     };
     super::answer(result, &store, &request.repo, request.max_tokens)
-}
-
-/// `Usage` unless `limit` is absent or from [`LIMIT_MIN`] to [`LIMIT_MAX`].
-fn check_limit(limit: Option<u64>) -> Result<(), Failure> {
-    match limit {
-        Some(limit) if !(LIMIT_MIN..=LIMIT_MAX).contains(&limit) => Err(Failure::new(
-            ErrorKind::Usage,
-            format!("limit must be {LIMIT_MIN} to {LIMIT_MAX}"),
-        )),
-        _ => Ok(()),
-    }
 }
 
 /// Keeps at most `max` hits over `groups`, shallowest group first, and at

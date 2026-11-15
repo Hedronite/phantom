@@ -367,6 +367,87 @@ fn the_flag_goes_first_under_a_budget() {
     }
 }
 
+/// R4-w15: under a budget the SPEC-w15 keys go first, as a stage of their
+/// own. Between the budget that keeps the SPEC-w14 keys and the one that
+/// keeps the SPEC-w15 keys too, every reply holds the SPEC-w14 keys and
+/// no SPEC-w15 key, so a reply the base fitted keeps every key the base
+/// kept.
+#[test]
+fn the_w15_keys_are_shed_before_the_w14_keys() {
+    let impact = World::impact();
+    let probe = World::probe();
+    let cases: [(&World, &[&str], &[&str]); 3] = [
+        (
+            &probe,
+            &["callers", "helper"],
+            &["reexported", "confirm_with_grep"],
+        ),
+        (
+            &probe,
+            &["impact", "helper"],
+            &["reexported", "confirm_with_grep"],
+        ),
+        (&impact, &["impact", "root_fn", "--limit", "3"], &["limit"]),
+    ];
+    for (world, args, newest) in cases {
+        let (_, whole, _) = world.envelope(BINS[0], args);
+        for key in newest {
+            assert!(whole["data"].get(*key).is_some(), "{args:?} {key}");
+        }
+        let keeps = |max: u64, keys: &[&str]| -> bool {
+            let text = max.to_string();
+            let mut with = args.to_vec();
+            with.extend(["--max-tokens", &text]);
+            let (code, line) = world.run(BINS[0], &with);
+            code == Some(0) && keys.iter().all(|key| line.contains(&format!("\"{key}\":")))
+        };
+        let w14 = ["callers_distinct", "files", "sites"];
+        let low = first_budget(|max| keeps(max, &w14));
+        let high = first_budget(|max| keeps(max, newest));
+        assert!(low < high, "{args:?}: no band between {low} and {high}");
+        for max in low..high {
+            let text = max.to_string();
+            let mut with = args.to_vec();
+            with.extend(["--max-tokens", &text]);
+            let (code, env, line) = world.envelope(BINS[0], &with);
+            assert_eq!(code, Some(0), "{line}");
+            for key in w14 {
+                assert!(env["data"].get(key).is_some(), "{max}: {line}");
+            }
+            for key in newest {
+                assert!(env["data"].get(*key).is_none(), "{max}: {line}");
+            }
+            assert_eq!(env["data"]["tokens"]["omitted"], 0, "{max}: {line}");
+            let mut want = whole["data"].clone();
+            let mut got = env["data"].clone();
+            for key in newest {
+                want.as_object_mut().expect("data").remove(*key);
+            }
+            got.as_object_mut().expect("data").remove("tokens");
+            assert_eq!(got, want, "{max}: the reply without its SPEC-w15 keys");
+        }
+        for max in [high, high + 1, high + 50] {
+            assert!(keeps(max, &w14) && keeps(max, newest), "{args:?} at {max}");
+        }
+    }
+}
+
+/// The smallest budget from 1 to 100000 at which `holds` is true; it must
+/// stay true at every larger one.
+fn first_budget(holds: impl Fn(u64) -> bool) -> u64 {
+    let (mut low, mut high) = (1, 100_000);
+    assert!(holds(high), "not even at {high}");
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if holds(middle) {
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    low
+}
+
 /// The tree is not written by any of the reads above.
 #[test]
 fn reads_leave_the_tree_alone() {

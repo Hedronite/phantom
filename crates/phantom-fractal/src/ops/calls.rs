@@ -66,6 +66,10 @@ impl Shed for CallResult {
         self.tokens = Some(tokens);
     }
 
+    fn drop_new(&mut self) {
+        self.reexport = None;
+    }
+
     fn drop_extras(&mut self) {
         for hit in &mut self.hits {
             hit.display = None;
@@ -113,10 +117,7 @@ fn calls(direction: Direction, request: &CallsRequest) -> Result<Reply<CallResul
     let (store, names) = current_index(&request.repo)?;
     let symbol = lookup(&store, &names, &request.symbol)?;
     let mut hits = edges(&store, &names, direction, symbol.id, &symbol.file)?;
-    let (unresolved_calls, reexport) = match direction {
-        Direction::Callers => (None, Reexport::of(&store, symbol.id)?),
-        Direction::Callees => (Some(store.unresolved_calls(symbol.id)?), None),
-    };
+    let (unresolved_calls, reexport) = side_keys(&store, direction, symbol.id)?;
     let truncated = hits.len() > CALL_CAP;
     hits.truncate(CALL_CAP);
     let distinct = Distinct::of(hits.iter().map(CallOut::site));
@@ -130,6 +131,20 @@ fn calls(direction: Direction, request: &CallsRequest) -> Result<Reply<CallResul
         tokens: None,
     };
     answer(result, &store, &request.repo, request.max_tokens)
+}
+
+/// The keys only one side carries, for symbol `id`: `unresolved_calls`
+/// on `callees`, and the re-export keys on `callers` when the store flags
+/// the symbol.
+fn side_keys(
+    store: &Store,
+    direction: Direction,
+    id: i64,
+) -> Result<(Option<i64>, Option<Reexport>), Failure> {
+    Ok(match direction {
+        Direction::Callers => (None, Reexport::of(store, id)?),
+        Direction::Callees => (Some(store.unresolved_calls(id)?), None),
+    })
 }
 
 /// Every stored edge on one side of symbol `id`, declared in `file`, with

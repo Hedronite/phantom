@@ -166,6 +166,18 @@ pub(crate) fn lookup(store: &Store, names: &Names, query: &str) -> Result<Symbol
     find_one(store, names, query, false)
 }
 
+/// [`lookup`], with the found symbol's re-export keys when the store
+/// flags it.
+pub(crate) fn lookup_flagged(
+    store: &Store,
+    names: &Names,
+    query: &str,
+) -> Result<(SymbolMatch, Option<Reexport>), Failure> {
+    let found = lookup(store, names, query)?;
+    let reexport = Reexport::of(store, found.id)?;
+    Ok((found, reexport))
+}
+
 /// [`lookup`], with each `Ambiguous` candidate carrying its stable key.
 pub(crate) fn lookup_keyed(
     store: &Store,

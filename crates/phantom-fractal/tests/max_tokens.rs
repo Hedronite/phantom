@@ -547,8 +547,9 @@ fn trimmed(line: &str, drops: &[(usize, usize)], count: usize, max: u64) -> Stri
 }
 
 /// What a budgeted run must print: the whole reply when it fits; else the
-/// reply without its SPEC-w14 keys after the fewest drops that fit, or
-/// none when nothing fits.
+/// reply without its SPEC-w15 keys when that fits; else the reply without
+/// its SPEC-w14 keys either, after the fewest drops that fit, or none when
+/// nothing fits.
 fn expected(op: &str, line: &str, max: u64) -> Option<String> {
     let extras = extras(op, line);
     if extras.is_empty() {
@@ -558,7 +559,25 @@ fn expected(op: &str, line: &str, max: u64) -> Option<String> {
     if estimate(&whole) <= room(max) {
         return Some(whole);
     }
+    let newest = newest(line);
+    if !newest.is_empty() {
+        let plain = trimmed(&cut(line, &newest), &[], 0, max);
+        if estimate(&plain) <= room(max) {
+            return Some(plain);
+        }
+    }
     fewest(op, &cut(line, &extras), max)
+}
+
+/// The SPEC-w15 keys of a reply's `data`, as byte ranges of `line`: the
+/// first stage shed, before the SPEC-w14 keys.
+fn newest(line: &str) -> Vec<(usize, usize)> {
+    let raw = line.as_bytes();
+    let (data, _) = member(raw, 0, "data").expect("data");
+    ["limit", "reexported", "confirm_with_grep"]
+        .iter()
+        .filter_map(|key| key_span(raw, data, key))
+        .collect()
 }
 
 /// The reply after the fewest drops that fit, or none when nothing fits.
@@ -681,6 +700,12 @@ fn every_budgeted_reply_is_the_fewest_drops_that_fit() {
             &["impact", "hub", "--summary"],
             "impact",
             json!({ "symbol": "hub", "summary": true }),
+        ),
+        case(
+            "impact",
+            &["impact", "hub", "--limit", "3"],
+            "impact",
+            json!({ "symbol": "hub", "limit": 3 }),
         ),
         case(
             "show",
