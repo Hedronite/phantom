@@ -4,6 +4,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use phantom_fractal_analyze::{Hit, Impact, ImpactOptions, impact};
@@ -19,12 +20,16 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new() -> Self {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|dur| dur.as_nanos())
             .unwrap_or(0);
-        let path =
-            std::env::temp_dir().join(format!("phantom-fractal-analyze-{}-{nanos}", process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "phantom-fractal-analyze-{}-{nanos}-{}",
+            process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::create_dir_all(&path).expect("temp dir");
         Self(path)
     }

@@ -564,3 +564,28 @@ fn find_without_an_index_is_no_index_and_creates_nothing() {
     let created = fs::read_dir(fixture.data.path()).expect("data dir").count();
     assert_eq!(created, 0, "find created files in the data directory");
 }
+
+/// A path that names a file, not a directory, is usage, and the data
+/// directory stays empty.
+#[test]
+fn index_refuses_a_path_that_is_not_a_directory() {
+    for bin in BINS {
+        let fixture = Fixture::new();
+        let file = fixture.repo.path().join("Cargo.toml");
+        let out = fixture.run(bin, &["index", file.to_str().expect("utf-8 temp path")]);
+        let (code, env) = envelope(&out);
+        assert_eq!(code, Some(1), "{bin}: {env}");
+        assert_eq!(env["error"]["kind"], "usage", "{bin}: {env}");
+        assert_eq!(
+            env["error"]["message"], "index path is not a directory",
+            "{bin}: {env}"
+        );
+        assert!(
+            fs::read_dir(fixture.data.path())
+                .expect("data dir")
+                .next()
+                .is_none(),
+            "{bin} wrote the data directory"
+        );
+    }
+}

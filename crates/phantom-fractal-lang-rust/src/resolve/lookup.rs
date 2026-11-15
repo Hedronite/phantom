@@ -8,6 +8,7 @@
 //! caller's target may call (SPEC-w4 G2b). `use` paths and `impl` trait
 //! paths resolve by the same walk (SPEC-w7 G0a).
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use phantom_fractal_lang::{
@@ -104,11 +105,15 @@ impl Tier {
 
 /// What a name binds in one module: the entities, whether they are
 /// declared there, and whether a `use` reached them through another crate.
+#[derive(Clone)]
 struct Found {
     entities: Vec<Entity>,
     local: bool,
     crossed: bool,
 }
+
+/// What [`Index::lookup`] keeps: `(module, name, depth)` to its answer.
+type Imported = HashMap<(Id, String, u32), Result<Found, Miss>>;
 
 pub(crate) struct Index<'a> {
     modules: HashMap<Id, &'a Module>,
@@ -134,6 +139,11 @@ pub(crate) struct Index<'a> {
     /// Target to the crate names it may call, each to that lib's root
     /// module, or none when two libs share the name.
     crates: HashMap<Id, HashMap<String, Option<Id>>>,
+    /// What the `use` bindings of a module give a name at a depth, kept
+    /// once computed. A lookup is a pure function of the index and those
+    /// three, so a kept answer is the answer, and a name whose `use` names
+    /// itself costs one walk per depth instead of one per path.
+    imported: RefCell<Imported>,
 }
 
 impl<'a> Index<'a> {
@@ -150,6 +160,7 @@ impl<'a> Index<'a> {
             by_type: HashMap::new(),
             by_name: HashMap::new(),
             crates: HashMap::new(),
+            imported: RefCell::default(),
         };
         for module in &input.modules {
             index
@@ -648,6 +659,29 @@ impl<'a> Index<'a> {
 
     /// What `name` binds in `module`.
     fn lookup(&self, module: Id, name: &str, depth: u32) -> Result<Found, Miss> {
+        let local = self.declared(module, name);
+        if !local.is_empty() {
+            return Ok(Found {
+                entities: local,
+                local: true,
+                crossed: false,
+            });
+        }
+        if depth >= MAX_DEPTH {
+            return Err(Miss::Unresolved);
+        }
+        let key = (module, name.to_owned(), depth);
+        if let Some(kept) = self.imported.borrow().get(&key) {
+            return kept.clone();
+        }
+        let found = self.through_uses(module, name, depth);
+        self.imported.borrow_mut().insert(key, found.clone());
+        found
+    }
+
+    /// The child modules and items named `name` declared in `module`. A
+    /// module item that has its own module row counts once, as the row.
+    fn declared(&self, module: Id, name: &str) -> Vec<Entity> {
         let mut local: Vec<Entity> = self
             .children
             .get(&(module, name))
@@ -664,16 +698,14 @@ impl<'a> Index<'a> {
                 .filter(|id| !(has_module_row && self.kind(**id) == Some(SymbolKind::Module)))
                 .map(|id| Entity::Symbol(*id)),
         );
-        if !local.is_empty() {
-            return Ok(Found {
-                entities: local,
-                local: true,
-                crossed: false,
-            });
-        }
-        if depth >= MAX_DEPTH {
-            return Err(Miss::Unresolved);
-        }
+        local
+    }
+
+    /// What the non-glob `use` bindings of `module` that bind `name` name,
+    /// each walked one level deeper. With none found, the worst miss among
+    /// them; with no such binding, unresolved when a glob could supply the
+    /// name, else external.
+    fn through_uses(&self, module: Id, name: &str, depth: u32) -> Result<Found, Miss> {
         let bindings = self.uses.get(&module).map_or(&[][..], Vec::as_slice);
         let mut found = Vec::new();
         let mut crossed = false;
@@ -690,24 +722,23 @@ impl<'a> Index<'a> {
                 Err(err) => miss = Some(miss.map_or(err, |prior| worse(prior, err))),
             }
         }
-        if !found.is_empty() {
-            found.sort_by_key(|entity| match entity {
-                Entity::Module(id) | Entity::Symbol(id) => *id,
-            });
-            found.dedup();
-            return Ok(Found {
-                entities: found,
-                local: false,
-                crossed,
-            });
+        if found.is_empty() {
+            let glob = bindings.iter().any(|binding| binding.glob);
+            return Err(miss.unwrap_or(if glob {
+                Miss::Unresolved
+            } else {
+                Miss::External
+            }));
         }
-        if let Some(miss) = miss {
-            return Err(miss);
-        }
-        if bindings.iter().any(|binding| binding.glob) {
-            return Err(Miss::Unresolved);
-        }
-        Err(Miss::External)
+        found.sort_by_key(|entity| match entity {
+            Entity::Module(id) | Entity::Symbol(id) => *id,
+        });
+        found.dedup();
+        Ok(Found {
+            entities: found,
+            local: false,
+            crossed,
+        })
     }
 
     /// What a `use` path names, in any namespace.

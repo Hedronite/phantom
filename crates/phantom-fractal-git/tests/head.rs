@@ -96,3 +96,30 @@ fn head_writes_nothing() {
     assert_eq!(snapshot(repo.dir()), before);
     assert_eq!(first, second);
 }
+
+/// A repository that opens but cannot be read answers the GitError the
+/// store's `last_oid` comparison sees, with its own display text; a
+/// directory that is not a repository at all answers None.
+#[test]
+fn a_broken_head_is_an_error_and_a_plain_dir_is_none() {
+    let repo = Repo::new("head-broken", &script());
+    fs::write(repo.root.join(".git/HEAD"), "not a ref or an oid\n").expect("poison HEAD");
+    let broken = head(&repo.root);
+    match broken {
+        Err(error) => {
+            let text = error.to_string();
+            assert!(
+                text.starts_with("git history could not be read: "),
+                "{text}"
+            );
+        }
+        Ok(found) => panic!("a poisoned HEAD read as {found:?}"),
+    }
+    // The plain directory stays the None case, and `mine` with it.
+    let plain = TempDir::new("head-plain-again");
+    assert_eq!(head(&plain.0), Ok(None));
+    assert_eq!(
+        mine(&plain.0, &Window::default(), &indexed(&["a.rs"])),
+        Ok(None)
+    );
+}

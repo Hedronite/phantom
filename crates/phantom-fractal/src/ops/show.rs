@@ -8,13 +8,13 @@
 use std::path::PathBuf;
 
 use phantom_fractal_proto::ErrorKind;
-use phantom_fractal_store::SymbolDetail;
+use phantom_fractal_store::{Store, SymbolDetail};
 use serde::Serialize;
 
-use super::budget::{self, Shed, Tokens, drop_last};
+use super::budget::{Shed, Tokens, drop_last};
 use super::calls::{CallOut, Direction, edges};
 use super::cochange::{DEFAULT_MIN_LIFT, PartnerOut, partners};
-use super::lookup::{Names, current_index, lookup_keyed};
+use super::lookup::{Names, checked_index, lookup_keyed};
 use super::source::{SourceOut, read_source};
 use super::{Failure, Reply, answer, canonical_repo};
 
@@ -137,61 +137,114 @@ struct Calls {
 /// The detail of the one symbol `request.target` names in the index of
 /// `request.repo`, fitted to `request.max_tokens`.
 pub(crate) fn show(request: &ShowRequest) -> Result<Reply<ShowResult>, Failure> {
-    budget::check(request.max_tokens)?;
-    let (store, names) = current_index(&request.repo)?;
-    let id = match &request.target {
-        Target::Name(query) => lookup_keyed(&store, &names, query)?.id,
-        Target::Id(key) => store
-            .symbol_by_stable_key(key)?
-            .ok_or_else(|| Failure::new(ErrorKind::NotFound, "no symbol has that stable key"))?,
-    };
-    let detail = store
-        .symbol_detail(id)?
-        .ok_or_else(|| Failure::new(ErrorKind::NotFound, "the symbol left the index"))?;
-    let mut members = store.members(id)?;
-    let members_truncated = members.len() > MEMBER_CAP;
-    members.truncate(MEMBER_CAP);
-    let callers = calls(
-        edges(&store, &names, Direction::Callers, id, &detail.path)?,
-        None,
-    );
-    let callees = calls(
-        edges(&store, &names, Direction::Callees, id, &detail.path)?,
-        Some(store.unresolved_calls(id)?),
-    );
-    let macro_args = store.macro_args_named(&detail.name)?;
-    let cochange = match store.cochange_head()? {
-        Some(_) => Some(partners(
-            &store,
-            &detail.path,
-            DEFAULT_MIN_LIFT,
-            SHOW_COCHANGE_CAP,
-        )?),
-        None => None,
-    };
-    let source = if request.source {
-        let root = canonical_repo(&request.repo)?;
-        Some(read_source(&store, &root, &detail)?)
-    } else {
-        None
-    };
+    let (store, names) = checked_index(request.max_tokens, &request.repo)?;
+    let id = target_id(&store, &names, &request.target)?;
+    let detail = indexed_detail(&store, id)?;
+    let around = around(&store, &names, id, &detail)?;
+    let source = source(request, &store, &detail)?;
     let result = ShowResult {
         symbol: detail_out(&names, detail),
-        members: Members {
-            hits: members
-                .into_iter()
-                .map(|member| detail_out(&names, member))
-                .collect(),
-            truncated: members_truncated,
-        },
-        callers,
-        callees,
-        macro_args,
-        cochange,
+        members: around.members,
+        callers: around.callers,
+        callees: around.callees,
+        macro_args: around.macro_args,
+        cochange: around.cochange,
         source,
         tokens: None,
     };
     answer(result, &store, &request.repo, request.max_tokens)
+}
+
+/// What the index holds around one symbol, read in this order.
+struct Around {
+    members: Members,
+    callers: Calls,
+    callees: Calls,
+    macro_args: i64,
+    cochange: Option<Vec<PartnerOut>>,
+}
+
+/// The id of the symbol `target` names: by name as `callers` looks it up,
+/// or by exact stable key.
+fn target_id(store: &Store, names: &Names, target: &Target) -> Result<i64, Failure> {
+    match target {
+        Target::Name(query) => Ok(lookup_keyed(store, names, query)?.id),
+        Target::Id(key) => store
+            .symbol_by_stable_key(key)?
+            .ok_or_else(|| Failure::new(ErrorKind::NotFound, "no symbol has that stable key")),
+    }
+}
+
+/// The stored detail of symbol `id`, which a lookup just found.
+fn indexed_detail(store: &Store, id: i64) -> Result<SymbolDetail, Failure> {
+    store
+        .symbol_detail(id)?
+        .ok_or_else(|| Failure::new(ErrorKind::NotFound, "the symbol left the index"))
+}
+
+/// The members, callers, callees, macro-argument count and file partners
+/// of symbol `id`, whose detail is `detail`.
+fn around(store: &Store, names: &Names, id: i64, detail: &SymbolDetail) -> Result<Around, Failure> {
+    let mut members = store.members(id)?;
+    let truncated = members.len() > MEMBER_CAP;
+    members.truncate(MEMBER_CAP);
+    let (callers, callees) = call_sides(store, names, id, &detail.path)?;
+    Ok(Around {
+        members: Members {
+            hits: members
+                .into_iter()
+                .map(|member| detail_out(names, member))
+                .collect(),
+            truncated,
+        },
+        callers,
+        callees,
+        macro_args: store.macro_args_named(&detail.name)?,
+        cochange: file_partners(store, &detail.path)?,
+    })
+}
+
+/// The capped callers and callees of symbol `id` in file `path`, the
+/// callees with their count of unresolved calls.
+fn call_sides(
+    store: &Store,
+    names: &Names,
+    id: i64,
+    path: &str,
+) -> Result<(Calls, Calls), Failure> {
+    let callers = calls(edges(store, names, Direction::Callers, id, path)?, None);
+    let callees = calls(
+        edges(store, names, Direction::Callees, id, path)?,
+        Some(store.unresolved_calls(id)?),
+    );
+    Ok((callers, callees))
+}
+
+/// The co-change partners of file `path`, as `cochange` lists them with
+/// its default `min_lift`, when the index holds a co-change scan.
+fn file_partners(store: &Store, path: &str) -> Result<Option<Vec<PartnerOut>>, Failure> {
+    if store.cochange_head()?.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(partners(
+        store,
+        path,
+        DEFAULT_MIN_LIFT,
+        SHOW_COCHANGE_CAP,
+    )?))
+}
+
+/// The symbol's source lines, when `request` asks for them.
+fn source(
+    request: &ShowRequest,
+    store: &Store,
+    detail: &SymbolDetail,
+) -> Result<Option<SourceOut>, Failure> {
+    if !request.source {
+        return Ok(None);
+    }
+    let root = canonical_repo(&request.repo)?;
+    Ok(Some(read_source(store, &root, detail)?))
 }
 
 fn calls(mut hits: Vec<CallOut>, unresolved_calls: Option<i64>) -> Calls {

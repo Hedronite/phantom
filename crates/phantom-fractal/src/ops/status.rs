@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use phantom_fractal_extract::probe;
+use phantom_fractal_extract::{Freshness, probe};
 use phantom_fractal_proto::{ErrorKind, SCHEMA_VERSION};
 use phantom_fractal_store::{LockState, Store, index_database_path, lock_state};
 use serde::Serialize;
@@ -75,17 +75,36 @@ pub(crate) fn status(request: &StatusRequest) -> Result<Reply<StatusResult>, Fai
     let store = open_index(&request.repo)?;
     let root = canonical_repo(&request.repo)?;
     let database = index_database_path(&root);
-    // The probe's error may hold a path, so it is not passed on.
-    let freshness = probe(&root, &store).map_err(|_| {
+    let freshness = probe_tree(&root, &store)?;
+    let rank = store.rank_epoch()?;
+    let result = result(&store, &database, &freshness, rank)?;
+    Ok(Reply::with_meta(result, fresh::of(&freshness, rank)))
+}
+
+/// The tree at `root` compared with its index. The probe's error may hold
+/// a path, so it is not passed on.
+fn probe_tree(root: &Path, store: &Store) -> Result<Freshness, Failure> {
+    probe(root, store).map_err(|_| {
         Failure::new(
             ErrorKind::Usage,
             "the tree could not be read to compare it with the index",
         )
-    })?;
-    let rank = store.rank_epoch()?;
-    let key = key(&database);
-    let result = StatusResult {
-        name: name(&store, &key)?,
+    })
+}
+
+/// The reply: the index's key and name, the tree's state against it, and
+/// what it stores, read in that order.
+fn result(
+    store: &Store,
+    database: &Path,
+    freshness: &Freshness,
+    rank: u64,
+) -> Result<StatusResult, Failure> {
+    let key = key(database);
+    let name = name(store, &key)?;
+    let stored = stored(store, database, rank)?;
+    Ok(StatusResult {
+        name,
         key,
         head: freshness.head.clone(),
         index_head: freshness.index_head.clone(),
@@ -97,27 +116,60 @@ pub(crate) fn status(request: &StatusRequest) -> Result<Reply<StatusResult>, Fai
         },
         fingerprint_changed: freshness.fingerprint_changed,
         extractor_changed: freshness.extractor_changed,
-        counts: Counts {
-            files: store.row_count("files")?,
-            symbols: store.row_count("symbols")?,
-            edges: store.row_count("edges")?,
-        },
-        versions: Versions {
-            schema: store.schema_version()?,
-            extractor: store.extractor_version()?,
-            envelope: SCHEMA_VERSION,
-        },
+        counts: stored.counts,
+        versions: stored.versions,
+        epochs: stored.epochs,
+        cochange: stored.cochange,
+        lock: stored.lock,
+    })
+}
+
+/// What the index stores, and whether a writer holds it.
+struct Stored {
+    counts: Counts,
+    versions: Versions,
+    epochs: Epochs,
+    cochange: Option<CochangeSummary>,
+    lock: &'static str,
+}
+
+/// The stored counts, versions, epochs and co-change scan of the index at
+/// `database`, read in that order, then its lock.
+fn stored(store: &Store, database: &Path, rank: u64) -> Result<Stored, Failure> {
+    Ok(Stored {
+        counts: counts(store)?,
+        versions: versions(store)?,
         epochs: Epochs {
             graph: store.graph_epoch()?,
             rank,
         },
-        cochange: stored_cochange(&store)?,
-        lock: match lock_state(&database)? {
-            LockState::Held => "held",
-            LockState::Free | LockState::Absent => "free",
-        },
-    };
-    Ok(Reply::with_meta(result, fresh::of(&freshness, rank)))
+        cochange: stored_cochange(store)?,
+        lock: lock_text(database)?,
+    })
+}
+
+fn counts(store: &Store) -> Result<Counts, Failure> {
+    Ok(Counts {
+        files: store.row_count("files")?,
+        symbols: store.row_count("symbols")?,
+        edges: store.row_count("edges")?,
+    })
+}
+
+fn versions(store: &Store) -> Result<Versions, Failure> {
+    Ok(Versions {
+        schema: store.schema_version()?,
+        extractor: store.extractor_version()?,
+        envelope: SCHEMA_VERSION,
+    })
+}
+
+/// `held` while a writer holds the index at `database`, else `free`.
+fn lock_text(database: &Path) -> Result<&'static str, Failure> {
+    Ok(match lock_state(database)? {
+        LockState::Held => "held",
+        LockState::Free | LockState::Absent => "free",
+    })
 }
 
 /// The registry key: the name of the database's directory.

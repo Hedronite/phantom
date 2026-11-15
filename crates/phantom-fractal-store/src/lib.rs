@@ -778,3 +778,49 @@ pub(crate) mod open_trace {
 
 #[cfg(test)]
 mod tests;
+
+/// The test-only fault seam (W13 G1, after the writer lock's race
+/// window): a statement's own result passes through here, and an armed
+/// seam answers the error a failing statement would, so the caller's
+/// error arm runs on a real failure path. Absent from every non-test
+/// build: the callers' code is unchanged there.
+#[cfg(test)]
+pub(crate) mod fault {
+    use std::cell::Cell;
+
+    thread_local!(static LEFT: Cell<Option<u32>> = const { Cell::new(None) });
+
+    /// Arms the seam: the `nth` wrapped statement of the next call on
+    /// this thread answers an error, and the rest of that call runs or
+    /// returns as it would.
+    pub(crate) fn arm(nth: u32) {
+        LEFT.with(|left| left.set(Some(nth)));
+    }
+
+    /// True while a wrapped statement is still waiting to fail.
+    pub(crate) fn armed() -> bool {
+        LEFT.with(|left| left.get().is_some())
+    }
+
+    /// Counts one wrapped statement; the armed one answers the store
+    /// error a real failing statement would.
+    pub(crate) fn tick<T, E: Into<crate::StoreError>>(
+        value: Result<T, E>,
+    ) -> Result<T, crate::StoreError> {
+        let mut fail = false;
+        LEFT.with(|left| {
+            if let Some(count) = left.get() {
+                if count <= 1 {
+                    left.set(None);
+                    fail = true;
+                } else {
+                    left.set(Some(count - 1));
+                }
+            }
+        });
+        if fail {
+            return Err(crate::StoreError::Sqlite(rusqlite::Error::InvalidQuery));
+        }
+        value.map_err(Into::into)
+    }
+}

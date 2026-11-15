@@ -637,3 +637,17 @@ fn status_flags_an_index_from_another_extractor_version() {
         }
     }
 }
+
+/// With no stored root, or a root with no directory name, `status` names
+/// the tree by its key without the hash.
+#[test]
+fn status_names_a_tree_with_no_stored_root_by_its_key() {
+    let world = World::fixture();
+    world.index();
+    world.store().set_root("").expect("clear the root");
+    let env = world.ok(&["status"]);
+    let key = env["data"]["key"].as_str().expect("key");
+    let (slug, hash) = key.rsplit_once('-').expect("a hashed key");
+    assert_eq!(hash.len(), 8, "{key}");
+    assert_eq!(env["data"]["name"], slug, "{env}");
+}

@@ -9,6 +9,8 @@
 mod scip;
 #[path = "scip/score_support.rs"]
 mod score_support;
+#[path = "scip/w13_cases.rs"]
+mod w13_cases;
 
 use std::path::PathBuf;
 
@@ -135,120 +137,7 @@ fn each_band_carries_its_covered_figure() {
 /// several same-named refs.
 #[test]
 fn each_d4_bucket_classifies_its_hand_built_refs() {
-    use scip::score::w12_bucket;
-
-    let reference =
-        |kind: &str, text: &str, receiver: Option<&str>, hint: Option<&str>| ScoreCallRef {
-            kind: kind.to_owned(),
-            text: text.to_owned(),
-            receiver: receiver.map(|text| text.to_owned()),
-            receiver_type: hint.map(|hint| hint.to_owned()),
-            scope: String::new(),
-            placed: false,
-        };
-    let one_ref = |kind: &str, receiver: Option<&str>, hint: Option<&str>| {
-        vec![reference(kind, "f", receiver, hint)]
-    };
-
-    assert_eq!(
-        w12_bucket(&one_ref("macro_arg", None, None), "f", false),
-        "macro_arg path shape"
-    );
-    assert_eq!(
-        w12_bucket(&one_ref("macro_arg", Some("x"), None), "f", false),
-        "macro_arg method shape"
-    );
-    assert_eq!(
-        w12_bucket(&one_ref("macro", None, None), "f", false),
-        "macro invocation"
-    );
-    // A macro_arg ref outranks the invocation that carries it.
-    let both = vec![
-        reference("macro_arg", "f", Some("x"), None),
-        reference("macro", "f", None, None),
-    ];
-    assert_eq!(w12_bucket(&both, "f", false), "macro_arg method shape");
-    let both = vec![
-        reference("macro_arg", "f", None, None),
-        reference("macro", "f", None, None),
-    ];
-    assert_eq!(w12_bucket(&both, "f", false), "macro_arg path shape");
-
-    assert_eq!(
-        w12_bucket(&one_ref("call", None, None), "f", false),
-        "unresolved path call"
-    );
-    assert_eq!(
-        w12_bucket(&one_ref("method_call", Some("x"), None), "f", true),
-        "trait-method callee"
-    );
-    for (hint, bucket) in [
-        ("type:T", "identifier with hint type"),
-        ("ctor:T::f", "identifier with hint ctor"),
-        ("ctor?:T::f", "identifier with hint ctor?"),
-        ("ret:f", "identifier with hint ret"),
-        ("ret?:f", "identifier with hint ret?"),
-    ] {
-        assert_eq!(
-            w12_bucket(&one_ref("method_call", Some("x"), Some(hint)), "f", false),
-            bucket,
-            "{hint}"
-        );
-    }
-    assert_eq!(
-        w12_bucket(
-            &one_ref("method_call", Some("x"), Some("bogus:z")),
-            "f",
-            false
-        ),
-        "other"
-    );
-    assert_eq!(
-        w12_bucket(&one_ref("method_call", Some("self"), None), "f", false),
-        "identifier with no hint"
-    );
-    assert_eq!(
-        w12_bucket(&one_ref("method_call", Some("self.f"), None), "f", false),
-        "self.field"
-    );
-    for receiver in ["make()", "a.b", "self.f.g()"] {
-        assert_eq!(
-            w12_bucket(&one_ref("method_call", Some(receiver), None), "f", false),
-            "call or chained receiver",
-            "{receiver}"
-        );
-    }
-    for receiver in ["v[0]", "<T as U>"] {
-        assert_eq!(
-            w12_bucket(&one_ref("method_call", Some(receiver), None), "f", false),
-            "other",
-            "{receiver}"
-        );
-    }
-    let empty: Vec<ScoreCallRef> = Vec::new();
-    assert_eq!(w12_bucket(&empty, "f", false), "other");
-
-    // The precedence with several same-named refs in one caller: the
-    // hint kind, then the unhinted identifier, self.field, the call or
-    // chained receiver, and the catch-all.
-    let mixed = vec![
-        reference("method_call", "f", Some("make()"), None),
-        reference("method_call", "f", Some("self.f"), None),
-        reference("method_call", "f", Some("n2"), None),
-        reference("method_call", "f", Some("x"), Some("type:T")),
-    ];
-    assert_eq!(w12_bucket(&mixed, "f", false), "identifier with hint type");
-    let mixed = vec![
-        reference("method_call", "f", Some("make()"), None),
-        reference("method_call", "f", Some("self.f"), None),
-        reference("method_call", "f", Some("n2"), None),
-    ];
-    assert_eq!(w12_bucket(&mixed, "f", false), "identifier with no hint");
-    let mixed = vec![
-        reference("method_call", "f", Some("make()"), None),
-        reference("method_call", "f", Some("self.f"), None),
-    ];
-    assert_eq!(w12_bucket(&mixed, "f", false), "self.field");
+    w13_cases::each_d4_bucket_classifies_its_hand_built_refs();
 }
 
 /// One extracted case per D4 bucket the scan can produce at this
@@ -546,173 +435,7 @@ fn the_origin_line_counts_macro_arg_edges() {
 /// a multi-target file yet.
 #[test]
 fn each_w13_bucket_classifies_its_hand_built_refs() {
-    use scip::foreign::{Binding, MissContext};
-    use scip::score::MissInput;
-    use scip::score::miss_bucket;
-
-    let reference = |kind: &str, text: &str| ScoreCallRef {
-        kind: kind.to_owned(),
-        text: text.to_owned(),
-        receiver: None,
-        receiver_type: None,
-        scope: String::new(),
-        placed: false,
-    };
-    let empty = || MissContext::default();
-
-    // The W12 ladder reads through an empty context unchanged.
-    assert_eq!(
-        miss_bucket(
-            &empty(),
-            MissInput {
-                refs: &[reference("call", "f")],
-                callee_name: "f",
-                is_trait: false,
-                caller_file: 1,
-                callee_file: 1,
-                callee_id: 2,
-            },
-        ),
-        ("unresolved path call", "unresolved path call")
-    );
-
-    // shared module file: the caller or the callee sits in a file more
-    // than one crate target claims, whatever the family.
-    let shared = MissContext {
-        shared: [7].into(),
-        ..MissContext::default()
-    };
-    assert_eq!(
-        miss_bucket(
-            &shared,
-            MissInput {
-                refs: &[reference("call", "f")],
-                callee_name: "f",
-                is_trait: false,
-                caller_file: 7,
-                callee_file: 1,
-                callee_id: 2,
-            },
-        ),
-        ("shared module file", "unresolved path call")
-    );
-    assert_eq!(
-        miss_bucket(
-            &shared,
-            MissInput {
-                refs: &[reference("method_call", "f")],
-                callee_name: "f",
-                is_trait: false,
-                caller_file: 1,
-                callee_file: 7,
-                callee_id: 2,
-            },
-        ),
-        ("shared module file", "other")
-    );
-
-    // glob import in scope: the callee is defined in a module row the
-    // caller's scope's glob use reaches.
-    let glob = MissContext {
-        glob: [((1, String::new()), [5].into())].into(),
-        symbol_module: [(9, 5)].into(),
-        ..MissContext::default()
-    };
-    assert_eq!(
-        miss_bucket(
-            &glob,
-            MissInput {
-                refs: &[reference("call", "f")],
-                callee_name: "f",
-                is_trait: false,
-                caller_file: 1,
-                callee_file: 1,
-                callee_id: 9,
-            },
-        ),
-        ("glob import in scope", "unresolved path call")
-    );
-    // A callee defined elsewhere stays with the W12 bucket.
-    assert_eq!(
-        miss_bucket(
-            &glob,
-            MissInput {
-                refs: &[reference("call", "f")],
-                callee_name: "f",
-                is_trait: false,
-                caller_file: 1,
-                callee_file: 1,
-                callee_id: 10,
-            },
-        ),
-        ("unresolved path call", "unresolved path call")
-    );
-
-    // re-exported path: the first segment binds an item whose home
-    // module differs from the module the binding's path names.
-    let reexport = MissContext {
-        uses: [(
-            (1, String::new()),
-            vec![Binding {
-                bound: "g".to_owned(),
-                prefix: "crate".to_owned(),
-                home: "crate::inner".to_owned(),
-            }],
-        )]
-        .into(),
-        ..MissContext::default()
-    };
-    assert_eq!(
-        miss_bucket(
-            &reexport,
-            MissInput {
-                refs: &[reference("call", "g::f")],
-                callee_name: "f",
-                is_trait: false,
-                caller_file: 1,
-                callee_file: 1,
-                callee_id: 2,
-            },
-        ),
-        ("re-exported path", "unresolved path call")
-    );
-    assert_eq!(
-        miss_bucket(
-            &reexport,
-            MissInput {
-                refs: &[reference("call", "crate::f")],
-                callee_name: "f",
-                is_trait: false,
-                caller_file: 1,
-                callee_file: 1,
-                callee_id: 2,
-            },
-        ),
-        ("unresolved path call", "unresolved path call")
-    );
-
-    // The shared-file mark outranks the glob reach, and a miss still
-    // lands in exactly one bucket.
-    let both = MissContext {
-        shared: [1].into(),
-        glob: [((1, String::new()), [5].into())].into(),
-        symbol_module: [(9, 5)].into(),
-        ..MissContext::default()
-    };
-    assert_eq!(
-        miss_bucket(
-            &both,
-            MissInput {
-                refs: &[reference("call", "f")],
-                callee_name: "f",
-                is_trait: false,
-                caller_file: 1,
-                callee_file: 1,
-                callee_id: 9,
-            },
-        ),
-        ("shared module file", "unresolved path call")
-    );
+    w13_cases::each_w13_bucket_classifies_its_hand_built_refs();
 }
 
 /// The scope rule (W13 D4): a document outside every member directory
@@ -968,6 +691,102 @@ fn the_w13_buckets_hold_their_extracted_cases() {
             "\"split\":{\"glob import in scope\":{\"unresolved path call\":1},\
              \"re-exported path\":{\"unresolved path call\":1}}"
         ),
+        "{report}"
+    );
+}
+
+/// The R7 scope rule on a hand-built case: a workspace-root package
+/// member covers the tree, but a directory that carries its own
+/// `Cargo.toml` and is not a member is its own boundary, so documents
+/// under it leave both sets and only the counters move — recall and
+/// the graded precision are the member documents' own.
+#[test]
+fn a_nested_package_that_is_not_a_member_stays_out_of_scope() {
+    let temp = Temp::new("nested-scope");
+    let repo = temp.root.join("repo");
+    std::fs::create_dir_all(repo.join("src")).expect("create src");
+    std::fs::create_dir_all(repo.join("vendor/odd/src")).expect("create vendor");
+    std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"root\"\n").expect("manifest");
+    std::fs::write(
+        repo.join("vendor/odd/Cargo.toml"),
+        "[package]\nname = \"odd\"\n",
+    )
+    .expect("vendor manifest");
+    std::fs::write(
+        repo.join("src/lib.rs"),
+        "pub fn one() {}\npub fn caller() {\n    one();\n}\n",
+    )
+    .expect("lib");
+    std::fs::write(
+        repo.join("vendor/odd/src/lib.rs"),
+        "pub fn far() {}\npub fn caller() {\n    far();\n}\n",
+    )
+    .expect("vendor lib");
+    // Q1: a fixture document under `fixtures/` is a nested non-member
+    // package too — its own manifest, not a workspace member.
+    std::fs::create_dir_all(repo.join("fixtures/odd/src")).expect("create fixture dir");
+    std::fs::write(
+        repo.join("fixtures/odd/Cargo.toml"),
+        "[package]\nname = \"fix-odd\"\n",
+    )
+    .expect("fixture manifest");
+    std::fs::write(
+        repo.join("fixtures/odd/src/lib.rs"),
+        "pub fn fixture() {}\n",
+    )
+    .expect("fixture lib");
+    let mut store = Store::open(&temp.db()).expect("open store");
+    index(&repo, &mut store, &RustLanguage::new().expect("grammar")).expect("index");
+
+    let document = |path: &str, occurrences: Vec<scip::wire::Occurrence>| scip::wire::Document {
+        relative_path: path.to_owned(),
+        occurrences,
+    };
+    let export = scip::wire::ScipIndex {
+        documents: vec![
+            document(
+                "src/lib.rs",
+                vec![
+                    occurrence("root", 0, 7, 10, "one", true),
+                    occurrence("root", 2, 4, 7, "one", false),
+                ],
+            ),
+            document(
+                "vendor/odd/src/lib.rs",
+                vec![
+                    occurrence("odd", 0, 7, 10, "far", true),
+                    occurrence("odd", 2, 4, 7, "far", false),
+                ],
+            ),
+        ],
+    };
+    // Only the root package is a member; vendor/odd carries its own
+    // manifest and is not one.
+    let members = Members::from_metadata(
+        b"{\"workspace_root\":\"/w\",\"packages\":[{\"manifest_path\":\"/w/Cargo.toml\"}]}",
+    )
+    .expect("members");
+    assert!(members.in_scope("vendor/odd/src/lib.rs"));
+    assert!(!members.in_scope_with_packages(
+        "vendor/odd/src/lib.rs",
+        &store.package_dirs().expect("package dirs")
+    ));
+    // Q1: the fixture document reads out of scope even though the root
+    // member's prefix covers it, because fixtures/odd is its own
+    // package and not a member.
+    let package_dirs = store.package_dirs().expect("package dirs");
+    assert!(package_dirs.contains("fixtures/odd"));
+    assert!(members.in_scope("fixtures/odd/src/lib.rs"));
+    assert!(!members.in_scope_with_packages("fixtures/odd/src/lib.rs", &package_dirs));
+    let report = scip::score::score_with(&export, &store, Some(&members)).expect("score");
+    assert!(report.contains("\"out_of_scope_documents\":1"), "{report}");
+    assert!(report.contains("\"out_of_scope_truth\":1"), "{report}");
+    assert!(report.contains("\"out_of_scope_edges\":1"), "{report}");
+    // Only the member pair remains in truth, and the graded figures are
+    // the member edges' own: recall and precision did not move.
+    assert!(report.contains("\"recall\":{\"truth\":1,"), "{report}");
+    assert!(
+        report.contains("\"graded\":{\"0.5\":{\"edges\":1,\"corroborated\":1,\"precision\":1.0000"),
         "{report}"
     );
 }

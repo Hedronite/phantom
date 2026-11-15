@@ -387,3 +387,67 @@ fn a_gone_tree_and_a_missing_lock_file_are_reported_without_a_write() {
     );
     assert!(!lock.exists(), "doctor made a lock file");
 }
+
+#[cfg(unix)]
+#[test]
+fn a_data_directory_others_can_write_and_an_open_repos_directory_are_flagged() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new();
+    let data_dir = world.data.path();
+    let mode = |path: &Path| fs::metadata(path).expect("meta").permissions().mode() & 0o777;
+    let original = mode(data_dir);
+    fs::set_permissions(data_dir, fs::Permissions::from_mode(0o777)).expect("chmod data");
+    let data = doctor(data_dir, world.dir.path());
+    assert_eq!(data["ok"], false);
+    let check_data = check(&data, "data_dir");
+    assert_eq!(check_data["ok"], false);
+    assert_eq!(
+        check_data["detail"],
+        "the data directory is 0777, writable by others"
+    );
+    assert_eq!(mode(data_dir), 0o777, "doctor narrowed the data directory");
+    fs::set_permissions(data_dir, fs::Permissions::from_mode(original)).expect("chmod back");
+
+    let repos = data_dir.join("repos");
+    fs::set_permissions(&repos, fs::Permissions::from_mode(0o755)).expect("chmod repos");
+    let data = doctor(data_dir, world.dir.path());
+    let check_data = check(&data, "data_dir");
+    assert_eq!(check_data["ok"], false);
+    assert_eq!(
+        check_data["detail"],
+        "repos/ is 0755, not a private directory"
+    );
+    assert_eq!(mode(&repos), 0o755, "doctor narrowed repos/");
+}
+
+#[test]
+fn a_database_that_is_not_sqlite_or_has_an_older_schema_is_reported() {
+    let world = World::new();
+    // An older binary's stamp, in `user_version` at byte 60 of the header.
+    let older = world.database("repo-");
+    let mut bytes = fs::read(&older).expect("read");
+    bytes[60..64].copy_from_slice(&2_u32.to_be_bytes());
+    fs::write(&older, &bytes).expect("write");
+    let data = doctor(world.data.path(), world.dir.path());
+    let databases = check(&data, "databases");
+    assert_eq!(databases["ok"], true, "{databases}");
+    let detail = databases["detail"].as_str().expect("detail").to_owned();
+    assert!(
+        detail.contains(&format!(
+            "{}: schema 2, which index migrates to 3",
+            world.key("repo-")
+        )),
+        "{detail}"
+    );
+
+    fs::write(world.database("graph-"), b"not a database").expect("write");
+    let data = doctor(world.data.path(), world.dir.path());
+    assert_eq!(data["ok"], false);
+    let databases = check(&data, "databases");
+    assert_eq!(databases["ok"], false);
+    let detail = databases["detail"].as_str().expect("detail").to_owned();
+    assert!(
+        detail.contains(&format!("{}: not an SQLite database", world.key("graph-"))),
+        "{detail}"
+    );
+}

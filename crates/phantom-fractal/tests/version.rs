@@ -85,9 +85,23 @@ fn built_sha() -> Option<String> {
             return Some(sha);
         }
     }
+    // An isolated git: no outside config, and a fixed identity, so it never
+    // derives one from the host name, which costs a DNS lookup.
+    let home = std::env::temp_dir().join(format!("phantom-fractal-version-{}", std::process::id()));
     let out = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &home)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
+        .env("LC_ALL", "C")
         .output()
         .ok()?;
     let sha = String::from_utf8(out.stdout).ok()?.trim().to_owned();

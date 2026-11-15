@@ -428,3 +428,28 @@ fn resolve_is_pure() {
     i.call(caller, "helper");
     assert_eq!(i.resolve(), i.resolve());
 }
+
+#[test]
+fn a_name_two_failing_uses_bind_is_unresolved_when_either_names_the_workspace() {
+    // Unresolved beats external: a binding that names the workspace but
+    // cannot be placed is not an external call.
+    for (first, second, unresolved, external) in [
+        ("std::fmt", "crate::gone", 1, 0),
+        ("crate::gone", "std::fmt", 1, 0),
+        ("crate::gone", "crate::missing", 1, 0),
+        ("std::fmt", "core::fmt", 0, 1),
+    ] {
+        let mut i = Input::new();
+        i.uses("src/lib.rs", "", first, Some("a"), false);
+        i.uses("src/lib.rs", "", second, Some("a"), false);
+        let caller = i.function("caller");
+        i.call(caller, "a::f");
+        let (edges, counts) = i.resolve();
+        assert!(edges.is_empty(), "{first} {second}: {edges:?}");
+        assert_eq!(
+            (counts.unresolved, counts.external),
+            (unresolved, external),
+            "{first} {second}"
+        );
+    }
+}

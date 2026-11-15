@@ -5,6 +5,11 @@
 //! `macro_arg` refs. These live beside `impact`'s `symbol_call_refs`,
 //! which the scorer no longer uses: the buckets need the hint text,
 //! and that helper sits in another lane's file this week.
+//!
+//! Each read is a reader (prepare, query, one pass through
+//! [`collect_rows`]) and a mapper that owns the row body; a column the
+//! struct does not carry, or the placement mark, is read by the reader
+//! and handed to its mapper.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -64,19 +69,13 @@ impl crate::Store {
                AND r.kind IN ('call', 'method_call', 'macro', 'macro_arg')
              ORDER BY r.id",
         )?;
-        let mut rows = statement.query([id])?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next()? {
-            out.push(ScoreCallRef {
-                kind: row.get(0)?,
-                text: row.get(1)?,
-                receiver: row.get(2)?,
-                receiver_type: row.get(3)?,
-                scope: row.get(4)?,
-                placed: row.get::<_, i64>(5)? != 0,
-            });
-        }
-        Ok(out)
+        let queried = statement.query([id]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
+        collect_rows(&mut rows, |row| {
+            score_call_ref_row(row, row.get::<_, i64>(5)? != 0)
+        })
     }
 
     /// Every `modules` row, by id, for the glob reach and the shared
@@ -85,22 +84,14 @@ impl crate::Store {
         let mut statement = self.conn.prepare(
             "SELECT id, target_id, parent_id, path, file_id, scope FROM modules ORDER BY id",
         )?;
-        let mut rows = statement.query([])?;
-        let mut out = BTreeMap::new();
-        while let Some(row) = rows.next()? {
-            let file_id: Option<i64> = row.get(4)?;
-            out.insert(
-                row.get(0)?,
-                ModuleRow {
-                    target_id: row.get(1)?,
-                    parent_id: row.get(2)?,
-                    path: row.get(3)?,
-                    file_id,
-                    scope: row.get(5)?,
-                },
-            );
-        }
-        Ok(out)
+        let queried = statement.query([]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
+        let keyed = collect_rows(&mut rows, |row| {
+            Ok((row.get::<_, i64>(0)?, module_row(row)?))
+        })?;
+        Ok(keyed.into_iter().collect())
     }
 
     /// Every file that carries a module row, with the number of crate
@@ -111,12 +102,12 @@ impl crate::Store {
             "SELECT file_id, COUNT(DISTINCT target_id) FROM modules
              WHERE file_id IS NOT NULL GROUP BY file_id",
         )?;
-        let mut rows = statement.query([])?;
-        let mut out = BTreeMap::new();
-        while let Some(row) = rows.next()? {
-            out.insert(row.get(0)?, row.get::<_, i64>(1)? as usize);
-        }
-        Ok(out)
+        let queried = statement.query([]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
+        let counted = collect_rows(&mut rows, file_target_count)?;
+        Ok(counted.into_iter().collect())
     }
 
     /// Every `use` ref row, for the glob and re-export buckets.
@@ -125,19 +116,11 @@ impl crate::Store {
             "SELECT id, file_id, scope, text, alias, glob FROM refs
              WHERE kind = 'use' ORDER BY id",
         )?;
-        let mut rows = statement.query([])?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next()? {
-            out.push(UseRow {
-                id: row.get(0)?,
-                file_id: row.get(1)?,
-                scope: row.get(2)?,
-                text: row.get(3)?,
-                alias: row.get(4)?,
-                glob: row.get::<_, i64>(5)? != 0,
-            });
-        }
-        Ok(out)
+        let queried = statement.query([]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
+        collect_rows(&mut rows, |row| use_row(row, row.get::<_, i64>(0)?))
     }
 
     /// The target of every `import` edge that carries its `use` ref:
@@ -147,10 +130,23 @@ impl crate::Store {
             "SELECT ref_id, dst_kind, dst_id FROM edges
              WHERE kind = 'import' AND ref_id IS NOT NULL",
         )?;
-        let mut rows = statement.query([])?;
-        let mut out = BTreeMap::new();
-        while let Some(row) = rows.next()? {
-            out.insert(row.get(0)?, (row.get(1)?, row.get(2)?));
+        let queried = statement.query([]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
+        let keyed = collect_rows(&mut rows, import_target)?;
+        Ok(keyed.into_iter().collect())
+    }
+
+    /// The directory of every package Phantom's own discovery found, as
+    /// its manifest path's parent (relative, as the store keeps it). The
+    /// scope rule reads a nested package that is not a workspace member
+    /// as its own boundary (W13 R7).
+    pub fn package_dirs(&self) -> Result<BTreeSet<String>, StoreError> {
+        let mut statement = self.conn.prepare("SELECT manifest_path FROM packages")?;
+        let mut out = BTreeSet::new();
+        for path in statement.query_map([], |row| row.get::<_, String>(0))? {
+            out.insert(manifest_dir(&path?));
         }
         Ok(out)
     }
@@ -160,12 +156,12 @@ impl crate::Store {
         let mut statement = self
             .conn
             .prepare("SELECT id, module_id FROM symbols WHERE module_id IS NOT NULL")?;
-        let mut rows = statement.query([])?;
-        let mut out = BTreeMap::new();
-        while let Some(row) = rows.next()? {
-            out.insert(row.get(0)?, row.get(1)?);
-        }
-        Ok(out)
+        let queried = statement.query([]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
+        let keyed = collect_rows(&mut rows, symbol_module)?;
+        Ok(keyed.into_iter().collect())
     }
 
     /// The ids of every ref of one kind. The scorer's origin line asks
@@ -173,11 +169,90 @@ impl crate::Store {
     /// call that sat inside a macro argument.
     pub fn ref_ids_of_kind(&self, kind: &str) -> Result<BTreeSet<i64>, StoreError> {
         let mut statement = self.conn.prepare("SELECT id FROM refs WHERE kind = ?1")?;
-        let mut rows = statement.query([kind])?;
+        let queried = statement.query([kind]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
         let mut out = BTreeSet::new();
         while let Some(row) = rows.next()? {
             out.insert(row.get(0)?);
         }
         Ok(out)
+    }
+}
+
+/// Every row of one statement through its mapper, in statement order.
+fn collect_rows<T>(
+    rows: &mut rusqlite::Rows<'_>,
+    map: impl Fn(&rusqlite::Row<'_>) -> Result<T, StoreError>,
+) -> Result<Vec<T>, StoreError> {
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push(map(row)?);
+    }
+    Ok(out)
+}
+
+/// One `score_call_refs` row: kind, text, receiver, receiver-type hint
+/// and scope, with the placement mark the reader read from the last
+/// column.
+fn score_call_ref_row(row: &rusqlite::Row<'_>, placed: bool) -> Result<ScoreCallRef, StoreError> {
+    Ok(ScoreCallRef {
+        kind: row.get(0)?,
+        text: row.get(1)?,
+        receiver: row.get(2)?,
+        receiver_type: row.get(3)?,
+        scope: row.get(4)?,
+        placed,
+    })
+}
+
+/// One `modules` row, with the row key read by the reader: target,
+/// parent, path, file and scope.
+fn module_row(row: &rusqlite::Row<'_>) -> Result<ModuleRow, StoreError> {
+    Ok(ModuleRow {
+        target_id: row.get(1)?,
+        parent_id: row.get(2)?,
+        path: row.get(3)?,
+        file_id: row.get(4)?,
+        scope: row.get(5)?,
+    })
+}
+
+/// One `use` ref row, with the row key read by the reader.
+fn use_row(row: &rusqlite::Row<'_>, id: i64) -> Result<UseRow, StoreError> {
+    Ok(UseRow {
+        id,
+        file_id: row.get(1)?,
+        scope: row.get(2)?,
+        text: row.get(3)?,
+        alias: row.get(4)?,
+        glob: row.get::<_, i64>(5)? != 0,
+    })
+}
+
+/// One `import` edge row: its ref id and the destination kind and row
+/// id.
+fn import_target(row: &rusqlite::Row<'_>) -> Result<(i64, (String, i64)), StoreError> {
+    Ok((row.get(0)?, (row.get(1)?, row.get(2)?)))
+}
+
+/// One `modules` grouping row: the file and the number of crate targets
+/// claiming it.
+fn file_target_count(row: &rusqlite::Row<'_>) -> Result<(i64, usize), StoreError> {
+    Ok((row.get(0)?, row.get::<_, i64>(1)? as usize))
+}
+
+/// One `symbols` row: its id and its module row.
+fn symbol_module(row: &rusqlite::Row<'_>) -> Result<(i64, i64), StoreError> {
+    Ok((row.get(0)?, row.get(1)?))
+}
+
+/// The directory of one package manifest path: everything before its
+/// last separator, and the borrowed empty string for a path with none.
+fn manifest_dir(path: &str) -> String {
+    match path.rsplit_once('/') {
+        Some((head, _)) => head.to_owned(),
+        None => String::new(),
     }
 }

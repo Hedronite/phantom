@@ -32,9 +32,9 @@ layers:
   - { id: acceptance,        enabled: true,  tier: 1, runner: "std::process journeys", scope: tests }
   - { id: snapshot,          enabled: false, tier: 2, runner: insta,                   scope: tests }
   - { id: compile-fail,      enabled: false, tier: 2, runner: trybuild,                scope: tests }
-  - { id: coverage,          enabled: false, tier: 0, runner: cargo-llvm-cov,          scope: lib }
-  - { id: crap,              enabled: false, tier: 0, runner: cargo-crap,              scope: lib }
-  - { id: mutation,          enabled: false, tier: 1, runner: cargo-mutants,           scope: diff }
+  - { id: coverage,          enabled: true,  tier: 0, runner: cargo-llvm-cov,          scope: lib }
+  - { id: crap,              enabled: true,  tier: 0, runner: cargo-crap,              scope: lib }
+  - { id: mutation,          enabled: true,  tier: 1, runner: cargo-mutants,           scope: diff }
   - { id: property,          enabled: false, tier: 1, runner: proptest,                scope: lib }
   - { id: fuzz,              enabled: false, tier: 3, runner: cargo-fuzz,              scope: lib }
   - { id: concurrency,       enabled: false, tier: 3, runner: loom,                    scope: lib }

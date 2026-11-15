@@ -167,7 +167,10 @@ const DANGLING: &str = "\\N";
 fn query_values(conn: &Connection, sql: &str) -> Result<Vec<Vec<SqlValue>>, StoreError> {
     let mut statement = conn.prepare(sql)?;
     let count = statement.column_count();
-    let mut rows = statement.query([])?;
+    let queried = statement.query([]);
+    #[cfg(test)]
+    let queried = crate::fault::tick(queried);
+    let mut rows = queried?;
     let mut out = Vec::new();
     while let Some(row) = rows.next()? {
         let mut cells = Vec::with_capacity(count);

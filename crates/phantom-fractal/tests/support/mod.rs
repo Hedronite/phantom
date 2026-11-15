@@ -7,7 +7,8 @@
 //! fixed committer times and identity, then `git reset --hard` to check
 //! the tree out. Every run clears the environment and sets
 //! `GIT_CONFIG_NOSYSTEM=1`, `GIT_CONFIG_GLOBAL=/dev/null`, a temp `HOME`
-//! and `core.hooksPath=/dev/null`, so no hook or outside config runs.
+//! and `XDG_CONFIG_HOME`, a fixed identity and `core.hooksPath=/dev/null`,
+//! so no hook, outside config or host-name lookup runs.
 //! Phantom itself never runs `git`.
 #![allow(dead_code)]
 
@@ -18,6 +19,15 @@ use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::SystemTime;
+
+/// The author and committer every spawned `git` is given, so none derives
+/// one from the host name, which costs a DNS lookup.
+pub const IDENTITY: [(&str, &str); 4] = [
+    ("GIT_AUTHOR_NAME", "Test"),
+    ("GIT_AUTHOR_EMAIL", "test@example.invalid"),
+    ("GIT_COMMITTER_NAME", "Test"),
+    ("GIT_COMMITTER_EMAIL", "test@example.invalid"),
+];
 
 /// HEAD's committer time, unix seconds (2025-06-15).
 pub const HEAD: i64 = 1_750_000_000;
@@ -119,8 +129,10 @@ impl Repo {
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("HOME", &self.home)
+            .env("XDG_CONFIG_HOME", &self.home)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .envs(IDENTITY)
             .env("LC_ALL", "C")
             .args([
                 "-c",

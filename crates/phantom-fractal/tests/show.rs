@@ -751,3 +751,23 @@ fn source_is_ok_stale_too_large_or_unreadable() {
 fn symlink(target: &Path, link: &Path) {
     std::os::unix::fs::symlink(target, link).expect("symlink");
 }
+
+/// Exactly the cap of 100 members is not truncated; one more is.
+#[test]
+fn a_type_with_exactly_100_members_is_not_truncated() {
+    for (count, truncated) in [(100, false), (101, true)] {
+        let mut lib = String::from("pub struct Wide;\n\nimpl Wide {\n");
+        for n in 0..count {
+            writeln!(lib, "    pub fn m{n:03}(&self) {{}}").expect("write");
+        }
+        lib.push_str("}\n");
+        let fixture = Fixture::generated(&[("src/lib.rs", lib)]);
+        let wide = fixture.show(BINS[0], &["Wide"]).1;
+        assert_eq!(
+            wide["members"]["hits"].as_array().map(Vec::len),
+            Some(100),
+            "{count} members"
+        );
+        assert_eq!(wide["members"]["truncated"], truncated, "{count} members");
+    }
+}

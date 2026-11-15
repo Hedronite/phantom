@@ -104,7 +104,10 @@ pub struct CochangeGroup {
 /// once per `write_cochange` so each pair insert binds numbers only.
 fn file_ids(conn: &Connection) -> Result<HashMap<String, i64>, StoreError> {
     let mut statement = conn.prepare("SELECT path, id FROM files")?;
-    let mut rows = statement.query([])?;
+    let queried = statement.query([]);
+    #[cfg(test)]
+    let queried = crate::fault::tick(queried);
+    let mut rows = queried?;
     let mut map: HashMap<String, i64> = HashMap::new();
     while let Some(row) = rows.next()? {
         map.insert(row.get::<_, String>(0)?, row.get::<_, i64>(1)?);
@@ -257,7 +260,10 @@ impl crate::Store {
              ORDER BY c.lift DESC, c.together DESC, s.path ASC
              LIMIT ?3",
         )?;
-        let mut rows = statement.query(rusqlite::params![file_id, min_lift, i64::from(limit)])?;
+        let queried = statement.query(rusqlite::params![file_id, min_lift, i64::from(limit)]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
         let mut out: Vec<CochangePartner> = Vec::new();
         while let Some(row) = rows.next()? {
             out.push(CochangePartner {
@@ -331,7 +337,10 @@ fn read_scan_files(conn: &Connection) -> Result<Vec<FileRow>, StoreError> {
          LEFT JOIN files s ON s.path = h.path
          ORDER BY h.path",
     )?;
-    let mut rows = statement.query([])?;
+    let queried = statement.query([]);
+    #[cfg(test)]
+    let queried = crate::fault::tick(queried);
+    let mut rows = queried?;
     let mut out: Vec<FileRow> = Vec::new();
     while let Some(row) = rows.next()? {
         let _unused_file_id: Option<i64> = row.get(1)?;
@@ -357,7 +366,10 @@ fn read_scan_pairs(conn: &Connection) -> Result<Vec<PairRow>, StoreError> {
          JOIN files fb ON fb.id = c.b
          ORDER BY c.a, c.b",
     )?;
-    let mut rows = statement.query([])?;
+    let queried = statement.query([]);
+    #[cfg(test)]
+    let queried = crate::fault::tick(queried);
+    let mut rows = queried?;
     let mut out: Vec<PairRow> = Vec::new();
     while let Some(row) = rows.next()? {
         out.push(PairRow {

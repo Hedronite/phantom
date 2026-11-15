@@ -689,3 +689,50 @@ fn equal_scores_go_by_path_then_line() {
         );
     }
 }
+
+/// A damaged index never makes `map` panic or print a partial reply. With
+/// any one page of `graph.db` zeroed, it answers in full or fails with one
+/// error envelope, and a page `map` reads past the store's own checks
+/// fails as the store's error.
+#[test]
+fn map_over_a_damaged_index_answers_or_fails_with_one_envelope() {
+    let world = World::new("graph");
+    let database = world.database();
+    assert!(
+        !database.with_file_name("graph.db-wal").exists()
+            || fs::metadata(database.with_file_name("graph.db-wal"))
+                .expect("wal")
+                .len()
+                == 0,
+        "the index was not checkpointed"
+    );
+    let original = fs::read(&database).expect("read graph.db");
+    let page = usize::from(u16::from_be_bytes([original[16], original[17]]));
+    assert!(
+        page >= 512 && original.len().is_multiple_of(page),
+        "page size {page}"
+    );
+    let mut store_failures = 0;
+    for at in 1..original.len() / page {
+        let mut damaged = original.clone();
+        damaged[at * page..(at + 1) * page].fill(0);
+        fs::write(&database, &damaged).expect("damage graph.db");
+        let run = world.run(BINS[1], &["map", "--budget", "2000"]);
+        assert!(run.code.is_some(), "map was killed with page {at} zeroed");
+        let envelope = run.envelope();
+        assert_eq!(
+            envelope["ok"],
+            run.code == Some(0),
+            "page {at}: {}",
+            run.stdout
+        );
+        if envelope["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("store: "))
+        {
+            store_failures += 1;
+        }
+    }
+    fs::write(&database, &original).expect("restore graph.db");
+    assert!(store_failures > 0, "no zeroed page reached a store failure");
+}

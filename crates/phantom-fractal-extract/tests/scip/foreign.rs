@@ -54,16 +54,45 @@ impl Members {
 
     /// True when the document sits inside some member's directory. A
     /// member at the workspace root reads as an empty directory and
-    /// claims everything.
+    /// claims everything under it.
     pub fn in_scope(&self, document: &str) -> bool {
-        self.dirs.iter().any(|dir| {
-            dir.is_empty() || document == dir.as_str() || document.starts_with(&format!("{dir}/"))
-        })
+        self.dirs.iter().any(|dir| under(dir, document))
+    }
+
+    /// True when the document is in scope under the W13 R7 rule: the
+    /// longest directory boundary that covers it must be a member's.
+    /// A document under a nested package directory that is not a
+    /// workspace member (its own `Cargo.toml`, such as a vendored
+    /// crate) stays out of scope even when a member prefix — say the
+    /// workspace-root package's empty one — covers it.
+    pub fn in_scope_with_packages(&self, document: &str, packages: &BTreeSet<String>) -> bool {
+        let member = self
+            .dirs
+            .iter()
+            .filter(|dir| under(dir, document))
+            .map(|dir| dir.len())
+            .max();
+        let Some(member) = member else {
+            return false;
+        };
+        let nested = packages
+            .iter()
+            .filter(|dir| !self.dirs.contains(*dir))
+            .filter(|dir| under(dir, document))
+            .map(|dir| dir.len())
+            .max();
+        !matches!(nested, Some(nested) if nested > member)
     }
 }
 
 /// Every string value that starts right after `key`, honoring the two
 /// escapes JSON writes for paths (`\\` and `\"`).
+/// True when `document` is the directory `dir` itself or a path under
+/// it; an empty directory covers everything.
+fn under(dir: &str, document: &str) -> bool {
+    dir.is_empty() || document == dir || document.starts_with(&format!("{dir}/"))
+}
+
 fn string_values(bytes: &[u8], key: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = bytes;
