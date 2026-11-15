@@ -5,7 +5,9 @@
 //! database's schema is read from its SQLite header, and an index is read
 //! only through the store's guarded read-only open, which creates and
 //! changes nothing; an index in use is reported not checked. It always
-//! succeeds: `ok` carries the verdict.
+//! succeeds: `ok` carries the verdict. After the checks, `agents` says
+//! whether `nu` and the `phantom` skill are found (SPEC-w14 G2c); it is
+//! informational and never changes `ok`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,6 +15,7 @@ use std::path::{Path, PathBuf};
 use phantom_fractal_store::{LockState, SCHEMA_VERSION, Store, StoreError, lock_state};
 use serde::Serialize;
 
+use super::agents::{Agents, Lookup, agents};
 use super::registry::{header_schema, indexes, repos_dir};
 use super::{Failure, Reply};
 
@@ -26,6 +29,8 @@ pub(crate) struct DoctorResult {
     /// True when every check passed.
     ok: bool,
     checks: Vec<Check>,
+    /// Whether `nu` and the skill are found; never part of `ok`.
+    agents: Agents,
 }
 
 #[derive(Serialize)]
@@ -78,6 +83,7 @@ pub(crate) fn doctor(_request: &DoctorRequest) -> Result<Reply<DoctorResult>, Fa
     Ok(Reply::plain(DoctorResult {
         ok: checks.iter().all(|check| check.ok),
         checks,
+        agents: agents(&Lookup::from_env()),
     }))
 }
 

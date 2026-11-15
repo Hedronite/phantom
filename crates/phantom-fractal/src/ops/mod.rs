@@ -7,6 +7,7 @@
 //! an operation returns is relative to the indexed tree, and no message
 //! holds an absolute path.
 
+mod agents;
 pub(crate) mod budget;
 pub(crate) mod calls;
 pub(crate) mod cochange;
