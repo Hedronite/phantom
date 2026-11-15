@@ -109,13 +109,14 @@ That output is cut to one hit.
 
 ### Resolution
 
-A call inside a function is a candidate when it is a path call, such as `f()`, `a::f()`, `Type::new()`, or `Self::new()`, a method call on `self`, such as `self.m()`, a method call whose receiver has a [type hint](#type-hints), such as `x.m()`, `self.f.m()`, or `f().m()`, or, by its name alone, a method call on any other receiver. A single-segment name that the function binds with `let`, a parameter, a closure parameter, or a pattern is shadowed and not resolved. A call gets an edge only when exactly one symbol fits. Otherwise it gets no edge and is counted instead.
+A call inside a function is a candidate when it is a path call, such as `f()`, `a::f()`, `Type::new()`, or `Self::new()`, a method call on `self`, such as `self.m()`, a method call whose receiver has a [type hint](#type-hints), such as `x.m()`, `self.f.m()`, or `f().m()`, or, by its name alone, a method call on any other receiver. A path whose first segment only a [glob import](#glob-imports) supplies is a candidate too. A single-segment name that the function binds with `let`, a parameter, a closure parameter, or a pattern is shadowed and not resolved. A call gets an edge only when exactly one symbol fits. Otherwise it gets no edge and is counted instead.
 
 | Reason | Confidence | When |
 |---|---|---|
 | `path-exact` | 1.0 | The path starts with `crate`, `self`, or `super` and walks to one item or method in the same target. |
 | `local` | 0.95 | The first segment is an item or child module declared in the call's module, and the rest walks to one item or method. |
 | `use-alias` | 0.95 | The first segment is bound by a `use` that is not a glob, or by its `as` alias, in the call's module. The `use` path resolves by the rows above, and the rest walks to one item or method. |
+| `use-glob` | 0.85 | The first segment is supplied only by a glob import: see [Glob imports](#glob-imports). The path then walks from the one globbed module that declares it, by the rows above, to one item or method. |
 | `assoc` | 0.9 | `Type::name`, where `Type` resolves by the rows above to one struct, enum, or trait, and exactly one inherent method of that type is named `name`. |
 | `self-method` | 0.9 | `self.m()` in a method of an `impl` block. The impl's self type resolves by the path rows (`path-exact`, `local`, `use-alias`, and `crate-path`) to one struct or enum, so `impl Show for core_lib::Thing` counts. Exactly one method named `m` belongs to an impl of that type, inherent or trait, across the whole index, not only in the caller's target: a method of that name for the same type in another target means no edge. |
 | `self-assoc` | 0.9 | `Self::m()`, exactly two segments, in a method of an `impl` block, by the same rule as `self-method`: the self type resolves by the path rows, `crate-path` included, and the method is the only candidate across the whole index. |
@@ -162,11 +163,25 @@ For `crate-path`, the crate name is the package name with `-` turned to `_`. Pac
 
 A's `[dev-dependencies]` is read in the same two forms, and those entries count for A's test targets only. A lib or a bin ignores them.
 
-**Test targets.** Each `tests/NAME.rs` directly under a package's directory, and each `tests/DIR/main.rs`, is a `test` target named `NAME` or `DIR`. Its root finds `mod x;` beside itself, as any crate root does, so `mod common;` reaches `tests/common.rs` or `tests/common/mod.rs`, and a file reached from two test roots keeps the first one's module. A test target calls by the same rows as a lib or a bin, and may also call its own package's lib and every workspace lib its package names in `[dependencies]` or `[dev-dependencies]`. Every module of a test target is a test module. `benches/` and `examples/` files have no target and stay orphans, and a lib's `#[cfg(test)]` modules do not gain its dev-dependencies.
+**Test targets.** Each `tests/NAME.rs` directly under a package's directory, and each `tests/DIR/main.rs`, is a `test` target named `NAME` or `DIR`. Its root finds `mod x;` beside itself, as any crate root does, so `mod common;` reaches `tests/common.rs` or `tests/common/mod.rs`. A file reached from two test roots is read once and is in scope from both, as [Shared module files](#shared-module-files) describes. A test target calls by the same rows as a lib or a bin, and may also call its own package's lib and every workspace lib its package names in `[dependencies]` or `[dev-dependencies]`. Every module of a test target is a test module. `benches/` and `examples/` files have no target and stay orphans, and a lib's `#[cfg(test)]` modules do not gain its dev-dependencies.
 
 Any other form gives no dependency: a `[dependencies.B]` or `[dev-dependencies.B]` table, a version-only line, an inline table split over lines, or the forms under [Never resolved](#never-resolved). A lib that calls its own crate by name gets no edge.
 
 `index` rebuilds the crate graph and its edges when a `.rs` file is written or removed, when the index was written by another extractor version, or when the workspace fingerprint changes. The fingerprint is a blake3 hash, stored in the database, over every walked `Cargo.toml` (its path and its bytes, or that the read skipped it or found it not UTF-8) and over every `.rs` file the pass skipped or found not UTF-8 (its path and which of the two). So a `Cargo.toml`-only edit rebuilds, even one that changes only whitespace, and so does a `.rs` file that starts or stops being skipped. A pass where none of these changed writes nothing.
+
+#### Glob imports
+
+A path such as `f()` or `Type::new()` whose first segment the call's module does not declare as an item or child module, and does not bind with a `use` that is not a glob, may be supplied by a glob, `use p::*`. Only a glob whose `p` resolves by the path rows to a workspace module counts: a glob of an external crate, of an enum, or of a missing module is skipped. A name the function binds is shadowed and never tried.
+
+In each counted module, the first segment is looked up as the module itself declares or re-exports it with `pub use`; a nested glob inside that module is not followed. When exactly one item is found across all of them, the call walks from that module by the rows above and gets `use-glob` at 0.85. Two or more items give no edge, and so does one that the walk does not take to a single function or method. A glob is tried only for a call the rows above leave without an edge, so it never moves an edge they place, and a glob in a parent module does not reach its child modules. A path inside a macro invocation's tokens takes the same rule.
+
+#### Shared module files
+
+A file that several targets declare with `mod`, such as `tests/common/mod.rs`, which each `tests/*.rs` declares with `mod common;`, is in scope from every target that declares it. It keeps one file row and one row per item, under the first target the walk reaches, and its items take that target's qualified names. Each later target that declares it gets its own module on the same file, so a call from any of them reaches the file's items by the rows above, with their usual reasons and confidences, and a `use common::*` in a later target globs that target's module.
+
+#### Re-exported paths
+
+The path rows already follow a `pub use` chain from module to module, to the defining item, up to 8 hops, and refuse a cycle. One shape is left: a chain through a glob re-export, `pub use p::*`, which no row follows. It is not resolved. On the measured trees, almost every unplaced call through a type path is a trait-impl method, such as `Budget::default` or `NodeId::from`, not a re-export, so following that shape would add almost nothing. Trait-impl methods are under [Never resolved](#never-resolved).
 
 #### Calls inside macros
 
@@ -181,29 +196,14 @@ Each edge keeps the reason and confidence of its row. A call-shaped name that no
 
 #### Measured
 
-On Phantom's own tree at commit `986c55d`, against a SCIP index from rust-analyzer 1.95.0. These are the contract run's figures, from the commit that added [placed receivers](#placed-receivers), and the review run's figures replace them. An edge is corroborated when rust-analyzer has the same caller and callee. The covered figures, a secondary that is not graded, count only edges whose caller and callee both sit in files the SCIP index carries. The last row counts only edges placed from inside a macro's tokens.
-
-| Measure | Edges | Corroborated | Precision | Covered edges | Covered precision |
-|---|---|---|---|---|---|
-| `typed-method` | 1265 | 1225 | 0.9684 | 1225 | 1.0000 |
-| `unique-method` | 653 | 648 | 0.9923 | 650 | 0.9969 |
-| Confidence 0.85 and up | 3983 | 3892 | 0.9772 | 3892 | 1.0000 |
-| Confidence 0.5 and up | 5901 | 5765 | 0.9770 | 5767 | 0.9997 |
-| From inside a macro | 1027 | 1024 | 0.9971 | — | — |
-
-Recall is the share of rust-analyzer's distinct caller and callee pairs that Phantom has as an edge. The graded figure is document-scoped: a reference takes the callee defined in its own document when its symbol has a definition there. The unscoped figure lets a symbol defined in several documents count a pair for each, as the earlier scorer did, and is kept for comparison.
-
-| Recall | Pairs | Hits | Ratio |
-|---|---|---|---|
-| Document-scoped (graded) | 5345 | 3899 | 0.7295 |
-| Unscoped (the earlier comparison) | 7753 | 3899 | 0.5029 |
+[Quality](#quality) gives the precision of each reason and the recall on three trees, against rust-analyzer.
 
 ### Never resolved
 
 - **Receivers:** a method call on a receiver other than `self` with no [type hint](#type-hints), such as `a.b().m()`, `(*self).m()`, or an unhinted `x.m()`, is placed only by `unique-method`, so it stays unresolved when two or more workspace methods share its name or the name is on `STD_METHOD_NAMES`. A call whose hint and name rule both place nothing stays unresolved. No receiver is typed by a field of a struct declared in another file, a field of a field, a method chain such as `x.f().m()` or `f().g().m()`, or a closure or iterator element.
-- **Dispatch:** a method that only a trait's provided default supplies, `<T as Trait>::f`, blanket impls, and dispatch on `dyn` or a generic.
+- **Dispatch:** a trait-impl method called through a type path, such as `Budget::default()` or `NodeId::from(…)`, a method that only a trait's provided default supplies, `<T as Trait>::f`, blanket impls, and dispatch on `dyn` or a generic.
 - **Crates:** `std`, `core`, `alloc`, registry and git crates, renamed dependencies (`package = "…"`), `[target.…].dependencies` and `[target.…].dev-dependencies`, `[build-dependencies]`, `[dev-dependencies]` from a lib or a bin, a lib's `#[cfg(test)]` modules included, `extern crate … as …`, and `[lib] path`, `[[bin]] path`, and `[[test]] path`. The targets are `src/lib.rs`, `src/main.rs`, `src/bin/*.rs`, `tests/*.rs`, and `tests/*/main.rs`; `benches/` and `examples/` have none.
-- **Other edges:** edges for paths that are not calls, for types, and for struct literals, and names that only a glob import such as `use a::*` supplies.
+- **Other edges:** edges for paths that are not calls, for types, and for struct literals. A name that two or more globbed modules supply, one that only a nested glob or a glob of an external crate or an enum supplies, and a path through a glob re-export.
 - **Macros:** the calls a macro's expansion makes, calls written in a `macro_rules!` body, and a call-shaped name inside a macro invocation that [Calls inside macros](#calls-inside-macros) does not place. That last kind is stored as a fact for [`macro_boundary`](#completeness), never as an edge.
 
 ### Nothing runs
@@ -549,7 +549,7 @@ An index describes the tree as it was at the last `index`. Every success envelop
 On the history in [`cochange`](#cochange), after `fract index .` and one line added to `src/b.rs`, `fract status` prints:
 
 ```
-{"ok":true,"data":{"key":"repo-a4236502","name":"repo","head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","stale":true,"changes":{"added":0,"modified":1,"removed":0},"fingerprint_changed":false,"extractor_changed":false,"counts":{"files":8,"symbols":15,"edges":2},"versions":{"schema":3,"extractor":11,"envelope":1},"epochs":{"graph":1,"rank":1},"cochange":{"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","commits_seen":23,"skipped_bulk":0,"pairs":4,"window":{"days":365,"max_commits":5000}},"lock":"free"},"meta":{"stale":true,"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","rank_epoch":1},"error":null,"schema":1}
+{"ok":true,"data":{"key":"repo-a4236502","name":"repo","head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","stale":true,"changes":{"added":0,"modified":1,"removed":0},"fingerprint_changed":false,"extractor_changed":false,"counts":{"files":8,"symbols":15,"edges":2},"versions":{"schema":3,"extractor":12,"envelope":1},"epochs":{"graph":1,"rank":1},"cochange":{"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","commits_seen":23,"skipped_bulk":0,"pairs":4,"window":{"days":365,"max_commits":5000}},"lock":"free"},"meta":{"stale":true,"head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","index_head":"beb28036163f91ba4918d2acf7d2a294c73d10f8","rank_epoch":1},"error":null,"schema":1}
 ```
 
 The key's hash comes from the tree's canonical path, so it differs on another machine. `fract find fb` still answers from the index, with the same `meta`.
@@ -629,7 +629,7 @@ Each index is a directory under the data directory's `repos/`, named `<name>-<ha
 1. `data_dir`: `repos/` and each index directory are private (no group or other bits, and not a link), the data directory is not writable by group or others, and every one of them, and every database file, is owned by the data directory's owner. No data directory yet is fine.
 2. `databases`: each `graph.db`, and its WAL and shared memory when present, is `0600`. Its schema, read from the SQLite header without opening the database, is not newer than this binary's. An older schema is noted, since `index` migrates it.
 3. `locks`: whether a writer holds each index. A held lock is not a fault.
-4. `extractor`: the extractor version this binary writes, 11.
+4. `extractor`: the extractor version this binary writes, 12.
 5. `grammar`: the tree-sitter-rust version the binary was built with.
 6. `network`: `none: Phantom has no network code`.
 7. `git`: for each index, whether HEAD reads at its stored tree, or why it was not checked. Only a HEAD that cannot be read is a fault.
@@ -800,7 +800,7 @@ The answers are heuristic. Only resolved calls, trait impls, and imports are edg
 `phantom-fractal version` prints one line and exits 0:
 
 ```
-{"ok":true,"data":{"name":"phantom-fractal","version":"0.0.0","git_sha":"<40 lowercase hex, or null>","extractor_version":11,"store_schema":3},"error":null,"schema":1}
+{"ok":true,"data":{"name":"phantom-fractal","version":"0.0.0","git_sha":"<40 lowercase hex, or null>","extractor_version":12,"store_schema":3},"error":null,"schema":1}
 ```
 
 `phantom-fractal --json version`, `phantom-fractal version --json`, and `fract version` print the same line. `data` holds these fields, in this order:
@@ -810,7 +810,7 @@ The answers are heuristic. Only resolved calls, trait impls, and imports are edg
 | `name` | `phantom-fractal`, under `fract` too |
 | `version` | the CLI crate's version, `0.0.0` |
 | `git_sha` | the commit the binary was built from, as 40 lowercase hex characters, or `null` when unknown |
-| `extractor_version` | the extractor version the binary writes, 11 |
+| `extractor_version` | the extractor version the binary writes, 12 |
 | `store_schema` | the store schema version the binary writes, 3 |
 
 `git_sha` is fixed at build time. `PHANTOM_FRACTAL_GIT_SHA`, when it holds 40 hex characters, sets it, for packagers. Otherwise it is the output of `git rev-parse HEAD` in the CLI crate's directory. With no git, no `.git` (as in a crates.io tarball), or a refused repository, it is `null`, and the build still succeeds.
@@ -820,6 +820,98 @@ The answers are heuristic. Only resolved calls, trait impls, and imports are edg
 The envelope keys come in the order `ok`, `data`, `error`, `schema`. `version` reads no index, so it has no `meta`. `schema` is the version of the envelope itself, 1 today, the same number every command prints. A consumer reads that integer and refuses a value it does not know. More fields may be added to `data` later, and a consumer ignores keys it does not know.
 
 `--version` and `-V` still print the plain line `phantom-fractal 0.0.0`.
+
+## Quality
+
+These are the contract run's figures, from commit `688bc8b`, the commit that added [glob imports](#glob-imports) and [shared module files](#shared-module-files), with the gate, fuzz, map, network and timing rows from the runs named beside them. The review run's figures replace them.
+
+### Against rust-analyzer
+
+Three trees: Phantom's own tree at `61236dc`, [lapis-lattice](https://github.com/Hedronite/lapis-lattice) at `42aa3b8`, and [facet](https://github.com/Hedronite/facet) at `acf4286`. Each is compared with a SCIP index from rust-analyzer 1.95.0, default features, over the workspace members that `cargo metadata --no-deps` lists. A document outside every member counts for neither side.
+
+- **Recall** is the share of rust-analyzer's distinct caller and callee pairs that Phantom has as an edge, document-scoped: a reference takes the callee defined in its own document when its symbol has a definition there.
+- **Precision** is the share of Phantom's edges that rust-analyzer corroborates with the same caller and callee, over covered edges: both ends sit in documents the SCIP index carries. Each figure is followed by its edge count in brackets.
+- **The last row** counts only edges placed from inside a macro's tokens.
+
+| Measure | Phantom | lapis-lattice | facet |
+|---|---|---|---|
+| Recall | 0.8898 (4756 of 5345) | 0.8319 (3499 of 4206) | 0.8048 (4577 of 5687) |
+| Confidence 0.85 and up | 1.0000 (4540) | 0.9957 (4377) | 0.9984 (4481) |
+| Confidence 0.5 and up | 0.9997 (7155) | 0.9858 (4987) | 0.9917 (6487) |
+| `path-exact` | 1.0000 (183) | 0.9918 (366) | 1.0000 (108) |
+| `local` | 1.0000 (6966) | 0.9957 (6339) | 1.0000 (6015) |
+| `use-alias` | 1.0000 (2490) | 1.0000 (1680) | 1.0000 (1416) |
+| `use-glob` | 1.0000 (189) | 0.9903 (2484) | 1.0000 (2514) |
+| `crate-path` | 1.0000 (957) | 1.0000 (294) | 1.0000 (789) |
+| `assoc` | 1.0000 (2244) | 0.9889 (270) | 0.9854 (1443) |
+| `self-method` | 1.0000 (546) | 1.0000 (1578) | 1.0000 (972) |
+| `self-assoc` | 1.0000 (45) | 1.0000 (120) | 1.0000 (186) |
+| `typed-method` | 1.0000 (3930) | 1.0000 (410) | 0.9966 (1788) |
+| `unique-method` | 0.9969 (1300) | 0.8716 (810) | 0.9604 (2224) |
+| From inside a macro | 1.0000 (1258) | 0.9969 (961) | 0.9990 (996) |
+
+**Scope on lapis-lattice.** Its `vendor/` packages are not workspace members, so their 6323 edges are out of scope. 911 of its edges sit in code that rust-analyzer's default features leave out, and they are uncovered.
+
+### The quality gate
+
+Each crate runs `cargo-tops gate` from its own directory, with cargo-tops 0.2.0 from an isolated install. [RUST-TOPS.md](RUST-TOPS.md) gives each crate's thresholds and how to run the gate.
+
+0.2.0 applies no coverage or CRAP threshold. So each crate's figures are read from the cargo-llvm-cov summary, cargo-crap's report and cargo-mutants' outcomes, and compared with its `rust-tops.yaml`. cargo-tops 0.4.0, with protocol 1.2.0, is merged upstream and not yet run here.
+
+Measured at the commit before glob imports (`a03a762`, the store crate at `f90a1b4`), with mutation on the diff from `61236dc`:
+
+| Crate | Line | Region | Files under 90% | Mutants caught of viable |
+|---|---|---|---|---|
+| `phantom-fractal` | 95.94% | 94.06% | 0 | 73 of 73 |
+| `phantom-fractal-proto` | 100.00% | 97.05% | 0 | no mutant |
+| `phantom-fractal-lang` | 100.00% | 100.00% | 0 | no mutant |
+| `phantom-fractal-lang-rust` | 98.58% | 96.91% | 0 | 3 of 3 |
+| `phantom-fractal-extract` | 97.55% | 95.07% | 0 | no mutant |
+| `phantom-fractal-analyze` | 98.23% | 96.02% | 0 | no mutant |
+| `phantom-fractal-store` | 97.82% | 90.29% | 0 | 130 of 130 |
+| `phantom-fractal-git` | 97.59% | 95.95% | 0 | no mutant |
+
+- **CRAP.** Every function added or changed since `61236dc` is at or under 6, and no existing function rose.
+- **Exemptions.** The five reason-dispatch matches that the `use-glob` arm lengthened are exemptions in their crates' `rust-tops.yaml`.
+- **The glob and shared-file changes.** Mutation on their own diff caught 40 of the 40 viable mutants, and coverage met every bar.
+- **"No mutant"** means the diff changed no production line in that crate.
+
+### Fuzz and the map property
+
+Both are std-only harnesses, driven by a seeded generator, so every case replays by its number.
+
+**Map property, 10000 cases** (at `209889b`). Random graphs of up to 500 symbols, with budgets from 0 to 20000:
+- 0 maps over their budget;
+- every second run byte-identical;
+- no line removed by a larger budget.
+
+**Fuzz, 500000 cases.** Random bytes up to 64 KiB, a Rust token soup, and byte mutations of every fixture and of both dogfood trees, through extraction and resolution.
+
+- **Panics.** 0, in every family.
+- **The 250 ms bound.** At `209889b`, 7178 inputs took longer. Since then:
+  - **Invalid UTF-8.** A random input that is not valid UTF-8 is now refused before any parse, as `index` refuses such a file. That covers 1345 of the slow random inputs.
+  - **The resolver.** The four slowest mutation inputs now replay in 2.3 to 4.2 ms, since the resolver memoizes its lookups.
+  - **A recorded, accepted miss: tree-sitter's error recovery on unstructured text.** 2222 random ASCII inputs with control characters took up to 3375 ms, and 608 random printable inputs up to 2816 ms. Every one ends, without a panic. The time is spent inside tree-sitter's error recovery, which its progress callback cannot see or stop, so no budget can cut it short.
+
+  The review run measures all 500000 again.
+
+### No network
+
+In a container with `--network none`, with every tree mounted read-only and a trace of `socket` and `connect`:
+- `fract index`, `status`, `rank`, `map`, `find`, `callers`, `impact` and an MCP session opened 0 IPv4 or IPv6 sockets on all three trees, and left every tree unchanged (at `209889b`).
+- The test suite's only such sockets were name lookups by the `git` processes that test fixtures spawn, when git looked up the host's name to make an identity. Every test that spawns `git` now gives it an explicit identity and no outside config. The review run measures the suite again.
+
+### Timings
+
+Medians of 5 runs, in milliseconds, from the release `fract` (at `209889b`):
+
+| Tree | Cold `index` | `index` after a one-line edit | `find` | `callers` | `impact` | `map` at 2000 |
+|---|---|---|---|---|---|---|
+| Phantom | 997.0 | 601.4 | 33.1 | 111.4 | 241.2 | 13.4 |
+| lapis-lattice | 3253.5 | 2215.7 | 158.9 | 494.5 | 509.8 | 17.6 |
+| facet | 1166.5 | 640.9 | 24.8 | 103.2 | 104.4 | 10.9 |
+
+The edit is made in a copy of the tree under a temp directory, never in the tree itself. `crates/phantom-fractal/tests/timings.rs` runs these on any tree named by `PHANTOM_TIMING_ROOT`.
 
 ## Other
 
