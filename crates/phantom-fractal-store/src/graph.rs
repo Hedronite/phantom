@@ -12,6 +12,7 @@ use phantom_fractal_lang::{
 };
 
 use crate::StoreError;
+use crate::fetch::collect_rows;
 use crate::rows;
 
 /// What `write_crate_graph` replaces the `packages` table with.
@@ -37,6 +38,17 @@ pub struct SymbolMatch {
     pub line: Option<i64>,
 }
 
+/// One symbol named exactly as `find` asked: the stored name, kind,
+/// visibility text, file and start line, items and methods alike.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FindRow {
+    pub id: i64,
+    pub name: String,
+    pub kind: String,
+    pub visibility: String,
+    pub file: String,
+    pub line: Option<i64>,
+}
 /// One stored edge row of one kind, as `edges_of_kind` reads it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EdgeRow {
@@ -101,6 +113,28 @@ fn parse_fingerprint(text: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
+/// One matching row, with the row id read by the caller.
+fn symbol_match_row(row: &rusqlite::Row<'_>, id: i64) -> Result<SymbolMatch, StoreError> {
+    Ok(SymbolMatch {
+        id,
+        kind: row.get(1)?,
+        module_path: row.get(2)?,
+        qual_name: row.get(3)?,
+        file: row.get(4)?,
+        line: row.get(5)?,
+    })
+}
+/// One named row: name, kind, visibility, file and start line.
+fn find_row(row: &rusqlite::Row<'_>, id: i64) -> Result<FindRow, StoreError> {
+    Ok(FindRow {
+        id,
+        name: row.get(1)?,
+        kind: row.get(2)?,
+        visibility: row.get(3)?,
+        file: row.get(4)?,
+        line: row.get(5)?,
+    })
+}
 pub(crate) fn reason_from_text(reason: &str) -> Result<Reason, StoreError> {
     match reason {
         "path-exact" => Ok(Reason::PathExact),
@@ -662,16 +696,24 @@ impl crate::Store {
         Ok(())
     }
 
-    /// Symbols matching a bare name such as `open_ledger` or a
+    /// Symbols matching a bare name such as `open_ledger`, a
     /// module-qualified name such as `ledger::open_ledger` or
-    /// `ledger::Ledger::open` — the file module path without a leading
-    /// `crate::` joined to the in-file `qual_name`, so an inline module
-    /// never doubles, and the `crate::` prefixed spelling matches too.
-    /// `query` is bound, never spliced.
+    /// `ledger::Ledger::open`, or a method named by its module and bare
+    /// name such as `app::watch_dir` — the file module path without a
+    /// leading `crate::` joined to the in-file `qual_name`, so an inline
+    /// module never doubles, the `crate::` prefixed spelling matches too,
+    /// and a module may be given from any `::` boundary. `query` is
+    /// bound, never spliced.
     pub fn symbols_matching(&self, query: &str) -> Result<Vec<SymbolMatch>, StoreError> {
         // The optional `crate::` prefix of the query is stripped in the
         // caller, not in SQL, so one bound value covers both spellings.
         let qualified = query.strip_prefix("crate::").unwrap_or(query);
+        // The module part and the bare name, when the query has a `::`:
+        // `app::watch_dir` names a method by its module and name.
+        let (module, name) = match qualified.rsplit_once("::") {
+            Some((module, name)) => (Some(module), Some(name)),
+            None => (None, None),
+        };
         let mut statement = self.conn.prepare(
             "SELECT s.id, s.kind, COALESCE(m.path, ''), s.qual_name, f.path, s.start_line
              FROM symbols s
@@ -689,26 +731,68 @@ impl crate::Store {
                               ELSE fm.path || '::' || s.qual_name
                           END = ?2
                 )
+                OR (
+                    s.owner IS NOT NULL AND s.name = ?4
+                    AND EXISTS (
+                        SELECT 1 FROM modules gm
+                        WHERE gm.file_id = s.file_id AND gm.scope = ''
+                          AND (
+                              gm.path = ?3
+                              OR (
+                                  length(gm.path) > length(?3) + 2
+                                  AND substr(gm.path, -length(?3) - 2) = '::' || ?3
+                              )
+                          )
+                    )
+                )
              ORDER BY s.qual_name, f.path, s.id",
         )?;
-        let queried = statement.query([query, qualified]);
+        let queried = statement.query(rusqlite::params![query, qualified, module, name]);
         #[cfg(test)]
         let queried = crate::fault::tick(queried);
         let mut rows = queried?;
-        let mut out = Vec::new();
-        while let Some(row) = rows.next()? {
-            out.push(SymbolMatch {
-                id: row.get(0)?,
-                kind: row.get(1)?,
-                module_path: row.get(2)?,
-                qual_name: row.get(3)?,
-                file: row.get(4)?,
-                line: row.get(5)?,
-            });
-        }
-        Ok(out)
+        collect_rows(&mut rows, |row| {
+            symbol_match_row(row, row.get::<_, i64>(0)?)
+        })
     }
-
+    /// Every stored symbol named exactly `name`, items and methods alike,
+    /// ordered by file, line, id: the rows `find` answers with. Unlike
+    /// `read_items`, this carries methods, which have no item row.
+    pub fn symbols_named(&self, name: &str) -> Result<Vec<FindRow>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT s.id, s.name, s.kind, s.visibility, f.path, s.start_line
+             FROM symbols s JOIN files f ON f.id = s.file_id
+             WHERE s.name = ?1
+             ORDER BY f.path, s.start_line, s.id",
+        )?;
+        let queried = statement.query([name]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
+        collect_rows(&mut rows, |row| find_row(row, row.get::<_, i64>(0)?))
+    }
+    /// Up to ten symbols whose bare name equals the last `::` segment of
+    /// `query`, ordered as [`symbols_matching`](Self::symbols_matching)
+    /// orders its rows: the candidates a `not_found` reply offers.
+    pub fn did_you_mean(&self, query: &str) -> Result<Vec<SymbolMatch>, StoreError> {
+        let last = query.rsplit("::").next().unwrap_or(query);
+        let mut statement = self.conn.prepare(
+            "SELECT s.id, s.kind, COALESCE(m.path, ''), s.qual_name, f.path, s.start_line
+             FROM symbols s
+             JOIN files f ON f.id = s.file_id
+             LEFT JOIN modules m ON m.id = s.module_id
+             WHERE s.name = ?1
+             ORDER BY s.qual_name, f.path, s.id
+             LIMIT 10",
+        )?;
+        let queried = statement.query([last]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
+        collect_rows(&mut rows, |row| {
+            symbol_match_row(row, row.get::<_, i64>(0)?)
+        })
+    }
     /// Every edge addressed to the symbol `id`, as the caller's row id,
     /// the caller's file, the call-site line, the confidence, and the
     /// reason.
