@@ -100,12 +100,26 @@ mod tests {
         }
     }
 
+    /// `work`'s value, or a panic when it has not returned within 10 s:
+    /// every input ends in a line, the end of input, or an error.
+    fn returns<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        let (send, got) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = send.send(work());
+        });
+        got.recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_else(|err| panic!("the server did not return: {err:?}"))
+    }
+
     const PING: &[u8] = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";
 
     #[test]
     fn the_end_of_input_ends_the_server_with_exit_0() {
-        let mut output = Vec::new();
-        let code = answer(&mut server(), &mut Cursor::new(PING), &mut output);
+        let (code, output) = returns(|| {
+            let mut output = Vec::new();
+            let code = answer(&mut server(), &mut Cursor::new(PING), &mut output);
+            (code, output)
+        });
         assert_eq!(code, ExitCode::SUCCESS);
         let reply = String::from_utf8(output).expect("utf-8");
         assert_eq!(reply.lines().count(), 1, "{reply}");
@@ -117,13 +131,15 @@ mod tests {
 
     #[test]
     fn a_failed_read_or_write_ends_the_server_with_exit_1() {
-        let code = answer(
-            &mut server(),
-            &mut io::BufReader::new(Broken),
-            &mut Vec::new(),
-        );
+        let code = returns(|| {
+            answer(
+                &mut server(),
+                &mut io::BufReader::new(Broken),
+                &mut Vec::new(),
+            )
+        });
         assert_eq!(code, ExitCode::from(1));
-        let code = answer(&mut server(), &mut Cursor::new(PING), &mut Broken);
+        let code = returns(|| answer(&mut server(), &mut Cursor::new(PING), &mut Broken));
         assert_eq!(code, ExitCode::from(1));
     }
 }

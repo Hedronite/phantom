@@ -107,16 +107,30 @@ mod tests {
 
     use super::*;
 
+    /// `work`'s value, or a panic when it has not returned within 10 s:
+    /// every input ends in a line, the end of input, or an error.
+    fn returns<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> T {
+        let (send, got) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = send.send(work());
+        });
+        got.recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap_or_else(|err| panic!("the read did not return: {err:?}"))
+    }
+
     fn lines(input: &[u8], cap: usize, capacity: usize) -> Vec<Line> {
-        let mut reader = BufReader::with_capacity(capacity, Cursor::new(input.to_vec()));
-        let mut out = Vec::new();
-        loop {
-            let line = read_line(&mut reader, cap).expect("read");
-            if line == Line::Eof {
-                return out;
+        let input = input.to_vec();
+        returns(move || {
+            let mut reader = BufReader::with_capacity(capacity, Cursor::new(input));
+            let mut out = Vec::new();
+            loop {
+                let line = read_line(&mut reader, cap).expect("read");
+                if line == Line::Eof {
+                    return out;
+                }
+                out.push(line);
             }
-            out.push(line);
-        }
+        })
     }
 
     fn text(bytes: &[u8]) -> Line {
@@ -166,11 +180,11 @@ mod tests {
 
     #[test]
     fn an_interrupted_read_is_tried_again_and_any_other_error_is_returned() {
-        let mut reader = fail_once(io::ErrorKind::Interrupted);
-        assert_eq!(read_line(&mut reader, 8).expect("read"), text(b"ab"));
-        let mut reader = fail_once(io::ErrorKind::BrokenPipe);
+        let read =
+            |kind| returns(move || read_line(&mut fail_once(kind), 8).map_err(|err| err.kind()));
+        assert_eq!(read(io::ErrorKind::Interrupted), Ok(text(b"ab")));
         assert_eq!(
-            read_line(&mut reader, 8).map_err(|err| err.kind()),
+            read(io::ErrorKind::BrokenPipe),
             Err(io::ErrorKind::BrokenPipe)
         );
     }
