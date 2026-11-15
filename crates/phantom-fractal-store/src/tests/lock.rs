@@ -624,6 +624,17 @@ fn an_unreadable_repository_directory_refuses_the_lock() {
     let db = data.db();
     let repo = data.repo_dir();
     fs::set_permissions(&repo, fs::Permissions::from_mode(0o000)).expect("close");
+    // The process must be unable to read the directory for the refusal
+    // to exist at all: uid 0 reads a mode-000 directory, so the probe
+    // decides, and the test says why it stood down instead of failing.
+    if fs::read_dir(&repo).is_ok() {
+        fs::set_permissions(&repo, fs::Permissions::from_mode(0o700)).expect("reopen");
+        eprintln!(
+            "skipping: this process still reads a mode-000 directory (uid 0), \
+             so the unreadable case cannot be staged"
+        );
+        return;
+    }
     let opened = WriterLock::acquire(&db);
     fs::set_permissions(&repo, fs::Permissions::from_mode(0o700)).expect("reopen");
     assert!(
@@ -657,9 +668,14 @@ fn a_second_swap_between_the_reverify_and_the_reopen_is_refused() {
                 fs::set_permissions(&hook_target, fs::Permissions::from_mode(0o600)).expect("mode");
             }
             1 => {
-                fs::remove_file(&hook_target).expect("remove");
-                fs::write(&hook_target, b"second").expect("swap");
-                fs::set_permissions(&hook_target, fs::Permissions::from_mode(0o600)).expect("mode");
+                // A file written first and renamed over the lock is a
+                // different inode for certain: the two coexisted, so the
+                // number cannot be reused. Removing first would let the
+                // filesystem hand the freed number straight back.
+                let replacement = hook_target.with_extension("second");
+                fs::write(&replacement, b"second").expect("swap");
+                fs::set_permissions(&replacement, fs::Permissions::from_mode(0o600)).expect("mode");
+                fs::rename(&replacement, &hook_target).expect("over");
             }
             _ => {}
         }
