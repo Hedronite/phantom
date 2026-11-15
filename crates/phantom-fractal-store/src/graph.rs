@@ -696,24 +696,27 @@ impl crate::Store {
         Ok(())
     }
 
-    /// Symbols matching a bare name such as `open_ledger`, a
-    /// module-qualified name such as `ledger::open_ledger` or
-    /// `ledger::Ledger::open`, or a method named by its module and bare
-    /// name such as `app::watch_dir` — the file module path without a
-    /// leading `crate::` joined to the in-file `qual_name`, so an inline
-    /// module never doubles, the `crate::` prefixed spelling matches too,
-    /// and a module may be given from any `::` boundary. `query` is
-    /// bound, never spliced.
+    /// Symbols matching a query: the bare name, the in-file `qual_name`
+    /// such as `Ledger::open`, and the file module path joined to that
+    /// name, with or without `crate::`. When those answer nothing, a
+    /// method is tried as `<module>::<name>` from any `::` boundary of its
+    /// file module path, so `app::watch_dir` resolves while every query
+    /// the exact forms answer keeps exactly its rows. `query` is bound,
+    /// never spliced.
     pub fn symbols_matching(&self, query: &str) -> Result<Vec<SymbolMatch>, StoreError> {
-        // The optional `crate::` prefix of the query is stripped in the
-        // caller, not in SQL, so one bound value covers both spellings.
+        let exact = self.symbols_matching_exact(query)?;
+        if !exact.is_empty() {
+            return Ok(exact);
+        }
+        self.symbols_matching_method(query)
+    }
+    /// The spellings the base answers: the bare name, the in-file
+    /// qualified name, and the file module path joined to it, `crate::`
+    /// optional.
+    fn symbols_matching_exact(&self, query: &str) -> Result<Vec<SymbolMatch>, StoreError> {
+        // The optional `crate::` prefix is stripped in Rust, not in SQL,
+        // so one bound value covers both spellings.
         let qualified = query.strip_prefix("crate::").unwrap_or(query);
-        // The module part and the bare name, when the query has a `::`:
-        // `app::watch_dir` names a method by its module and name.
-        let (module, name) = match qualified.rsplit_once("::") {
-            Some((module, name)) => (Some(module), Some(name)),
-            None => (None, None),
-        };
         let mut statement = self.conn.prepare(
             "SELECT s.id, s.kind, COALESCE(m.path, ''), s.qual_name, f.path, s.start_line
              FROM symbols s
@@ -731,23 +734,45 @@ impl crate::Store {
                               ELSE fm.path || '::' || s.qual_name
                           END = ?2
                 )
-                OR (
-                    s.owner IS NOT NULL AND s.name = ?4
-                    AND EXISTS (
-                        SELECT 1 FROM modules gm
-                        WHERE gm.file_id = s.file_id AND gm.scope = ''
-                          AND (
-                              gm.path = ?3
-                              OR (
-                                  length(gm.path) > length(?3) + 2
-                                  AND substr(gm.path, -length(?3) - 2) = '::' || ?3
-                              )
-                          )
-                    )
-                )
              ORDER BY s.qual_name, f.path, s.id",
         )?;
-        let queried = statement.query(rusqlite::params![query, qualified, module, name]);
+        let queried = statement.query([query, qualified]);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        let mut rows = queried?;
+        collect_rows(&mut rows, |row| {
+            symbol_match_row(row, row.get::<_, i64>(0)?)
+        })
+    }
+    /// A method addressed as `<module>::<name>`, with the module part
+    /// starting at any `::` boundary of the method's file module path.
+    /// The caller runs this only when the exact spellings answer nothing,
+    /// so a query the base answers keeps exactly its rows.
+    fn symbols_matching_method(&self, query: &str) -> Result<Vec<SymbolMatch>, StoreError> {
+        let qualified = query.strip_prefix("crate::").unwrap_or(query);
+        let Some((module, name)) = qualified.rsplit_once("::") else {
+            return Ok(Vec::new());
+        };
+        let mut statement = self.conn.prepare(
+            "SELECT s.id, s.kind, COALESCE(m.path, ''), s.qual_name, f.path, s.start_line
+             FROM symbols s
+             JOIN files f ON f.id = s.file_id
+             LEFT JOIN modules m ON m.id = s.module_id
+             WHERE s.owner IS NOT NULL AND s.name = ?2
+               AND EXISTS (
+                   SELECT 1 FROM modules gm
+                   WHERE gm.file_id = s.file_id AND gm.scope = ''
+                     AND (
+                         gm.path = ?1
+                         OR (
+                             length(gm.path) > length(?1) + 2
+                             AND substr(gm.path, -length(?1) - 2) = '::' || ?1
+                         )
+                     )
+               )
+             ORDER BY s.qual_name, f.path, s.id",
+        )?;
+        let queried = statement.query([module, name]);
         #[cfg(test)]
         let queried = crate::fault::tick(queried);
         let mut rows = queried?;

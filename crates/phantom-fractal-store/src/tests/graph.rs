@@ -992,3 +992,34 @@ fn did_you_mean_stops_at_ten() {
     let candidates = store.did_you_mean("miss::twin").expect("dym");
     assert_eq!(candidates.len(), 10, "{candidates:?}");
 }
+
+#[test]
+fn a_free_fn_keeps_the_module_spelling_from_a_same_file_method() {
+    let db = TempDb::new("dumpshape");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = language();
+    // The `dump` shape: a free fn and a method of the same name share one
+    // file and one module.
+    let source = "pub struct Store;\n\nimpl Store {\n    pub fn canonical_dump(&self) {}\n}\n\n\
+                  pub fn canonical_dump() {}\n";
+    put(&mut store, &language, "src/dump.rs", source);
+    write_modules(&mut store, &[("crate::dump", "src/dump.rs")]);
+    // The module spelling the base answers keeps exactly its row: the
+    // free fn, never the method beside it.
+    let hits = store
+        .symbols_matching("dump::canonical_dump")
+        .expect("module");
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].kind, "function");
+    assert_eq!(hits[0].qual_name, "canonical_dump");
+    // The bare name still lists both, and the type spelling names the
+    // method through its exact form.
+    let bare = store.symbols_matching("canonical_dump").expect("bare");
+    assert_eq!(bare.len(), 2, "{bare:?}");
+    let method = store
+        .symbols_matching("Store::canonical_dump")
+        .expect("type");
+    assert_eq!(method.len(), 1, "{method:?}");
+    assert_eq!(method[0].kind, "method");
+}
