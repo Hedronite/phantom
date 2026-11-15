@@ -57,9 +57,9 @@ fn fingerprint_stamps_round_trip_and_read_malformed_as_none() {
     }
     assert_eq!(store.workspace_fingerprint().expect("malformed hex"), None);
     assert_eq!(store.rs_skipped().expect("malformed count"), None);
-    // SCHEMA_VERSION stays 3: no migration.
-    assert_eq!(store.schema_version().expect("schema"), 3);
-    assert_eq!(store.user_version().expect("user_version"), 3);
+    // SCHEMA_VERSION stays 4: no migration.
+    assert_eq!(store.schema_version().expect("schema"), 4);
+    assert_eq!(store.user_version().expect("user_version"), 4);
     drop(store);
 }
 

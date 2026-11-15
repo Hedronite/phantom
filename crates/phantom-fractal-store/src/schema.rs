@@ -109,7 +109,8 @@ CREATE TABLE refs(
     receiver TEXT,
     shadowed INTEGER NOT NULL DEFAULT 0,
     alias TEXT,
-    glob INTEGER NOT NULL DEFAULT 0
+    glob INTEGER NOT NULL DEFAULT 0,
+    visibility TEXT NOT NULL DEFAULT ''
 ) STRICT;
 CREATE INDEX refs_last ON refs(last_segment);
 CREATE INDEX refs_from ON refs(from_symbol);
@@ -267,7 +268,7 @@ pub(crate) fn check_stamp(conn: &Connection) -> Result<i64, StoreError> {
     if found > SCHEMA_VERSION {
         return Err(StoreError::SchemaNewer { found });
     }
-    if found != 1 && found != 2 && found != SCHEMA_VERSION {
+    if !(1..=SCHEMA_VERSION).contains(&found) {
         return Err(StoreError::UnreadableStamp);
     }
     let user_version = user_version(conn)?;
@@ -352,13 +353,50 @@ const V3_COLUMNS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// Moves a version-2 database to [`SCHEMA_VERSION`] in one transaction.
-/// Only nullable or defaulted columns are added; nothing is dropped.
+/// Moves a version-2 database to version 3 in one transaction. Only
+/// nullable or defaulted columns are added; nothing is dropped.
 pub(crate) fn migrate_v2_to_v3(conn: &mut Connection) -> Result<(), StoreError> {
     #[cfg(test)]
     crate::open_trace::record("migrate_v2_to_v3");
     let tx = conn.transaction()?;
     for (table, column, add) in V3_COLUMNS {
+        let present: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+            [table, column],
+            |row| row.get(0),
+        )?;
+        if present == 0 {
+            tx.execute_batch(add)?;
+        }
+    }
+    tx.execute(
+        "UPDATE meta SET value = '3' WHERE key = 'schema_version'",
+        [],
+    )?;
+    tx.pragma_update(None, "user_version", 3)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// The additive column of version 4, as `(table, column, add)`: the
+/// visibility of a `use` row, so a `pub use` and a private `use` store
+/// different rows. Empty for every other ref kind, and for a row a
+/// migration carried over (a re-index fills it).
+const V4_COLUMNS: &[(&str, &str, &str)] = &[(
+    "refs",
+    "visibility",
+    "ALTER TABLE refs ADD COLUMN visibility TEXT NOT NULL DEFAULT ''",
+)];
+
+/// Moves a version-3 database to [`SCHEMA_VERSION`] in one transaction.
+/// Only a defaulted column is added; no row changes and nothing is
+/// dropped. A migrated `use` row reads as not re-exported until the next
+/// index re-extracts it (the extractor version moved with this column).
+pub(crate) fn migrate_v3_to_v4(conn: &mut Connection) -> Result<(), StoreError> {
+    #[cfg(test)]
+    crate::open_trace::record("migrate_v3_to_v4");
+    let tx = conn.transaction()?;
+    for (table, column, add) in V4_COLUMNS {
         let present: i64 = tx.query_row(
             "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
             [table, column],

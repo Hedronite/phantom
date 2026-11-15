@@ -26,6 +26,7 @@ mod meta;
 mod rank;
 mod readonly;
 mod reads;
+mod reexport;
 mod writes;
 
 /// One process-wide guard for the tests that take or observe a global
