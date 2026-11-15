@@ -3,12 +3,13 @@ title: Expected edges — resolve-tests fixture
 type: fixture
 status: ground-truth
 created: "2026-10-31"
-updated: "2026-10-31"
+updated: "2026-11-14"
 owner: fullstack
 spec: "[[foundry/phantom/specs/SPEC-w11]]"
 cross_refs:
   - "[[foundry/phantom/checklists/CHECKLIST-w11]]"
   - "[[foundry/phantom/rubrics/RUBRIC-w11]]"
+  - "[[foundry/phantom/specs/SPEC-w13]]"
 tags:
   - phantom
   - fixture
@@ -54,7 +55,7 @@ A symbol is written `<package>/<target>:<module path>::<name>`, with the impl ow
 | `a_typed_method_call` | `Counter::new()` | as above | `crate-path` |
 | `a_typed_method_call` | `counter.bump()` | `let mut counter = Counter::new()` gives `ctor:Counter::new`; placing it needs the test module's `use app::Counter` | `typed-method` |
 | `suite_case` | `app::add(3, 4)` | the second test target calls the lib too | `crate-path` |
-| `suite_case` | `common::fresh()` | `suite` has no `common` module | none (unresolved) |
+| `suite_case` | `common::fresh()` | `suite` declares `common` too, so it has its own module row on `tests/common/mod.rs` (SPEC-w13 G2a, D9 (a)) | `local` |
 | `app` lib `checked` | `probe::check(value)` | a lib ignores dev entries | none (external) |
 | `app` bin `main` | `app::add(1, 2)` | a bin may call its own lib, as before | `crate-path` |
 | `app` bin `main` | `probe::check(total)` | a bin ignores dev entries | none (external) |
@@ -73,16 +74,25 @@ A symbol is written `<package>/<target>:<module path>::<name>`, with the impl ow
 - `app/test-plain:crate::through_a_use_alias -> app/lib:crate::add crate-path`
 - `app/test-plain:crate::through_a_use_alias -> app/test-plain:crate::common::fresh use-alias`
 - `app/test-suite:crate::suite_case -> app/lib:crate::add crate-path`
+- `app/test-suite:crate::suite_case -> app/test-plain:crate::common::fresh local`
+
+## Change for SPEC-w13 G2a
+
+Cure (a) of D9 puts a file that several roots declare in scope from each of them. `tests/common/mod.rs` is declared by `plain.rs` and by `suite/main.rs`. It keeps its first module and its symbols under `plain`, as before, and `suite` gets a module row of its own on that file. So:
+- `common::fresh()` in `suite_case` resolves by `local` to the one `common::fresh` symbol;
+- `edges` goes from 11 to 12, `unresolved` from 3 to 2, and `modules` from 6 to 7.
+
+No other line changes.
 
 ## Counts
 
-- edges: 11
-- unresolved: 3
+- edges: 12
+- unresolved: 2
 - external: 2
 - no_source: 0
 - method_calls: 0
 - macros: 0
-- modules: 6
+- modules: 7
 - orphans: 2
 
-`unresolved` is `common::fresh()` in `suite_case` and the `app::add` calls of the two orphans. `external` is `probe::check` from the lib and from the bin.
+`unresolved` is the `app::add` calls of the two orphans. `external` is `probe::check` from the lib and from the bin.

@@ -283,12 +283,16 @@ impl<'a> Tree<'a> {
             let Some(child) = self.child_file(file, mod_rs, decl) else {
                 continue;
             };
-            if !self.claimed.insert(child.path.as_str()) {
-                continue;
-            }
             let id = self.push(target, Some(parent), path, &child.path, String::new());
             if decl.cfg_test {
                 self.cfg_test.insert(id);
+            }
+            // A file another `mod` already reached keeps the module row of
+            // that later claimant, so its items are in scope from each
+            // root, and its own declarations are read once, from its first
+            // claimant (SPEC-w13 G2a, D9 (a)).
+            if !self.claimed.insert(child.path.as_str()) {
+                continue;
             }
             // A `#[path]` file declares its children beside itself, as a
             // `mod.rs` does.

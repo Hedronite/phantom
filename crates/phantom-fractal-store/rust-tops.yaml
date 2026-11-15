@@ -140,3 +140,17 @@ agent:
     - fmt
     - clippy
     - nextest
+
+exemptions:
+  - path: src/graph.rs
+    symbol: reason_from_text
+    layer: crap
+    reason: exhaustive dispatch match over the reason texts with no guards, each arm one value; the use-glob reason of SPEC-w13 G2a adds one arm, and R4(4) forbids a split made for CRAP alone
+    owner: phantom-fractal-store
+    expires: "2027-02-14"
+  - path: src/graph.rs
+    symbol: reason_to_text
+    layer: crap
+    reason: exhaustive dispatch match over Reason with no guards, each arm one value; the use-glob reason of SPEC-w13 G2a adds one arm, and R4(4) forbids a split made for CRAP alone
+    owner: phantom-fractal-store
+    expires: "2027-02-14"

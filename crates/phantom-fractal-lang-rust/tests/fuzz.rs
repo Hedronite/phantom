@@ -8,9 +8,11 @@
 //! | 1 | a Rust token soup, up to 64 KiB |
 //! | 2 | byte mutations of one real file, from every `fixtures/**/*.rs` and then every `.rs` under `PHANTOM_FUZZ_CORPUS` |
 //!
-//! Each input is `src/lib.rs` of a one-file lib crate. The extractor takes
-//! text, and the indexer skips a file that is not UTF-8, so the bytes go in
-//! lossily decoded. The test extracts the file, builds the resolve input
+//! Each input is `src/lib.rs` of a one-file lib crate. The indexer refuses
+//! a file that is not UTF-8 before any parse, and a random-bytes input does
+//! the same: it is counted as `refused_not_utf8` and never parsed (A5). A
+//! token soup is always UTF-8, and a mutation goes in lossily decoded. The
+//! test extracts the file, builds the resolve input
 //! the store builds from that extract, and resolves it. Each input must
 //! return without a panic within 250 ms of wall time.
 //!
@@ -492,6 +494,8 @@ struct Summary {
     cases: u64,
     per_family: [u64; 3],
     input_bytes: u64,
+    /// Random-bytes inputs that are not UTF-8, refused before any parse.
+    refused_not_utf8: u64,
     refused: u64,
     placed: u64,
     slowest: (Duration, u64),
@@ -510,6 +514,7 @@ impl Summary {
             *total += count;
         }
         self.input_bytes += other.input_bytes;
+        self.refused_not_utf8 += other.refused_not_utf8;
         self.refused += other.refused;
         self.placed += other.placed;
         self.slowest = self.slowest.max(other.slowest);
@@ -539,7 +544,7 @@ impl Summary {
         let mut line = format!(
             "{{\"first\":{first},\"cases\":{},\"bytes\":{},\"soup\":{},\"mutation\":{},\
              \"fixture_files\":{},\"corpus_files\":{},\"corpus_digest\":\"{:016x}\",\
-             \"input_bytes\":{},\"refused\":{},\"placed\":{},\"panics\":{},\
+             \"input_bytes\":{},\"refused_not_utf8\":{},\"refused\":{},\"placed\":{},\"panics\":{},\
              \"over_250_ms\":{},\"max_ms\":{:.3},\"slowest_case\":{}}}",
             self.cases,
             self.per_family[0],
@@ -549,6 +554,7 @@ impl Summary {
             corpus.files.len() - corpus.fixture_files,
             corpus.digest,
             self.input_bytes,
+            self.refused_not_utf8,
             self.refused,
             self.placed,
             self.panics.len(),
@@ -574,14 +580,16 @@ impl Summary {
 fn run_cases(first: u64, end: u64, step: u64, corpus: &Corpus) -> Summary {
     let language = RustLanguage::new().expect("the query compiles");
     let mut summary = Summary::default();
-    let mut number = first;
-    while number < end {
+    for number in (first..end).step_by(step as usize) {
         let family = FAMILIES[(number % 3) as usize];
         let bytes = input(number, corpus);
-        let source = String::from_utf8_lossy(&bytes);
         summary.cases += 1;
         summary.per_family[(number % 3) as usize] += 1;
         summary.input_bytes += bytes.len() as u64;
+        let Some(source) = source_of(number, &bytes) else {
+            summary.refused_not_utf8 += 1;
+            continue;
+        };
         match catch_unwind(AssertUnwindSafe(|| run(&language, &source))) {
             Err(_) => summary.panics.push(format!("case {number} ({family})")),
             Ok(outcome) => {
@@ -600,9 +608,20 @@ fn run_cases(first: u64, end: u64, step: u64, corpus: &Corpus) -> Summary {
                 }
             }
         }
-        number += step;
     }
     summary
+}
+
+/// The text case `number` feeds the extractor: none for a random-bytes
+/// input that is not UTF-8, which the indexer refuses before any parse
+/// (A5); a mutation lossily decoded.
+fn source_of(number: u64, bytes: &[u8]) -> Option<std::borrow::Cow<'_, str>> {
+    if number.is_multiple_of(3) {
+        return std::str::from_utf8(bytes)
+            .ok()
+            .map(std::borrow::Cow::Borrowed);
+    }
+    Some(String::from_utf8_lossy(bytes))
 }
 
 /// One CI shard: no case may panic. Its times are printed, not asserted,

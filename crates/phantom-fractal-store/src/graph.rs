@@ -112,6 +112,7 @@ pub(crate) fn reason_from_text(reason: &str) -> Result<Reason, StoreError> {
         "crate-path" => Ok(Reason::CratePath),
         "typed-method" => Ok(Reason::TypedMethod),
         "unique-method" => Ok(Reason::UniqueMethod),
+        "use-glob" => Ok(Reason::UseGlob),
         other => Err(StoreError::UnknownReason(other.to_owned())),
     }
 }
@@ -127,6 +128,7 @@ pub(crate) fn reason_to_text(reason: Reason) -> &'static str {
         Reason::CratePath => "crate-path",
         Reason::TypedMethod => "typed-method",
         Reason::UniqueMethod => "unique-method",
+        Reason::UseGlob => "use-glob",
     }
 }
 
@@ -255,6 +257,7 @@ impl crate::Store {
             "UPDATE files SET module_id = (
                  SELECT m.id FROM modules m
                  WHERE m.file_id = files.id AND m.scope = ''
+                 ORDER BY m.id LIMIT 1
              )",
             [],
         )?;
@@ -262,6 +265,7 @@ impl crate::Store {
             "UPDATE symbols SET module_id = (
                  SELECT m.id FROM modules m
                  WHERE m.file_id = symbols.file_id AND m.scope = symbols.scope
+                 ORDER BY m.id LIMIT 1
              )",
             [],
         )?;
@@ -357,7 +361,8 @@ impl crate::Store {
         {
             let mut statement = self.conn.prepare(
                 "SELECT r.text, r.alias, r.glob, r.scope, f.path,
-                        (SELECT m.id FROM modules m WHERE m.file_id = f.id AND m.scope = ''),
+                        (SELECT m.id FROM modules m WHERE m.file_id = f.id AND m.scope = ''
+                         ORDER BY m.id LIMIT 1),
                         r.id
                  FROM refs r JOIN files f ON f.id = r.file_id
                  WHERE r.kind = 'use' ORDER BY r.id",
@@ -382,7 +387,8 @@ impl crate::Store {
         {
             let mut statement = self.conn.prepare(
                 "SELECT r.id, r.from_symbol,
-                        (SELECT m.id FROM modules m WHERE m.file_id = r.file_id AND m.scope = ''),
+                        (SELECT m.id FROM modules m WHERE m.file_id = r.file_id AND m.scope = ''
+                         ORDER BY m.id LIMIT 1),
                         r.scope, f.path, r.kind, r.text, r.receiver_hint, r.receiver, r.shadowed
                  FROM refs r JOIN files f ON f.id = r.file_id
                  WHERE r.kind IN ('call', 'method_call', 'macro', 'macro_arg') ORDER BY r.id",

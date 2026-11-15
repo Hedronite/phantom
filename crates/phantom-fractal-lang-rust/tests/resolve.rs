@@ -288,13 +288,15 @@ fn a_shadowed_call_gives_no_edge() {
 }
 
 #[test]
-fn a_name_only_a_glob_supplies_gives_no_edge() {
+fn a_name_only_a_glob_supplies_resolves_by_use_glob() {
+    // SPEC-w4 left it unresolved; SPEC-w13 G2a cure (b) places it. The
+    // cases of the cure are in `tests/glob_cure.rs`.
     let mut i = Input::new();
-    let tests = i.module(1, "tests", "src/lib.rs", "tests");
-    i.function("helper");
+    i.module(1, "tests", "src/lib.rs", "tests");
+    let helper = i.function("helper");
     i.uses("src/lib.rs", "tests", "super", None, true);
     let check = i.symbol(SymbolKind::Function, "check", "src/lib.rs", "tests");
-    i.call_in(Some(check), "src/lib.rs", "tests", "helper", RefKind::Call);
+    let bare = i.call_in(Some(check), "src/lib.rs", "tests", "helper", RefKind::Call);
     let through = i.call_in(
         Some(check),
         "src/lib.rs",
@@ -303,10 +305,14 @@ fn a_name_only_a_glob_supplies_gives_no_edge() {
         RefKind::Call,
     );
     let (edges, counts) = i.resolve();
-    assert_eq!(edges.len(), 1);
-    assert_eq!(edges[0].ref_id, through);
-    assert_eq!(counts.unresolved, 1);
-    let _ = tests;
+    assert_eq!(
+        edges,
+        [
+            edge(bare, check, helper, Reason::UseGlob),
+            edge(through, check, helper, Reason::PathExact),
+        ]
+    );
+    assert_eq!(counts.unresolved, 0);
 }
 
 #[test]

@@ -265,8 +265,11 @@ fn a_path_inside_an_inline_module_is_relative_to_its_directory() {
     assert_eq!(graph.modules[3].file, "src/a/inner/z.rs");
 }
 
+/// A file two roots declare keeps its first module, and the later
+/// claimant gets a module row of its own on the same file (SPEC-w13 G2a,
+/// D9 (a)).
 #[test]
-fn a_file_reached_twice_keeps_its_first_module() {
+fn a_file_reached_twice_gets_a_module_row_from_each_claimant() {
     let files = [
         file("src/lib.rs", vec![decl("shared", "", false, None)]),
         file("src/main.rs", vec![decl("shared", "", false, None)]),
@@ -279,6 +282,7 @@ fn a_file_reached_twice_keeps_its_first_module() {
             row("src/lib.rs", "crate", "src/lib.rs", ""),
             row("src/lib.rs", "crate::shared", "src/shared.rs", ""),
             row("src/main.rs", "crate", "src/main.rs", ""),
+            row("src/main.rs", "crate::shared", "src/shared.rs", ""),
         ]
     );
 }
@@ -368,6 +372,7 @@ fn test_targets_follow_every_lib_and_bin_so_those_keep_their_files() {
             row("b/src/lib.rs", "crate", "b/src/lib.rs", ""),
             row("b/src/lib.rs", "crate::x", "b/src/x.rs", ""),
             row("a/tests/t.rs", "crate", "a/tests/t.rs", ""),
+            row("a/tests/t.rs", "crate::x", "b/src/x.rs", ""),
         ]
     );
 }
@@ -400,9 +405,16 @@ fn a_test_root_looks_beside_itself_and_every_module_of_it_is_a_test_module() {
                 ""
             ),
             row("tests/suite/main.rs", "crate", "tests/suite/main.rs", ""),
+            row(
+                "tests/suite/main.rs",
+                "crate::common",
+                "tests/common/mod.rs",
+                ""
+            ),
         ]
     );
-    // `common` keeps its first module, under `plain`.
+    // `common` keeps its first module, under `plain`, which alone reads
+    // its `mod util`; `suite` gets a row of its own on the same file.
     let tests: Vec<&str> = graph
         .test_modules
         .iter()
@@ -415,6 +427,7 @@ fn a_test_root_looks_beside_itself_and_every_module_of_it_is_a_test_module() {
             "tests/common/mod.rs",
             "tests/common/util.rs",
             "tests/suite/main.rs",
+            "tests/common/mod.rs",
         ]
     );
     assert!(graph.orphans.is_empty(), "{:?}", graph.orphans);

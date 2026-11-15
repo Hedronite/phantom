@@ -17,6 +17,8 @@ use phantom_fractal_lang::{
 };
 
 use super::segments;
+
+mod cures;
 use super::signature::{first_segment, generic_parameters, ok_type, return_type};
 use crate::STD_METHOD_NAMES;
 
@@ -318,7 +320,7 @@ impl<'a> Index<'a> {
         // A call reaches a binding one level down from its own lookup.
         let walked = self.use_entities(binding, 1).ok()?;
         let target = match walked.entities[..] {
-            [Entity::Module(id)] => Node::Module(id),
+            [Entity::Module(id)] => self.link_node(id),
             [Entity::Symbol(id)] => Node::Symbol(id),
             _ => return None,
         };
@@ -682,6 +684,7 @@ impl<'a> Index<'a> {
     /// The child modules and items named `name` declared in `module`. A
     /// module item that has its own module row counts once, as the row.
     fn declared(&self, module: Id, name: &str) -> Vec<Entity> {
+        let module = self.canonical(module);
         let mut local: Vec<Entity> = self
             .children
             .get(&(module, name))
@@ -706,6 +709,7 @@ impl<'a> Index<'a> {
     /// them; with no such binding, unresolved when a glob could supply the
     /// name, else external.
     fn through_uses(&self, module: Id, name: &str, depth: u32) -> Result<Found, Miss> {
+        let module = self.canonical(module);
         let bindings = self.uses.get(&module).map_or(&[][..], Vec::as_slice);
         let mut found = Vec::new();
         let mut crossed = false;
@@ -739,6 +743,17 @@ impl<'a> Index<'a> {
             local: false,
             crossed,
         })
+    }
+
+    /// The first module row of `module`'s file and scope, where that
+    /// file's items and `use` bindings are kept: `module` itself, or for a
+    /// later claimant of a file several roots declare, the first claimant
+    /// (SPEC-w13 G2a, D9 (a)).
+    fn canonical(&self, module: Id) -> Id {
+        self.modules
+            .get(&module)
+            .and_then(|row| self.place_of(&row.file, &row.scope))
+            .unwrap_or(module)
     }
 
     /// What a `use` path names, in any namespace.

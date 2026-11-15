@@ -589,13 +589,14 @@ fn an_uncovered_edge_reads_its_graded_precision_beside_the_full_one() {
 }
 
 /// The glob and re-export buckets on a real index pass (W13 G0a): a
-/// bare call in the scope of a file-module glob leaves `unresolved
+/// bare call in the scope of two file-module globs that both supply its
+/// name, so the glob cure of G2a leaves it unplaced, leaves `unresolved
 /// path call` for `glob import in scope`, a call through a
 /// crate-root re-export leaves it for `re-exported path`, and the
 /// split map says what each took and from where.
 #[test]
 fn the_w13_buckets_hold_their_extracted_cases() {
-    let lib_source = "mod helper;\nmod user;\npub use helper::Gadget;\nuse helper::*;\n\npub fn caller() {\n    reach();\n}\n";
+    let lib_source = "mod helper;\nmod spare;\nmod user;\npub use helper::Gadget;\nuse helper::*;\nuse spare::*;\n\npub fn caller() {\n    reach();\n}\n";
     let helper_source = "pub fn reach() {}\npub struct Gadget;\nimpl Default for Gadget {\n    fn default() -> Gadget {\n        Gadget\n    }\n}\n";
     let user_source = "use crate::Gadget;\n\npub fn call() {\n    Gadget::default();\n}\n";
     let temp = Temp::new("w13");
@@ -604,6 +605,7 @@ fn the_w13_buckets_hold_their_extracted_cases() {
     std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"w13\"\n").expect("manifest");
     std::fs::write(repo.join("src/lib.rs"), lib_source).expect("lib");
     std::fs::write(repo.join("src/helper.rs"), helper_source).expect("helper");
+    std::fs::write(repo.join("src/spare.rs"), "pub fn reach() {}\n").expect("spare");
     std::fs::write(repo.join("src/user.rs"), user_source).expect("user");
     let mut store = Store::open(&temp.db()).expect("open store");
     index(&repo, &mut store, &RustLanguage::new().expect("grammar")).expect("index");

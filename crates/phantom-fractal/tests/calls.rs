@@ -177,6 +177,7 @@ fn confidence(reason: &str) -> f64 {
         "assoc" | "self-method" | "self-assoc" => 0.9,
         "typed-method" => 0.8,
         "unique-method" => 0.5,
+        "use-glob" => 0.85,
         other => panic!("unknown reason {other}"),
     }
 }
@@ -248,6 +249,7 @@ fn callers_and_callees_return_the_expected_sets() {
                 ("crate::entry", "path-exact"),
                 ("crate::entry", "local"),
                 ("crate::tests::check", "path-exact"),
+                ("crate::tests::check", "use-glob"),
                 ("crate::util::helper", "path-exact"),
                 ("crate::placed::from_path", "path-exact"),
             ],
@@ -313,10 +315,18 @@ fn callers_and_callees_return_the_expected_sets() {
                 ("crate::placed::from_path", "local"),
                 ("crate::Counter::new", "assoc"),
                 ("crate::Counter::bump", "unique-method"),
+                ("crate::shapes::area", "use-glob"),
             ],
-            7,
+            6,
         ),
-        ("tests::check", &[("crate::local_fn", "path-exact")], 1),
+        (
+            "tests::check",
+            &[
+                ("crate::local_fn", "path-exact"),
+                ("crate::local_fn", "use-glob"),
+            ],
+            0,
+        ),
         (
             "util::helper",
             &[

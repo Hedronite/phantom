@@ -74,6 +74,7 @@ pub fn reason_text(reason: Reason) -> (&'static str, f64) {
         Reason::CratePath => ("crate-path", 0.95),
         Reason::TypedMethod => ("typed-method", 0.8),
         Reason::UniqueMethod => ("unique-method", 0.5),
+        Reason::UseGlob => ("use-glob", 0.85),
     }
 }
 
