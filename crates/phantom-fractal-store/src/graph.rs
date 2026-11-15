@@ -709,7 +709,7 @@ impl crate::Store {
     /// file module path, so `app::watch_dir` resolves while every query
     /// the exact forms answer keeps exactly its rows. When the module
     /// forms answer nothing too, the `display` spelling is tried: the
-    /// file, then the in-file `qual_name` or the bare name, as in
+    /// file, then the in-file `qual_name`, as in
     /// `src/tui/app.rs::App::start_watcher`. `query` is bound, never
     /// spliced.
     pub fn symbols_matching(&self, query: &str) -> Result<Vec<SymbolMatch>, StoreError> {
@@ -794,9 +794,12 @@ impl crate::Store {
         })
     }
     /// A symbol addressed by its `display` spelling: a repo-relative file
-    /// path, then the in-file `qual_name` (scope, owner and name) or the
-    /// bare name. The caller runs this only when every other form answers
-    /// nothing, so a query the base answers keeps exactly its rows.
+    /// path, then the in-file `qual_name` (scope, owner and name), and
+    /// nothing else: `file.rs::run` names the free fn `run`, never a method
+    /// `Type::run`, whose display is `file.rs::Type::run`. So every display
+    /// an ambiguous reply shows names exactly one symbol. The caller runs
+    /// this only when every other form answers nothing, so a query the
+    /// base answers keeps exactly its rows.
     fn symbols_matching_display(&self, query: &str) -> Result<Vec<SymbolMatch>, StoreError> {
         let Some((file, name)) = query.split_once("::") else {
             return Ok(Vec::new());
@@ -810,7 +813,7 @@ impl crate::Store {
              FROM symbols s
              JOIN files f ON f.id = s.file_id
              LEFT JOIN modules m ON m.id = s.module_id
-             WHERE f.path = ?1 AND (s.qual_name = ?2 OR s.name = ?2)
+             WHERE f.path = ?1 AND s.qual_name = ?2
              ORDER BY s.qual_name, f.path, s.id",
         )?;
         let queried = statement.query([file, name]);

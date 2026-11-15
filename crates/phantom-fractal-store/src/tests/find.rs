@@ -206,15 +206,20 @@ fn the_display_spelling_names_the_row_it_spells() {
     assert_eq!(named[0].qual_name, "App::run");
     assert_eq!(named[0].file, "src/app.rs");
     assert!(named[0].line.is_some());
-    // The bare name inside a two-symbol file answers both rows, each with
-    // its path: the free fn and the method.
-    let both = store
+    // In a file with a free fn and a method of one name, each display
+    // names exactly its own symbol: the free fn by its name, the method
+    // by its owner and name.
+    let free = store
         .symbols_matching("src/other.rs::run")
-        .expect("display name");
-    assert_eq!(both.len(), 2, "{both:?}");
-    let kinds: Vec<&str> = both.iter().map(|hit| hit.kind.as_str()).collect();
-    assert_eq!(kinds, ["method", "function"], "{both:?}");
-    assert!(both.iter().all(|hit| hit.file == "src/other.rs"));
+        .expect("display free fn");
+    assert_eq!(free.len(), 1, "{free:?}");
+    assert_eq!(free[0].kind, "function");
+    assert_eq!(free[0].file, "src/other.rs");
+    let method = store
+        .symbols_matching("src/other.rs::Other::run")
+        .expect("display method");
+    assert_eq!(method.len(), 1, "{method:?}");
+    assert_eq!(method[0].kind, "method");
     // A leading `./` and a file outside the tree answer as spelled.
     assert_eq!(
         store
@@ -270,9 +275,9 @@ fn a_display_spelling_takes_the_inline_scope_and_the_shared_file() {
     assert_eq!(display.len(), 1, "{display:?}");
     assert_eq!(display[0].file, "src/b.rs");
     assert_eq!(display[0].qual_name, "tests::check");
-    // The `dump` shape: a display spelling with the free fn's bare name
-    // still answers the method beside it, and the module spelling the base
-    // answers keeps exactly its row.
+    // The `dump` shape: the display spelling of the free fn names the free
+    // fn alone, the method's names the method, and the module spelling the
+    // base answers keeps exactly its row.
     put(
         &mut store,
         &language,
@@ -284,7 +289,8 @@ fn a_display_spelling_takes_the_inline_scope_and_the_shared_file() {
     let dump = store
         .symbols_matching("src/dump.rs::canonical_dump")
         .expect("display dump");
-    assert_eq!(dump.len(), 2, "{dump:?}");
+    assert_eq!(dump.len(), 1, "{dump:?}");
+    assert_eq!(dump[0].kind, "function");
     let module = store
         .symbols_matching("dump::canonical_dump")
         .expect("module");
@@ -313,4 +319,38 @@ fn the_display_spelling_needs_a_file_shaped_prefix() {
     // An empty name after the separator names nothing.
     let empty = store.symbols_matching("build.rs::").expect("empty name");
     assert!(empty.is_empty(), "{empty:?}");
+}
+
+#[test]
+fn every_display_an_ambiguous_reply_shows_resolves_to_one_symbol() {
+    let db = TempDb::new("displayround");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = language();
+    // A free fn `run`, a method `Type::run`, a second method `Other::run`
+    // and a free fn in an inline module, all in one file.
+    put(
+        &mut store,
+        &language,
+        "src/one.rs",
+        "pub fn run() {}\n\npub struct Type;\n\nimpl Type {\n    pub fn run(&self) {}\n}\n\n\
+         pub struct Other;\n\nimpl Other {\n    pub fn run(&self) {}\n}\n\n\
+         mod inner {\n    pub fn run() {}\n}\n",
+    );
+    write_modules(&mut store, &[("crate::one", "src/one.rs")]);
+    // The bare name is ambiguous, and each candidate's display, passed
+    // back, names that candidate and no other.
+    let candidates = store.symbols_matching("run").expect("bare");
+    assert_eq!(candidates.len(), 4, "{candidates:?}");
+    let mut seen = std::collections::BTreeSet::new();
+    for candidate in &candidates {
+        let display = format!("{}::{}", candidate.file, candidate.qual_name);
+        assert!(
+            seen.insert(display.clone()),
+            "two candidates share {display}"
+        );
+        let back = store.symbols_matching(&display).expect("display");
+        assert_eq!(back.len(), 1, "{display}: {back:?}");
+        assert_eq!(back[0].id, candidate.id, "{display}");
+    }
 }
