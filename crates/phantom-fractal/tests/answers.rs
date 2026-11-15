@@ -3,6 +3,7 @@
 //! `files` and `sites` keys of `callers`, `callees` and `impact`, which
 //! sit after the old keys and go first under a budget.
 
+use std::collections::BTreeSet;
 use std::process::Command;
 
 use serde_json::{Value, json};
@@ -332,27 +333,39 @@ fn whole(full: &str, max: u64) -> String {
 fn the_new_keys_stay_exactly_when_the_whole_reply_fits() {
     let world = World::new();
     let (_, full) = world.line(BINS[0], &["callers", "crate::util::helper"]);
-    let mut exact = 0;
-    for max in 40..=400_u64 {
+    // Whether the whole reply fits a budget is worked out here, without a
+    // run: its cost changes only with the digits of the budget. The CLI is
+    // then asked at each budget where that answer changes and the budgets
+    // on either side, and at every budget that puts the whole reply at
+    // exactly the room, where a `<` for `<=` would show.
+    let cost = |max: u64| estimate(&whole(&full, max));
+    let room = |max: u64| max * 95 / 100;
+    let fits = |max: u64| cost(max) <= room(max);
+    let exact: BTreeSet<u64> = (1..=400).filter(|&max| cost(max) == room(max)).collect();
+    assert!(
+        !exact.is_empty(),
+        "no budget put the whole reply exactly at the room"
+    );
+    let mut budgets = exact.clone();
+    for max in 2..=400_u64 {
+        if fits(max) != fits(max - 1) {
+            budgets.extend([max - 2, max - 1, max, max + 1]);
+        }
+    }
+    assert!(budgets.iter().any(|&max| fits(max)) && budgets.iter().any(|&max| !fits(max)));
+    for max in budgets {
         let budget = max.to_string();
         let (code, line) = world.line(
             BINS[0],
             &["callers", "crate::util::helper", "--max-tokens", &budget],
         );
-        let room = max * 95 / 100;
-        let cost = estimate(&whole(&full, max));
-        exact += usize::from(cost == room);
-        if cost <= room {
+        if fits(max) {
             assert_eq!(code, Some(0), "{max}: {line}");
             assert_eq!(line, whole(&full, max), "{max}");
         } else {
             assert!(!line.contains("callers_distinct"), "{max}: {line}");
         }
     }
-    assert!(
-        exact > 0,
-        "no budget put the whole reply exactly at the room"
-    );
 }
 
 /// A tree whose `target` has exactly `callers` callers, indexed.
