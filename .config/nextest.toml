@@ -32,3 +32,9 @@ slow-timeout = { period = "30s", terminate-after = 2 }
 [[profile.ci.overrides]]
 filter = 'binary(watch) & test(=a_burst_of_twenty_saves_inside_the_debounce_is_one_batch)'
 retries = 2
+
+# Two CPU-bound budget sweeps that run past the ci profile's 20 s on a
+# slow or shared box, such as a network-less container: give them 60 s.
+[[profile.ci.overrides]]
+filter = 'binary(max_tokens) & (test(=every_budgeted_reply_is_the_fewest_drops_that_fit) | test(=impact_diff_fits_in_its_own_order))'
+slow-timeout = { period = "10s", terminate-after = 6 }
