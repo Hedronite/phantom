@@ -8,7 +8,8 @@
 
 mod support;
 
-use phantom_fractal_lang::{Id, Reason, RefKind, SymbolKind, TargetKind};
+use phantom_fractal_lang::{Id, LinkKind, Node, Reason, RefKind, SymbolKind, TargetKind};
+use phantom_fractal_lang_rust::links;
 use support::{Input, edge};
 
 const COMMON: &str = "tests/common/mod.rs";
@@ -116,4 +117,30 @@ fn a_root_that_does_not_declare_the_file_does_not_reach_it() {
     // Nothing in `c` binds `common`, and it has no glob: external.
     assert_eq!((counts.unresolved, counts.external), (0, 1));
     let _ = c;
+}
+
+#[test]
+fn an_import_of_the_shared_module_keeps_the_link_it_had() {
+    let mut s = shared();
+    // Each root declares `mod common;`, an item of kind module.
+    s.i.symbol(SymbolKind::Module, "common", "tests/a.rs", "");
+    let item_b = s.i.symbol(SymbolKind::Module, "common", "tests/b.rs", "");
+    s.i.uses("tests/a.rs", "", "crate::common", None, false);
+    s.i.uses("tests/b.rs", "", "crate::common", None, false);
+    let first_row =
+        s.i.input
+            .modules
+            .iter()
+            .find(|module| module.file == COMMON)
+            .map(|module| module.id)
+            .expect("first row");
+    let targets: Vec<Node> = links(&s.i.input)
+        .into_iter()
+        .filter(|link| link.kind == LinkKind::Import)
+        .map(|link| link.target)
+        .collect();
+    // The first claimant's link names its module row; the later claimant's
+    // names its `mod common` item, as before its row existed.
+    assert_eq!(targets, [Node::Module(first_row), Node::Symbol(item_b)]);
+    let _ = (s.a, s.b);
 }

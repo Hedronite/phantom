@@ -10,11 +10,29 @@
 //! from that module by the existing tiers. The edge's reason is
 //! `use-glob`. Two candidates, or none, give no edge.
 
-use phantom_fractal_lang::{CallRef, Id, Reason};
+use phantom_fractal_lang::{CallRef, Id, Node, Reason, SymbolKind};
 
-use super::{Entity, Index, Placed, segments};
+use super::{Entity, Index, Placed, last_segment, segments};
 
 impl Index<'_> {
+    /// What an `import` link to module row `id` names. A later claimant's
+    /// row of a shared file, which cure (a) adds, names what the link named
+    /// before it was there: the one `mod` item of that name in the parent
+    /// module. So no existing link moves (D10).
+    pub(crate) fn link_node(&self, id: Id) -> Node {
+        if self.canonical(id) == id {
+            return Node::Module(id);
+        }
+        let item = self.modules.get(&id).and_then(|row| {
+            let items = self.items.get(&(row.parent?, last_segment(&row.path)))?;
+            let [one] = items[..] else {
+                return None;
+            };
+            (self.kind(one) == Some(SymbolKind::Module)).then_some(one)
+        });
+        item.map_or(Node::Module(id), Node::Symbol)
+    }
+
     /// A `Call`, or a path in a macro's tokens, by the base tiers and,
     /// when they leave it unresolved, by the cures.
     pub(crate) fn place_cured(&self, call: &CallRef, source: Id) -> Placed {

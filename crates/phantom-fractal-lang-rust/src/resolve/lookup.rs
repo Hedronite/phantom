@@ -320,7 +320,7 @@ impl<'a> Index<'a> {
         // A call reaches a binding one level down from its own lookup.
         let walked = self.use_entities(binding, 1).ok()?;
         let target = match walked.entities[..] {
-            [Entity::Module(id)] => Node::Module(id),
+            [Entity::Module(id)] => self.link_node(id),
             [Entity::Symbol(id)] => Node::Symbol(id),
             _ => return None,
         };
