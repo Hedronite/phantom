@@ -102,6 +102,11 @@ impl Fixture {
             .env("XDG_CACHE_HOME", home.join("cache"))
             .env("PHANTOM_FRACTAL_DATA", self.data())
             .env("PATH", path);
+        // An instrumented binary writes its profile here. Without it the
+        // profile lands in the working directory, which is the fixture.
+        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+            cmd.env("LLVM_PROFILE_FILE", profile);
+        }
     }
 
     /// The exit code and the one envelope line `phantom.nu ARGS` prints.
