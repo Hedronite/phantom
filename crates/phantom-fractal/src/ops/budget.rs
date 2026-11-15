@@ -36,12 +36,9 @@ pub(crate) trait Shed: Serialize + Clone {
     /// is fixed, so dropping more never brings one back.
     fn shed(&mut self, count: usize);
     fn set_tokens(&mut self, tokens: Tokens);
-    /// Drops the keys added beside the reply's old ones, and says whether
-    /// there were any. They go before any entry and are not counted in
-    /// `omitted`.
-    fn drop_extras(&mut self) -> bool {
-        false
-    }
+    /// Drops the keys added beside the reply's old ones, if it has any.
+    /// They go before any entry and are not counted in `omitted`.
+    fn drop_extras(&mut self) {}
 }
 
 /// `Usage` unless `max_tokens` is absent or in range.
@@ -56,8 +53,8 @@ pub(crate) fn check(max_tokens: Option<u64>) -> Result<(), Failure> {
 }
 
 /// `data` as is without a budget. With one, `data` whole when it fits in
-/// a line that carries `meta`; else `data` without its extra keys, after
-/// the fewest drops that fit, with `tokens` set; `Usage`
+/// a line that carries `meta`; else `data` without its extra keys, if it
+/// has any, after the fewest drops that fit, with `tokens` set; `Usage`
 /// `budget_too_small` when it does not fit with every entry dropped.
 pub(crate) fn fit<T: Shed>(data: T, max_tokens: Option<u64>, meta: &Meta) -> Result<T, Failure> {
     let Some(max) = max_tokens else {
@@ -65,9 +62,7 @@ pub(crate) fn fit<T: Shed>(data: T, max_tokens: Option<u64>, meta: &Meta) -> Res
     };
     let room = packing_budget(max);
     let mut lean = data.clone();
-    if !lean.drop_extras() {
-        return shed_to_fit(data, max, room, meta);
-    }
+    lean.drop_extras();
     let mut whole = data;
     if settle(&mut whole, max, 0, meta)? <= room {
         return Ok(whole);

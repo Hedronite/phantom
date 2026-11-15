@@ -97,6 +97,26 @@ fn visibility_text(stored: &str) -> String {
     }
 }
 
+/// The store's rows named exactly `request.query` whose `.rs` file the
+/// walk of `request.repo` still keeps, as `find` has always read only
+/// those files.
+fn kept_rows(request: &FindRequest, store: &Store) -> Result<Vec<FindRow>, Failure> {
+    let root = canonical_repo(&request.repo)?;
+    let walk = phantom_fractal_extract::walk(&root)
+        .map_err(|err| Failure::new(ErrorKind::Usage, format!("walk failed: {err}")))?;
+    let kept: BTreeSet<&str> = walk
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .filter(|path| path.ends_with(".rs"))
+        .collect();
+    Ok(store
+        .symbols_named(&request.query)?
+        .into_iter()
+        .filter(|row| kept.contains(row.file.as_str()))
+        .collect())
+}
+
 /// Indexed symbols under `request.repo` named exactly `request.query`,
 /// ordered by path and then line, at most [`FIND_CAP`] of them, fitted
 /// to `request.max_tokens`.
@@ -119,20 +139,7 @@ fn matches(request: &FindRequest, store: &Store) -> Result<FindResult, Failure> 
             tokens: None,
         });
     }
-    let root = canonical_repo(&request.repo)?;
-    let walk = phantom_fractal_extract::walk(&root)
-        .map_err(|err| Failure::new(ErrorKind::Usage, format!("walk failed: {err}")))?;
-    let kept: BTreeSet<&str> = walk
-        .files
-        .iter()
-        .map(|file| file.path.as_str())
-        .filter(|path| path.ends_with(".rs"))
-        .collect();
-    let rows: Vec<FindRow> = store
-        .symbols_named(query)?
-        .into_iter()
-        .filter(|row| kept.contains(row.file.as_str()))
-        .collect();
+    let rows = kept_rows(request, store)?;
     let names = if rows.iter().any(|row| row.kind == "method") {
         Some(Names::of_store(store)?)
     } else {

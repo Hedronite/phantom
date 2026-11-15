@@ -253,6 +253,14 @@ fn impact_groups_its_hits_and_tests_and_summary_leaves_them_out() {
         }
         hits.extend(data["tests"].as_array().expect("tests"));
         assert!(!hits.is_empty(), "{data}");
+        for hit in &hits {
+            let display = hit["display"].as_str().expect("display");
+            let name = hit["name"].as_str().expect("name");
+            let path = hit["path"].as_str().expect("path");
+            let last = name.rsplit("::").next().expect("segment");
+            assert!(display.starts_with(&format!("{path}::")), "{hit}");
+            assert!(display.ends_with(&format!("::{last}")), "{hit}");
+        }
         assert_eq!(new_keys(&data), regroup(&hits, "path", "site_line"));
         let summary = world.data(bin, &["impact", "crate::util::deep::sink", "--summary"]);
         for key in ["callers_distinct", "files", "sites"] {
@@ -295,4 +303,90 @@ fn a_budget_drops_the_new_keys_before_any_hit() {
         }
     }
     assert!(kept > 0 && lean > 0, "kept {kept}, lean {lean}");
+}
+
+/// `ceil(bytes / 3.5) + 1`, as the README's estimate defines it.
+fn estimate(line: &str) -> u64 {
+    (line.len() as u64 * 2).div_ceil(7) + 1
+}
+
+/// `full` with `tokens` spliced in at the end of `data`, nothing dropped,
+/// and `used` settled on the estimate of that line.
+fn whole(full: &str, max: u64) -> String {
+    let at = full.find(",\"meta\":").expect("meta") - 1;
+    let mut used = 0;
+    loop {
+        let line = format!(
+            "{},\"tokens\":{{\"max\":{max},\"used\":{used},\"omitted\":0}}{}",
+            &full[..at],
+            &full[at..]
+        );
+        if estimate(&line) == used {
+            return line;
+        }
+        used = estimate(&line);
+    }
+}
+
+#[test]
+fn the_new_keys_stay_exactly_when_the_whole_reply_fits() {
+    let world = World::new();
+    let (_, full) = world.line(BINS[0], &["callers", "crate::util::helper"]);
+    let mut exact = 0;
+    for max in 40..=400_u64 {
+        let budget = max.to_string();
+        let (code, line) = world.line(
+            BINS[0],
+            &["callers", "crate::util::helper", "--max-tokens", &budget],
+        );
+        let room = max * 95 / 100;
+        let cost = estimate(&whole(&full, max));
+        exact += usize::from(cost == room);
+        if cost <= room {
+            assert_eq!(code, Some(0), "{max}: {line}");
+            assert_eq!(line, whole(&full, max), "{max}");
+        } else {
+            assert!(!line.contains("callers_distinct"), "{max}: {line}");
+        }
+    }
+    assert!(
+        exact > 0,
+        "no budget put the whole reply exactly at the room"
+    );
+}
+
+/// A tree whose `target` has exactly `callers` callers, indexed.
+fn fan_in(callers: usize) -> World {
+    let world = World {
+        repo: TempDir::new("answers-fan-repo"),
+        data: TempDir::new("answers-fan-data"),
+    };
+    let mut lib = String::from("pub fn target() {}\n");
+    for n in 0..callers {
+        lib.push_str(&format!("\npub fn c{n:02}() {{\n    target();\n}}\n"));
+    }
+    let src = world.repo.path().join("src");
+    std::fs::create_dir_all(&src).expect("src");
+    std::fs::write(
+        world.repo.path().join("Cargo.toml"),
+        "[package]\nname = \"fan\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .expect("manifest");
+    std::fs::write(src.join("lib.rs"), lib).expect("lib");
+    let (code, line) = world.line(BINS[0], &["index", "."]);
+    assert_eq!(code, Some(0), "{line}");
+    world
+}
+
+#[test]
+fn show_lists_20_callers_whole_and_flags_the_21st() {
+    for (callers, truncated) in [(20, false), (21, true)] {
+        let world = fan_in(callers);
+        let data = world.data(BINS[0], &["show", "target"]);
+        let side = &data["callers"];
+        assert_eq!(side["count"], callers, "{data}");
+        assert_eq!(side["hits"].as_array().expect("hits").len(), 20, "{data}");
+        assert_eq!(side["truncated"], truncated, "{data}");
+        assert!(side["hits"][0].get("display").is_none(), "{data}");
+    }
 }

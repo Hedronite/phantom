@@ -82,7 +82,7 @@ impl Shed for ImpactResult {
         self.tokens = Some(tokens);
     }
 
-    fn drop_extras(&mut self) -> bool {
+    fn drop_extras(&mut self) {
         let groups = self.groups.iter_mut().flatten();
         for hit in groups.flat_map(|group| &mut group.hits) {
             hit.display = None;
@@ -90,7 +90,7 @@ impl Shed for ImpactResult {
         for test in self.tests.iter_mut().flatten() {
             test.hit.display = None;
         }
-        self.distinct.take().is_some()
+        self.distinct = None;
     }
 }
 

@@ -62,11 +62,11 @@ impl Shed for CallResult {
         self.tokens = Some(tokens);
     }
 
-    fn drop_extras(&mut self) -> bool {
+    fn drop_extras(&mut self) {
         for hit in &mut self.hits {
             hit.display = None;
         }
-        self.distinct.take().is_some()
+        self.distinct = None;
     }
 }
 

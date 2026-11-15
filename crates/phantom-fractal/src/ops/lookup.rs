@@ -187,31 +187,43 @@ fn find_one(
             ))
         }
         1 => Ok(matches.remove(0)),
-        total => {
-            let candidates = listed(store, names, matches, keyed)?;
-            let spelled: Vec<String> = candidates
-                .iter()
-                .map(|candidate| match candidate.line {
-                    Some(line) => format!("{} ({}:{line})", candidate.name, candidate.path),
-                    None => format!("{} ({})", candidate.name, candidate.path),
-                })
-                .collect();
-            let more = total - candidates.len();
-            let tail = if more > 0 {
-                format!(", and {more} more")
-            } else {
-                String::new()
-            };
-            let message = format!(
-                "{total} symbols match {query}: {}{tail}",
-                spelled.join(", ")
-            );
-            Err(Failure::ambiguous(
-                message,
-                Candidates { candidates, total },
-            ))
-        }
+        _ => Err(ambiguous(store, names, query, matches, keyed)?),
     }
+}
+
+/// The `Ambiguous` failure for the `matches` of `query`: the first
+/// [`CANDIDATE_CAP`] as candidates, each named with its path and line in
+/// the message, and how many there were.
+fn ambiguous(
+    store: &Store,
+    names: &Names,
+    query: &str,
+    matches: Vec<SymbolMatch>,
+    keyed: bool,
+) -> Result<Failure, Failure> {
+    let total = matches.len();
+    let candidates = listed(store, names, matches, keyed)?;
+    let spelled: Vec<String> = candidates
+        .iter()
+        .map(|candidate| match candidate.line {
+            Some(line) => format!("{} ({}:{line})", candidate.name, candidate.path),
+            None => format!("{} ({})", candidate.name, candidate.path),
+        })
+        .collect();
+    let more = total - candidates.len();
+    let tail = if more > 0 {
+        format!(", and {more} more")
+    } else {
+        String::new()
+    };
+    let message = format!(
+        "{total} symbols match {query}: {}{tail}",
+        spelled.join(", ")
+    );
+    Ok(Failure::ambiguous(
+        message,
+        Candidates { candidates, total },
+    ))
 }
 
 /// The first [`CANDIDATE_CAP`] of `found`, named, each with its stable
