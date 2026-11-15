@@ -18,6 +18,7 @@ use phantom_fractal_proto::ErrorKind;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
+use super::describe;
 use super::roots::Roots;
 use crate::ops::budget::{MAX_TOKENS_MAX, MAX_TOKENS_MIN};
 use crate::ops::cochange::{
@@ -44,8 +45,9 @@ const REPO: &str = "The indexed tree: one of the server's roots. Defaults to the
     else to the server's working directory when it is a root; a relative path resolves against \
     the working directory.";
 
-const SYMBOL: &str = "A bare name such as `parse`, or a qualified one such as `config::parse` or \
-    `Config::load`.";
+const SYMBOL: &str = "A bare name such as `parse`; `Type::method` such as `App::watch_dir`; a \
+    module path such as `tui::app::App::watch_dir` or `config::parse`; or a method by its module \
+    and name, such as `app::watch_dir`.";
 
 const FOCUS: &str = "Indexed files, each relative to the repo, such as `src/lib.rs`.";
 
@@ -61,8 +63,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
     let mut tools = vec![
         json!({
             "name": "find_symbols",
-            "description": "Find indexed symbols whose name is exactly `query`. Returns at most \
-                100, each with its kind, visibility, path and line.",
+            "description": describe::FIND_SYMBOLS,
             "inputSchema": schema(
                 json!({
                     "query": { "type": "string", "description": "The exact symbol name." },
@@ -75,10 +76,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
         }),
         json!({
             "name": "show_symbol",
-            "description": "Show one symbol: its signature, doc summary, span, test flag and \
-                stable key, its members, up to 20 callers and callees, and its macro-argument \
-                count. Give exactly one of `symbol` and `id`. Source lines come back only when \
-                `source` is true.",
+            "description": describe::SHOW_SYMBOL,
             "inputSchema": schema(
                 json!({
                     "symbol": { "type": "string", "description": SYMBOL },
@@ -101,8 +99,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
         }),
         json!({
             "name": "callers",
-            "description": "List the resolved calls to one symbol, at most 100, with the \
-                reason and confidence of each.",
+            "description": describe::CALLERS,
             "inputSchema": schema(
                 json!({
                     "symbol": { "type": "string", "description": SYMBOL },
@@ -115,8 +112,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
         }),
         json!({
             "name": "callees",
-            "description": "List the resolved calls one symbol makes, at most 100, with the \
-                reason and confidence of each, and its count of unresolved calls.",
+            "description": describe::CALLEES,
             "inputSchema": schema(
                 json!({
                     "symbol": { "type": "string", "description": SYMBOL },
@@ -129,9 +125,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
         }),
         json!({
             "name": "impact",
-            "description": "Walk the calls into one symbol backwards to estimate what a change \
-                to it reaches: hits by depth, tests apart, counts, the reasons the answer may be \
-                incomplete, and a risk level.",
+            "description": describe::IMPACT,
             "inputSchema": schema(
                 json!({
                     "symbol": { "type": "string", "description": SYMBOL },
@@ -168,9 +162,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
         }),
         json!({
             "name": "top_ranked",
-            "description": "List the best-ranked symbols or files of the index, by PageRank over \
-                its calls, trait impls and imports, with each score. With `focus`, the rank is \
-                personalised to those files.",
+            "description": describe::TOP_RANKED,
             "inputSchema": schema(
                 json!({
                     "kind": {
@@ -201,9 +193,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
         }),
         json!({
             "name": "repo_map",
-            "description": "A ranked map of the repo: files best first, each with its \
-                best-ranked symbols' signatures and lines, packed so its estimated tokens never \
-                exceed `budget`. With `focus`, those files come first.",
+            "description": describe::REPO_MAP,
             "inputSchema": schema(
                 json!({
                     "budget": {
@@ -233,11 +223,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
         }),
         json!({
             "name": "cochange",
-            "description": "List the files that tend to change with `file`, from the git \
-                history `index` read on a git root: each partner with its lift, the decayed \
-                weight of the commits they changed in together, the confidence that a change to \
-                `file` comes with one to it, and the last time they changed together. Without a \
-                scan, `scan` is null and there are no partners.",
+            "description": describe::COCHANGE,
             "inputSchema": schema(
                 json!({
                     "file": {
@@ -268,13 +254,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
         }),
         json!({
             "name": "diff_impact",
-            "description": "Estimate what the uncommitted change reaches: the work tree is compared \
-                with HEAD, or with `against`, by raw bytes, and the calls into every changed \
-                symbol the index holds are walked backwards at once. Returns the base, the changed \
-                symbols, the changed files with no changed symbol, whether a manifest changed, \
-                and the impact: hits by depth, tests apart, counts, the reasons the answer may be \
-                incomplete, and a risk level. On a git root only; staged and unstaged diffs are \
-                not offered.",
+            "description": describe::DIFF_IMPACT,
             "inputSchema": schema(
                 json!({
                     "against": {
@@ -315,11 +295,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
         }),
         json!({
             "name": "symbol_path",
-            "description": "Find a call path from one symbol to another over the stored calls and \
-                type-to-method edges: among the shortest, the one whose edge confidences have the \
-                highest product. Each hop gives the symbol reached and the edge into it. With no \
-                path within `max_depth`, `found` is false and `farthest` names the symbol `from` \
-                reaches deepest.",
+            "description": describe::SYMBOL_PATH,
             "inputSchema": schema(
                 json!({
                     "from": {
@@ -353,11 +329,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
         }),
         json!({
             "name": "repo_status",
-            "description": "Say whether the index is stale and why: how many files an index \
-                pass would add, rewrite and remove, whether the workspace manifests changed, \
-                HEAD now and at the last pass, the stored counts, versions and epochs, the \
-                co-change scan, and whether a writer holds the index. Reads only; a stale index \
-                is never re-indexed.",
+            "description": describe::REPO_STATUS,
             "inputSchema": schema(
                 json!({
                     "repo": { "type": "string", "description": REPO },
@@ -368,9 +340,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
         }),
         json!({
             "name": "repos",
-            "description": "List this server's roots that have an index: each index's key, its \
-                tree's directory name, whether it is stale, and its file and symbol counts, by \
-                key. No path is given.",
+            "description": describe::REPOS,
             "inputSchema": schema(json!({}), &[]),
             "annotations": read,
         }),
@@ -378,9 +348,7 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
     if allow_index {
         tools.push(json!({
             "name": "index_repo",
-            "description": "Index the Rust files under `path` and resolve their calls. The \
-                index is written to the data directory, never under `path`. A second run with \
-                nothing changed writes nothing.",
+            "description": describe::INDEX_REPO,
             "inputSchema": schema(
                 json!({
                     "path": {

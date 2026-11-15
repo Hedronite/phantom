@@ -13,6 +13,7 @@
 //! only under `--allow-index`. A tool reaches only the trees in
 //! [`roots::Roots`].
 
+mod describe;
 mod frame;
 mod roots;
 mod rpc;
