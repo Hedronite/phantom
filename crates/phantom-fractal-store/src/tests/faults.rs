@@ -91,6 +91,9 @@ fn every_read_surfaces_a_failing_statement() {
     surfaces(1, || s.map_rows().map(|_| ()));
     surfaces(1, || s.edges_of_kind("call").map(|_| ()));
     surfaces(1, || s.symbols_matching("alpha").map(|_| ()));
+    // The exact spellings, then the method fallback: two statements for
+    // a qualified name the exact forms do not answer.
+    surfaces(2, || s.symbols_matching("ghost::alpha").map(|_| ()));
     surfaces(1, || s.callers(1).map(|_| ()));
     surfaces(1, || s.callees(1).map(|_| ()));
     surfaces(1, || s.cochange_of("src/a.rs", 0.0, 5).map(|_| ()));

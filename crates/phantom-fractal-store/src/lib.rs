@@ -18,6 +18,7 @@ mod cochange;
 mod detail;
 mod dirs;
 mod dump;
+mod fetch;
 mod graph;
 mod impact;
 mod lock;
@@ -37,7 +38,7 @@ use rusqlite::{Connection, OpenFlags};
 
 pub use crate::cochange::{CochangeGroup, CochangePartner, CochangeScan, FileRow, PairRow};
 pub use crate::detail::SymbolDetail;
-pub use crate::graph::{CallHit, EdgeRow, Package, SymbolMatch};
+pub use crate::graph::{CallHit, EdgeRow, FindRow, Package, SymbolMatch};
 pub use crate::lock::{LockState, WriterLock, lock_state};
 pub use crate::rank::{MapFile, MapRow, RankEdge, RankImportEdge, RankSymbolRow};
 pub use crate::rows::FileStat;

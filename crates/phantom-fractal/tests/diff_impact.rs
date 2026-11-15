@@ -269,7 +269,14 @@ fn changed_symbols_files_and_their_impact() {
     let unindexed = &data["impact"]["reasons"][2];
     assert_eq!(unindexed["count"], 1);
     // `top` calls `fb`: the walk is `impact`'s from `fb` and `fg`.
-    let fb = world.ok(&["impact", "fb"])["data"]["groups"].clone();
+    // `impact` names each hit with `display` (SPEC-w14 G1b); the diff
+    // keeps its old hit shape.
+    let mut fb = world.ok(&["impact", "fb"])["data"]["groups"].clone();
+    for group in fb.as_array_mut().expect("groups") {
+        for hit in group["hits"].as_array_mut().expect("hits") {
+            hit.as_object_mut().expect("hit").remove("display");
+        }
+    }
     assert_eq!(data["impact"]["groups"], fb);
     assert_eq!(world.state(), before, "a diff wrote");
     // The same diff twice prints the same.

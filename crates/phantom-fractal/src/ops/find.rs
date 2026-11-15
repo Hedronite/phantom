@@ -1,13 +1,15 @@
-//! `find`: indexed symbols by exact name.
+//! `find`: indexed symbols by exact name, methods included (SPEC-w14
+//! G1b).
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use phantom_fractal_lang::{Item, Visibility};
 use phantom_fractal_proto::ErrorKind;
-use phantom_fractal_store::Store;
+use phantom_fractal_store::{FindRow, Store, StoreError};
 use serde::Serialize;
 
 use super::budget::{self, Shed, Tokens, drop_last};
+use super::lookup::Names;
 use super::{Failure, Reply, answer, canonical_repo, open_index};
 
 /// Most hits one `find` returns.
@@ -47,32 +49,72 @@ impl Shed for FindResult {
     }
 }
 
-/// One `find` result. `path` is relative to the indexed tree.
+/// One `find` result. `path` is relative to the indexed tree. An item's
+/// `name` is its bare name; a method's is qualified, as
+/// `crate::meta::Meta::page`, since its bare name alone does not say
+/// whose it is.
 #[derive(Clone, Serialize)]
 struct SymbolHit {
     name: String,
-    kind: &'static str,
+    kind: String,
     visibility: String,
     path: String,
     line: u32,
 }
 
 impl SymbolHit {
-    fn new(path: &str, item: Item) -> Self {
-        let visibility = match item.visibility {
-            Visibility::Private => "private".to_owned(),
-            Visibility::Public => "pub".to_owned(),
-            Visibility::Crate => "pub(crate)".to_owned(),
-            Visibility::Restricted(text) => text,
+    /// The hit for one stored row. `names` qualifies a method, and is
+    /// read only when a method matched.
+    fn new(row: FindRow, names: Option<&Names>) -> Result<Self, Failure> {
+        let line = row
+            .line
+            .and_then(|line| u32::try_from(line).ok())
+            .ok_or(StoreError::UnreadableStamp)?;
+        let name = match names {
+            Some(names) if row.kind == "method" => names.of(row.id).unwrap_or(row.name),
+            _ => row.name,
         };
-        Self {
-            name: item.name,
-            kind: item.kind.as_str(),
-            visibility,
-            path: path.to_owned(),
-            line: item.start_line,
-        }
+        Ok(Self {
+            name,
+            visibility: visibility_text(&row.visibility),
+            kind: row.kind,
+            path: row.file,
+            line,
+        })
     }
+}
+
+/// The stored visibility as `find` has always printed it: `pub`,
+/// `pub(crate)`, `private`, or the restriction as written.
+fn visibility_text(stored: &str) -> String {
+    match stored {
+        "public" => "pub".to_owned(),
+        "crate" => "pub(crate)".to_owned(),
+        other => other
+            .strip_prefix("restricted:")
+            .unwrap_or(other)
+            .to_owned(),
+    }
+}
+
+/// The store's rows named exactly `request.query` whose `.rs` file the
+/// walk of `request.repo` still keeps, as `find` has always read only
+/// those files.
+fn kept_rows(request: &FindRequest, store: &Store) -> Result<Vec<FindRow>, Failure> {
+    let root = canonical_repo(&request.repo)?;
+    let walk = phantom_fractal_extract::walk(&root)
+        .map_err(|err| Failure::new(ErrorKind::Usage, format!("walk failed: {err}")))?;
+    let kept: BTreeSet<&str> = walk
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .filter(|path| path.ends_with(".rs"))
+        .collect();
+    Ok(store
+        .symbols_named(&request.query)?
+        .into_iter()
+        .filter(|row| kept.contains(row.file.as_str()))
+        .collect())
 }
 
 /// Indexed symbols under `request.repo` named exactly `request.query`,
@@ -86,7 +128,8 @@ pub(crate) fn find(request: &FindRequest) -> Result<Reply<FindResult>, Failure> 
 }
 
 /// The matches before any budget. The store's bound FTS match answers an
-/// absent name without a walk. Otherwise each `.rs` file the walk keeps is read back from the store.
+/// absent name without a walk. Otherwise the store's rows so named are
+/// kept when the walk still keeps their `.rs` file.
 fn matches(request: &FindRequest, store: &Store) -> Result<FindResult, Failure> {
     let query = request.query.as_str();
     if query.is_empty() || store.match_count(query)? == 0 {
@@ -96,17 +139,16 @@ fn matches(request: &FindRequest, store: &Store) -> Result<FindResult, Failure> 
             tokens: None,
         });
     }
-    let root = canonical_repo(&request.repo)?;
-    let walk = phantom_fractal_extract::walk(&root)
-        .map_err(|err| Failure::new(ErrorKind::Usage, format!("walk failed: {err}")))?;
-    let mut hits = Vec::new();
-    for file in walk.files.iter().filter(|file| file.path.ends_with(".rs")) {
-        for item in store.read_items(&file.path)? {
-            if item.name == query {
-                hits.push(SymbolHit::new(&file.path, item));
-            }
-        }
-    }
+    let rows = kept_rows(request, store)?;
+    let names = if rows.iter().any(|row| row.kind == "method") {
+        Some(Names::of_store(store)?)
+    } else {
+        None
+    };
+    let mut hits = rows
+        .into_iter()
+        .map(|row| SymbolHit::new(row, names.as_ref()))
+        .collect::<Result<Vec<_>, _>>()?;
     hits.sort_by(|a, b| a.path.cmp(&b.path).then(a.line.cmp(&b.line)));
     let truncated = hits.len() > FIND_CAP;
     hits.truncate(FIND_CAP);

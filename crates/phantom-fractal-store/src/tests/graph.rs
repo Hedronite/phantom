@@ -7,7 +7,7 @@ use phantom_fractal_lang_rust::RustLanguage;
 use super::{TempDb, assert_outside_workspace, fixture};
 use crate::{Package, Store, StoreError};
 
-fn language() -> RustLanguage {
+pub(super) fn language() -> RustLanguage {
     RustLanguage::new().expect("grammar")
 }
 
@@ -439,7 +439,7 @@ fn symbols_matching_takes_bare_and_qualified_names() {
     }
 }
 
-fn put(store: &mut Store, language: &RustLanguage, path: &str, source: &str) {
+pub(super) fn put(store: &mut Store, language: &RustLanguage, path: &str, source: &str) {
     store.put_source(path, source, 0, language).expect("put");
 }
 

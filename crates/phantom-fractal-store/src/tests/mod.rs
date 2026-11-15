@@ -16,6 +16,7 @@ mod detail;
 mod dirs;
 mod dump;
 mod faults;
+mod find;
 mod graph;
 mod hints;
 mod legacy;

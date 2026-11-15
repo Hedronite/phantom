@@ -14,6 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::StoreError;
+use crate::fetch::collect_rows;
 
 /// One call-shaped ref under a symbol, as the scorer's buckets read
 /// it: the ref kind (`call`, `method_call`, `macro`, or `macro_arg`),
@@ -179,18 +180,6 @@ impl crate::Store {
         }
         Ok(out)
     }
-}
-
-/// Every row of one statement through its mapper, in statement order.
-fn collect_rows<T>(
-    rows: &mut rusqlite::Rows<'_>,
-    map: impl Fn(&rusqlite::Row<'_>) -> Result<T, StoreError>,
-) -> Result<Vec<T>, StoreError> {
-    let mut out = Vec::new();
-    while let Some(row) = rows.next()? {
-        out.push(map(row)?);
-    }
-    Ok(out)
 }
 
 /// One `score_call_refs` row: kind, text, receiver, receiver-type hint

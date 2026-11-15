@@ -12,6 +12,7 @@ use phantom_fractal_proto::ErrorKind;
 use serde::Serialize;
 
 use super::budget::{self, Shed, Tokens, drop_last};
+use super::distinct::{Distinct, Site};
 use super::lookup::{Names, SymbolOut, current_index, lookup, symbol_out};
 use super::{Failure, Reply};
 
@@ -31,7 +32,9 @@ pub(crate) struct ImpactRequest {
 }
 
 /// `data` of a successful `impact`. `groups` and `tests` are absent under
-/// `--summary`, and `tests` is absent under `--no-tests`.
+/// `--summary`, and `tests` is absent under `--no-tests`. The
+/// `callers_distinct`, `files` and `sites` keys are over the listed hits
+/// and tests, and are absent under `--summary`.
 #[derive(Clone, Serialize)]
 pub(crate) struct ImpactResult {
     symbol: SymbolOut,
@@ -44,6 +47,8 @@ pub(crate) struct ImpactResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     tests: Option<Vec<TestOut>>,
     options: OptionsOut,
+    #[serde(flatten)]
+    distinct: Option<Distinct>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tokens: Option<Tokens>,
 }
@@ -76,6 +81,17 @@ impl Shed for ImpactResult {
     fn set_tokens(&mut self, tokens: Tokens) {
         self.tokens = Some(tokens);
     }
+
+    fn drop_extras(&mut self) {
+        let groups = self.groups.iter_mut().flatten();
+        for hit in groups.flat_map(|group| &mut group.hits) {
+            hit.display = None;
+        }
+        for test in self.tests.iter_mut().flatten() {
+            test.hit.display = None;
+        }
+        self.distinct = None;
+    }
 }
 
 /// One completeness reason. `count` is null where it cannot be counted.
@@ -106,7 +122,8 @@ pub(crate) struct GroupOut {
 
 /// One reached symbol. `name`, `kind`, `path`, and `line` describe it;
 /// `reason` and the site are the edge it was best reached by, and
-/// `confidence` is the product along that path.
+/// `confidence` is the product along that path. `display` names it by
+/// file, as `callers` does; `impact` sets it, and `impact --diff` does not.
 #[derive(Clone, Serialize)]
 pub(crate) struct HitOut {
     name: String,
@@ -117,6 +134,8 @@ pub(crate) struct HitOut {
     reason: String,
     site_path: String,
     site_line: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display: Option<String>,
 }
 
 /// A reached test: the hit shape plus its depth.
@@ -125,6 +144,14 @@ pub(crate) struct TestOut {
     depth: u8,
     #[serde(flatten)]
     hit: HitOut,
+}
+
+/// Whether each hit carries its `display`: `impact` names its hits so,
+/// and `impact --diff` keeps its old shape.
+#[derive(Clone, Copy)]
+pub(crate) enum Shown {
+    Display,
+    Plain,
 }
 
 #[derive(Clone, Serialize)]
@@ -154,17 +181,22 @@ pub(crate) fn impact(request: &ImpactRequest) -> Result<Reply<ImpactResult>, Fai
         let groups = answer
             .groups
             .into_iter()
-            .map(|group| group_out(&names, group))
+            .map(|group| group_out(&names, group, Shown::Display))
             .collect();
         let tests = options.include_tests.then(|| {
             answer
                 .tests
                 .into_iter()
-                .map(|hit| test_out(&names, hit))
+                .map(|hit| test_out(&names, hit, Shown::Display))
                 .collect()
         });
         (Some(groups), tests)
     };
+    let distinct = groups.as_ref().map(|groups: &Vec<GroupOut>| {
+        let hits = groups.iter().flat_map(|group| &group.hits);
+        let tests = tests.iter().flatten().map(|test: &TestOut| &test.hit);
+        Distinct::of(hits.chain(tests).map(HitOut::site))
+    });
     let result = ImpactResult {
         symbol: symbol_out(&names, found),
         risk: answer.risk.as_str(),
@@ -174,6 +206,7 @@ pub(crate) fn impact(request: &ImpactRequest) -> Result<Reply<ImpactResult>, Fai
         groups,
         tests,
         options: options_out(&options),
+        distinct,
         tokens: None,
     };
     super::answer(result, &store, &request.repo, request.max_tokens)
@@ -196,7 +229,7 @@ pub(crate) const fn counts_out(counts: Counts) -> CountsOut {
     }
 }
 
-pub(crate) fn group_out(names: &Names, group: Group) -> GroupOut {
+pub(crate) fn group_out(names: &Names, group: Group, shown: Shown) -> GroupOut {
     GroupOut {
         depth: group.depth,
         total: group.total,
@@ -204,16 +237,16 @@ pub(crate) fn group_out(names: &Names, group: Group) -> GroupOut {
         hits: group
             .hits
             .into_iter()
-            .map(|hit| hit_out(names, hit))
+            .map(|hit| hit_out(names, hit, shown))
             .collect(),
     }
 }
 
 /// A reached test, named as [`hit_out`] names a hit.
-pub(crate) fn test_out(names: &Names, hit: Hit) -> TestOut {
+pub(crate) fn test_out(names: &Names, hit: Hit, shown: Shown) -> TestOut {
     TestOut {
         depth: hit.depth,
-        hit: hit_out(names, hit),
+        hit: hit_out(names, hit, shown),
     }
 }
 
@@ -228,8 +261,12 @@ pub(crate) const fn options_out(options: &ImpactOptions) -> OptionsOut {
 
 /// A hit with its symbol named as `callers` names it. A symbol the
 /// resolver input does not hold keeps its bare stored name.
-fn hit_out(names: &Names, hit: Hit) -> HitOut {
+fn hit_out(names: &Names, hit: Hit, shown: Shown) -> HitOut {
     let symbol = hit.symbol;
+    let display = match shown {
+        Shown::Display => Some(names.display_of(symbol.id, &symbol.file, &symbol.name)),
+        Shown::Plain => None,
+    };
     HitOut {
         name: names.of(symbol.id).unwrap_or(symbol.name),
         kind: symbol.kind,
@@ -239,5 +276,19 @@ fn hit_out(names: &Names, hit: Hit) -> HitOut {
         reason: hit.via.reason,
         site_path: hit.via.site_file,
         site_line: hit.via.site_line,
+        display,
+    }
+}
+
+impl HitOut {
+    /// This hit as [`Distinct`] groups it: by the symbol reached, in its
+    /// own file, at the site it was best reached by.
+    fn site(&self) -> Site<'_> {
+        Site {
+            display: self.display.as_deref().unwrap_or(&self.name),
+            file: &self.path,
+            line: self.site_line,
+            confidence: self.confidence,
+        }
     }
 }

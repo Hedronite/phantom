@@ -6,6 +6,7 @@ use phantom_fractal_store::{CallHit, Store};
 use serde::Serialize;
 
 use super::budget::{self, Shed, Tokens, drop_last};
+use super::distinct::{Distinct, Site};
 use super::lookup::{Names, SymbolOut, current_index, kind_text, lookup, symbol_out};
 use super::{Failure, Reply, answer};
 
@@ -41,6 +42,9 @@ pub(crate) struct CallResult {
     /// `callees` only.
     #[serde(skip_serializing_if = "Option::is_none")]
     unresolved_calls: Option<i64>,
+    /// `callers_distinct`, `files` and `sites`, over `hits`.
+    #[serde(flatten)]
+    distinct: Option<Distinct>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tokens: Option<Tokens>,
 }
@@ -57,12 +61,21 @@ impl Shed for CallResult {
     fn set_tokens(&mut self, tokens: Tokens) {
         self.tokens = Some(tokens);
     }
+
+    fn drop_extras(&mut self) {
+        for hit in &mut self.hits {
+            hit.display = None;
+        }
+        self.distinct = None;
+    }
 }
 
 /// One edge. `name` and `kind` describe the other symbol, and
 /// `symbol_path` is the file it is declared in. `path` and `line` are the
 /// call site: the caller's file for `callers`, the queried symbol's file
-/// for `callees`.
+/// for `callees`. `display` names the other symbol by file, as
+/// `src/tui/app.rs::App::start_watcher`; [`CallOut::plain`] leaves it
+/// out for `show`.
 #[derive(Clone, Serialize)]
 pub(crate) struct CallOut {
     name: String,
@@ -72,6 +85,8 @@ pub(crate) struct CallOut {
     symbol_path: String,
     confidence: f64,
     reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display: Option<String>,
 }
 
 /// The symbols whose calls resolve to the one `request.symbol` names,
@@ -99,11 +114,13 @@ fn calls(direction: Direction, request: &CallsRequest) -> Result<Reply<CallResul
     };
     let truncated = hits.len() > CALL_CAP;
     hits.truncate(CALL_CAP);
+    let distinct = Distinct::of(hits.iter().map(CallOut::site));
     let result = CallResult {
         symbol: symbol_out(&names, symbol),
         hits,
         truncated,
         unresolved_calls,
+        distinct: Some(distinct),
         tokens: None,
     };
     answer(result, &store, &request.repo, request.max_tokens)
@@ -152,5 +169,27 @@ fn call_out(names: &Names, hit: CallHit) -> Option<CallOut> {
         symbol_path: symbol.file.clone(),
         confidence: hit.confidence,
         reason: hit.reason,
+        display: Some(Names::display(symbol)),
     })
+}
+
+impl CallOut {
+    /// This hit without its `display`, as `show` lists it.
+    pub(crate) fn plain(self) -> Self {
+        Self {
+            display: None,
+            ..self
+        }
+    }
+
+    /// This hit as [`Distinct`] groups it: by the other symbol, in the
+    /// file it is declared in.
+    fn site(&self) -> Site<'_> {
+        Site {
+            display: self.display.as_deref().unwrap_or(&self.name),
+            file: &self.symbol_path,
+            line: self.line,
+            confidence: self.confidence,
+        }
+    }
 }
