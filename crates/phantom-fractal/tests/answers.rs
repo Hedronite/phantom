@@ -390,3 +390,24 @@ fn show_lists_20_callers_whole_and_flags_the_21st() {
         assert!(side["hits"][0].get("display").is_none(), "{data}");
     }
 }
+
+#[test]
+fn an_ambiguous_message_lists_every_candidate_with_no_tail_up_to_ten() {
+    let world = World::new();
+    for bin in BINS {
+        let (code, env) = world.run(bin, &["callers", "helper"]);
+        assert_eq!(code, Some(6), "{env}");
+        let message = env["error"]["message"].as_str().expect("message");
+        let total = env["data"]["total"].as_u64().expect("total");
+        assert!(
+            message.starts_with(&format!("{total} symbols match helper: ")),
+            "{message}"
+        );
+        assert!(!message.contains("more"), "{message}");
+        for candidate in env["data"]["candidates"].as_array().expect("candidates") {
+            let name = candidate["name"].as_str().expect("name");
+            let path = candidate["path"].as_str().expect("path");
+            assert!(message.contains(&format!("{name} ({path}:")), "{message}");
+        }
+    }
+}
