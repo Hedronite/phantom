@@ -823,14 +823,14 @@ The envelope keys come in the order `ok`, `data`, `error`, `schema`. `version` r
 
 ## Quality
 
-These are the contract run's figures, from commit `688bc8b`, the commit that added [glob imports](#glob-imports) and [shared module files](#shared-module-files), with the gate, fuzz, map, network and timing rows from the runs named beside them. The review run's figures replace them.
+These figures come from the review run at commit `c3185a0`, the commit that added [glob imports](#glob-imports) and [shared module files](#shared-module-files). Its scorer, map and fuzz rows ran at `688bc8b`, whose product code is the same.
 
 ### Against rust-analyzer
 
 Three trees: Phantom's own tree at `61236dc`, [lapis-lattice](https://github.com/Hedronite/lapis-lattice) at `42aa3b8`, and [facet](https://github.com/Hedronite/facet) at `acf4286`. Each is compared with a SCIP index from rust-analyzer 1.95.0, default features, over the workspace members that `cargo metadata --no-deps` lists. A document outside every member counts for neither side.
 
 - **Recall** is the share of rust-analyzer's distinct caller and callee pairs that Phantom has as an edge, document-scoped: a reference takes the callee defined in its own document when its symbol has a definition there.
-- **Precision** is the share of Phantom's edges that rust-analyzer corroborates with the same caller and callee, over covered edges: both ends sit in documents the SCIP index carries. Each figure is followed by its edge count in brackets.
+- **Precision** is the share of Phantom's distinct edges that rust-analyzer corroborates with the same caller and callee, over covered edges: both ends sit in documents the SCIP index carries. Each figure is followed by its covered-edge count in brackets.
 - **The last row** counts only edges placed from inside a macro's tokens.
 
 | Measure | Phantom | lapis-lattice | facet |
@@ -838,80 +838,85 @@ Three trees: Phantom's own tree at `61236dc`, [lapis-lattice](https://github.com
 | Recall | 0.8898 (4756 of 5345) | 0.8319 (3499 of 4206) | 0.8048 (4577 of 5687) |
 | Confidence 0.85 and up | 1.0000 (4540) | 0.9957 (4377) | 0.9984 (4481) |
 | Confidence 0.5 and up | 0.9997 (7155) | 0.9858 (4987) | 0.9917 (6487) |
-| `path-exact` | 1.0000 (183) | 0.9918 (366) | 1.0000 (108) |
-| `local` | 1.0000 (6966) | 0.9957 (6339) | 1.0000 (6015) |
-| `use-alias` | 1.0000 (2490) | 1.0000 (1680) | 1.0000 (1416) |
-| `use-glob` | 1.0000 (189) | 0.9903 (2484) | 1.0000 (2514) |
-| `crate-path` | 1.0000 (957) | 1.0000 (294) | 1.0000 (789) |
-| `assoc` | 1.0000 (2244) | 0.9889 (270) | 0.9854 (1443) |
-| `self-method` | 1.0000 (546) | 1.0000 (1578) | 1.0000 (972) |
-| `self-assoc` | 1.0000 (45) | 1.0000 (120) | 1.0000 (186) |
-| `typed-method` | 1.0000 (3930) | 1.0000 (410) | 0.9966 (1788) |
-| `unique-method` | 0.9969 (1300) | 0.8716 (810) | 0.9604 (2224) |
+| `typed-method` | 1.0000 (1965) | 1.0000 (205) | 1.0000 (891) |
+| `unique-method` | 0.9969 (650) | 0.9051 (390) | 0.9561 (1117) |
+| `use-glob` | 1.0000 (63) | 0.9927 (826) | 1.0000 (838) |
 | From inside a macro | 1.0000 (1258) | 0.9969 (961) | 0.9990 (996) |
 
-**Scope on lapis-lattice.** Its `vendor/` packages are not workspace members, so their 6323 edges are out of scope. 911 of its edges sit in code that rust-analyzer's default features leave out, and they are uncovered.
+- **The other reasons.** The contract run gives `path-exact`, `local`, `use-alias`, `crate-path`, `assoc`, `self-method` and `self-assoc` at 0.98 or better on every tree. It counted edges by another convention, so its counts are not shown.
+- **Scope on lapis-lattice.** Its `vendor/` packages are not workspace members, so their edges are out of scope. 911 of its edges sit in code that rust-analyzer's default features leave out, and they are uncovered.
 
 ### The quality gate
 
-Each crate runs `cargo-tops gate` from its own directory, with cargo-tops 0.2.0 from an isolated install. [RUST-TOPS.md](RUST-TOPS.md) gives each crate's thresholds and how to run the gate.
+Each crate runs `cargo-tops gate` from its own directory, with cargo-tops 0.2.0 from an isolated install. [RUST-TOPS.md](RUST-TOPS.md) gives each crate's thresholds and how to run the gate. All eight crates exit 0.
 
 0.2.0 applies no coverage or CRAP threshold. So each crate's figures are read from the cargo-llvm-cov summary, cargo-crap's report and cargo-mutants' outcomes, and compared with its `rust-tops.yaml`. cargo-tops 0.4.0, with protocol 1.2.0, is merged upstream and not yet run here.
 
-Measured at the commit before glob imports (`a03a762`, the store crate at `f90a1b4`), with mutation on the diff from `61236dc`:
+Mutation runs on the diff since `209889b`, the commit that added the measurement harnesses:
 
 | Crate | Line | Region | Files under 90% | Mutants caught of viable |
 |---|---|---|---|---|
 | `phantom-fractal` | 95.94% | 94.06% | 0 | 73 of 73 |
 | `phantom-fractal-proto` | 100.00% | 97.05% | 0 | no mutant |
-| `phantom-fractal-lang` | 100.00% | 100.00% | 0 | no mutant |
-| `phantom-fractal-lang-rust` | 98.58% | 96.91% | 0 | 3 of 3 |
-| `phantom-fractal-extract` | 97.55% | 95.07% | 0 | no mutant |
+| `phantom-fractal-lang` | 100.00% | 100.00% | 0 | 2 of 2 |
+| `phantom-fractal-lang-rust` | 98.51% | 96.89% | 0 | 32 of 32 |
+| `phantom-fractal-extract` | 97.55% | 95.08% | 0 | 4 of 4 |
 | `phantom-fractal-analyze` | 98.23% | 96.02% | 0 | no mutant |
-| `phantom-fractal-store` | 97.82% | 90.29% | 0 | 130 of 130 |
+| `phantom-fractal-store` | 97.83% | 90.29% | 0 | 132 of 132 |
 | `phantom-fractal-git` | 97.59% | 95.95% | 0 | no mutant |
 
-- **CRAP.** Every function added or changed since `61236dc` is at or under 6, and no existing function rose.
-- **Exemptions.** The five reason-dispatch matches that the `use-glob` arm lengthened are exemptions in their crates' `rust-tops.yaml`.
-- **The glob and shared-file changes.** Mutation on their own diff caught 40 of the 40 viable mutants, and coverage met every bar.
+- **CRAP.** No function rose above its value at `61236dc`, and no function added since is over 6, except the five reason-dispatch matches that the `use-glob` arm lengthened. Those are exhaustive, one arm per variant, and are exemptions in their crates' `rust-tops.yaml`.
 - **"No mutant"** means the diff changed no production line in that crate.
 
 ### Fuzz and the map property
 
 Both are std-only harnesses, driven by a seeded generator, so every case replays by its number.
 
-**Map property, 10000 cases** (at `209889b`). Random graphs of up to 500 symbols, with budgets from 0 to 20000:
+**Map property, 10000 cases.** Random graphs of up to 500 symbols, with budgets from 0 to 20000:
 - 0 maps over their budget;
 - every second run byte-identical;
 - no line removed by a larger budget.
 
-**Fuzz, 500000 cases.** Random bytes up to 64 KiB, a Rust token soup, and byte mutations of every fixture and of both dogfood trees, through extraction and resolution.
+**Fuzz, 500000 cases.** 166667 random byte strings up to 64 KiB, 166667 Rust token soups, and 166666 byte mutations of every fixture and of both dogfood trees, through extraction and resolution.
 
-- **Panics.** 0, in every family.
-- **The 250 ms bound.** At `209889b`, 7178 inputs took longer. Since then:
-  - **Invalid UTF-8.** A random input that is not valid UTF-8 is now refused before any parse, as `index` refuses such a file. That covers 1345 of the slow random inputs.
-  - **The resolver.** The four slowest mutation inputs now replay in 2.3 to 4.2 ms, since the resolver memoizes its lookups.
-  - **A recorded, accepted miss: tree-sitter's error recovery on unstructured text.** 2222 random ASCII inputs with control characters took up to 3375 ms, and 608 random printable inputs up to 2816 ms. Every one ends, without a panic. The time is spent inside tree-sitter's error recovery, which its progress callback cannot see or stop, so no budget can cut it short.
-
-  The review run measures all 500000 again.
+- **Panics.** 0.
+- **Invalid UTF-8.** 55715 random byte strings are not valid UTF-8 and are refused before any parse, as `index` refuses such a file.
+- **The token soups and the mutations.** All within 250 ms. The slowest soup took 32 ms, and the slowest mutation 153.9 ms.
+- **The 250 ms bound: a recorded miss, accepted by the project's owner.** 3894 random byte strings, all valid UTF-8, took longer, up to 4149 ms. Every one ends, without a panic. The time is spent inside tree-sitter's error recovery on text that is not code, which its progress callback cannot see or stop, so no budget can cut it short.
 
 ### No network
 
 In a container with `--network none`, with every tree mounted read-only and a trace of `socket` and `connect`:
-- `fract index`, `status`, `rank`, `map`, `find`, `callers`, `impact` and an MCP session opened 0 IPv4 or IPv6 sockets on all three trees, and left every tree unchanged (at `209889b`).
-- The test suite's only such sockets were name lookups by the `git` processes that test fixtures spawn, when git looked up the host's name to make an identity. Every test that spawns `git` now gives it an explicit identity and no outside config. The review run measures the suite again.
+- the test suite, 996 of 996 passing, opened 0 IPv4 or IPv6 sockets;
+- `fract index`, `status`, `rank`, `map`, `find`, `callers`, `impact` and an MCP session opened 0 on all three trees;
+- every tree was left unchanged.
 
 ### Timings
 
-Medians of 5 runs, in milliseconds, from the release `fract` (at `209889b`):
+Medians of 5 runs, in milliseconds, from the release `fract`:
 
 | Tree | Cold `index` | `index` after a one-line edit | `find` | `callers` | `impact` | `map` at 2000 |
 |---|---|---|---|---|---|---|
-| Phantom | 997.0 | 601.4 | 33.1 | 111.4 | 241.2 | 13.4 |
-| lapis-lattice | 3253.5 | 2215.7 | 158.9 | 494.5 | 509.8 | 17.6 |
-| facet | 1166.5 | 640.9 | 24.8 | 103.2 | 104.4 | 10.9 |
+| Phantom | 975.7 | 604.4 | 31.0 | 106.3 | 250.9 | 11.4 |
+| lapis-lattice | 3076.9 | 2162.2 | 154.5 | 471.6 | 482.1 | 17.3 |
+| facet | 1062.8 | 633.6 | 24.0 | 104.3 | 104.6 | 10.5 |
 
 The edit is made in a copy of the tree under a temp directory, never in the tree itself. `crates/phantom-fractal/tests/timings.rs` runs these on any tree named by `PHANTOM_TIMING_ROOT`.
+
+### Agents
+
+**The setup.** 48 runs: 12 sealed tasks on lapis-lattice and facet, asking where a symbol is, what a change reaches, and what changes with a file. Two agent harnesses ran each task with and without `fract mcp` as a tool server, each run in a fresh copy of the tree. The answers were scored blind, 0 to 2 per task.
+
+| Harness | Phantom | File reads | Searches | Answer score (of 24) |
+|---|---|---|---|---|
+| Claude Code | with | 5 | 27 | 23 |
+| Claude Code | without | 3 | 50 | 23 |
+| omp | with | 16 | 46 | 22 |
+| omp | without | 16 | 43 | 23 |
+
+**The goal: not met.** It was fewer file reads with Phantom and an answer score at least as high, for each harness. Neither harness met it. With Phantom, Claude Code read more files at an equal score, and omp read as many at a lower score. This is a recorded miss, accepted by the project's owner.
+
+The server was available in every run with Phantom, and the agents called it in 7 of those 24. Getting agents to use it well is the next work.
 
 ## Other
 
