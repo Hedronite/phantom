@@ -208,7 +208,7 @@ fn a_new_install_with_no_data_directory_is_ok() {
         check(&data, "network")["detail"],
         "none: Phantom has no network code"
     );
-    assert_eq!(check(&data, "extractor")["detail"], "12");
+    assert_eq!(check(&data, "extractor")["detail"], "13");
     let grammar = check(&data, "grammar")["detail"].as_str().expect("grammar");
     assert!(grammar.starts_with("tree-sitter-rust 0."), "{grammar}");
     // An extra argument is usage.
@@ -239,7 +239,7 @@ fn a_healthy_data_directory_passes_every_check() {
         .expect("db")
         .to_owned();
     assert!(
-        databases.contains(&format!("{repo}: schema 3")),
+        databases.contains(&format!("{repo}: schema 4")),
         "{databases}"
     );
     assert_eq!(
@@ -313,7 +313,7 @@ fn a_schema_newer_database_is_flagged_and_never_opened() {
         databases["detail"]
             .as_str()
             .expect("detail")
-            .contains("schema 99, newer than this binary's 3"),
+            .contains("schema 99, newer than this binary's 4"),
         "{databases}"
     );
     let git = check(&data, "git")["detail"]
@@ -444,7 +444,21 @@ fn a_database_that_is_not_sqlite_or_has_an_older_schema_is_reported() {
     let detail = databases["detail"].as_str().expect("detail").to_owned();
     assert!(
         detail.contains(&format!(
-            "{}: schema 2, which index migrates to 3",
+            "{}: schema 2, which index migrates to 4",
+            world.key("repo-")
+        )),
+        "{detail}"
+    );
+    // The version before this one migrates the same way.
+    bytes[60..64].copy_from_slice(&3_u32.to_be_bytes());
+    fs::write(&older, &bytes).expect("write");
+    let data = doctor(world.data.path(), world.dir.path());
+    let databases = check(&data, "databases");
+    assert_eq!(databases["ok"], true, "{databases}");
+    let detail = databases["detail"].as_str().expect("detail").to_owned();
+    assert!(
+        detail.contains(&format!(
+            "{}: schema 3, which index migrates to 4",
             world.key("repo-")
         )),
         "{detail}"
