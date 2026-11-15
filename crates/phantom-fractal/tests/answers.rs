@@ -353,7 +353,7 @@ fn the_new_keys_stay_exactly_when_the_whole_reply_fits() {
         }
     }
     assert!(budgets.iter().any(|&max| fits(max)) && budgets.iter().any(|&max| !fits(max)));
-    for max in budgets {
+    for &max in &budgets {
         let budget = max.to_string();
         let (code, line) = world.line(
             BINS[0],
@@ -366,6 +366,70 @@ fn the_new_keys_stay_exactly_when_the_whole_reply_fits() {
             assert!(!line.contains("callers_distinct"), "{max}: {line}");
         }
     }
+    // A fixed sample that owes nothing to the model above: every 25th
+    // budget of 40 to 400. Each reply is judged on what the CLI printed
+    // alone. With the new keys, it is the unbudgeted reply whole, with
+    // `tokens` added, nothing omitted and `used` within 95% of the
+    // budget. Without them, no hit keeps its `display`. Across every
+    // budget asked, the verdict only ever turns from dropped to kept, and
+    // the model agrees with the CLI at each fixed budget.
+    let stride: Vec<u64> = (40..=400).step_by(25).collect();
+    let mut verdicts: Vec<(u64, bool)> = Vec::new();
+    for &max in budgets.iter().chain(&stride) {
+        let budget = max.to_string();
+        let (code, line) = world.line(
+            BINS[0],
+            &["callers", "crate::util::helper", "--max-tokens", &budget],
+        );
+        let kept = observed(&full, max, code, &line);
+        if stride.contains(&max) {
+            assert_eq!(kept, fits(max), "the model and the CLI disagree at {max}");
+        }
+        verdicts.push((max, kept));
+    }
+    verdicts.sort_unstable();
+    verdicts.dedup();
+    assert!(
+        verdicts.windows(2).all(|pair| pair[0].1 <= pair[1].1),
+        "the new keys came and went: {verdicts:?}"
+    );
+    assert!(verdicts.iter().any(|v| v.1) && verdicts.iter().any(|v| !v.1));
+}
+
+/// Whether the reply at budget `max` kept the new keys, judged on the
+/// printed line alone and checked either way, never through a model.
+fn observed(full: &str, max: u64, code: Option<i32>, line: &str) -> bool {
+    if code != Some(0) {
+        assert!(!line.contains("callers_distinct"), "{max}: {line}");
+        return false;
+    }
+    let envelope: Value = serde_json::from_str(line).expect("envelope");
+    let data = &envelope["data"];
+    let tokens = &data["tokens"];
+    assert!(
+        tokens["used"].as_u64().expect("used") <= max * 95 / 100,
+        "{max}: {line}"
+    );
+    if data.get("callers_distinct").is_none() {
+        let hits = data["hits"].as_array().expect("hits");
+        assert!(
+            hits.iter().all(|hit| hit.get("display").is_none()),
+            "{max}: {line}"
+        );
+        return false;
+    }
+    assert_eq!(tokens["omitted"], 0, "{max}: {line}");
+    let mut unbudgeted = envelope.clone();
+    unbudgeted["data"]
+        .as_object_mut()
+        .expect("data")
+        .remove("tokens");
+    let full: Value = serde_json::from_str(full).expect("full");
+    assert_eq!(
+        unbudgeted, full,
+        "{max}: kept the new keys but is not the whole reply"
+    );
+    true
 }
 
 /// A tree whose `target` has exactly `callers` callers, indexed.
