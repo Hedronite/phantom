@@ -19,6 +19,7 @@
 #![forbid(unsafe_code)]
 
 mod changes;
+mod count;
 mod history;
 mod rename;
 mod score;
@@ -29,6 +30,7 @@ use std::fmt;
 use std::path::Path;
 
 pub use changes::{Base, Changed, Changes, ChangesError, FileChange, MIN_OID_HEX, changes};
+pub use count::{CountPartner, CountScan};
 pub use phantom_fractal_store::CochangeScan as Scan;
 pub use rename::{MIN_SIMILARITY_PERCENT, similarity};
 pub use score::{BULK_FILES, HALF_LIFE_DAYS, MIN_TOGETHER, TOP_PARTNERS, decay};
@@ -106,6 +108,22 @@ pub fn head(root: &Path) -> Result<Option<String>, GitError> {
     Ok(history::open(root)?.map(|(_, head)| head.to_string()))
 }
 
+/// The raw co-change counts of `path` at `root` over `window`: every other
+/// tracked path with the kept non-merge commits it shares, no decay, no
+/// lift floor, bulk commits skipped and counted, sorted by count then
+/// path. Computed at query time with the same in-process history walk
+/// [`mine`] uses; nothing is stored and nothing is written. `Ok(None)` in
+/// exactly the cases [`mine`] answers `None`.
+pub fn cochange_counts(
+    root: &Path,
+    window: &Window,
+    path: &str,
+) -> Result<Option<CountScan>, GitError> {
+    let Some(history) = history::read(root, window)? else {
+        return Ok(None);
+    };
+    Ok(Some(count::count(&history, path)))
+}
 /// The co-change scan of `root`, counting only paths in `indexed_paths`
 /// (root-relative, `/`-separated, as the store keeps them).
 ///
