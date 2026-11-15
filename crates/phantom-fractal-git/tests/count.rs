@@ -3,7 +3,7 @@
 //! and reported, sorted by count then path, deterministic, and no write.
 mod support;
 
-use phantom_fractal_git::{CountScan, Window, cochange_counts};
+use phantom_fractal_git::{CountScan, GitError, Window, cochange_counts};
 use support::{DAY, HEAD, Op, Repo, Script, TempDir, snapshot};
 
 fn counts(repo: &Repo, path: &str) -> CountScan {
@@ -146,4 +146,37 @@ fn a_directory_that_is_not_a_repository_answers_none() {
             .expect("no error")
             .is_none()
     );
+}
+
+#[test]
+fn a_file_deleted_at_head_is_not_tracked_and_says_so() {
+    let mut script = Script::default();
+    script.commit(
+        "main",
+        HEAD - DAY,
+        &[Op::Write("gone.rs", "1\n"), Op::Write("a.rs", "1\n")],
+    );
+    script.commit("main", HEAD, &[Op::Delete("gone.rs")]);
+    let repo = Repo::new("raw-deleted", &script);
+    match cochange_counts(&repo.root, &Window::default(), "gone.rs") {
+        Err(GitError::NotTracked { path, head }) => {
+            assert_eq!(path, "gone.rs");
+            assert_eq!(head, repo.rev("main"));
+        }
+        other => panic!("a deleted file must not count: {other:?}"),
+    }
+}
+
+#[test]
+fn a_path_that_never_existed_is_not_tracked() {
+    let mut script = Script::default();
+    script.commit("main", HEAD, &[Op::Write("a.rs", "1\n")]);
+    let repo = Repo::new("raw-never", &script);
+    match cochange_counts(&repo.root, &Window::default(), "src/never.rs") {
+        Err(GitError::NotTracked { path, head }) => {
+            assert_eq!(path, "src/never.rs");
+            assert_eq!(head, repo.rev("main"));
+        }
+        other => panic!("an absent path must not count: {other:?}"),
+    }
 }

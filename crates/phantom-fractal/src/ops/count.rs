@@ -113,9 +113,16 @@ fn counts(store: &Store, request: &CountRequest, file: &str) -> Result<Counted, 
         return Ok((None, Vec::new(), false));
     };
     let root = canonical_repo(&request.repo)?;
-    let Some(counts) =
-        phantom_fractal_git::cochange_counts(&root, &window, file).map_err(history_failure)?
-    else {
+    let Some(counts) = (match phantom_fractal_git::cochange_counts(&root, &window, file) {
+        Ok(counts) => counts,
+        Err(phantom_fractal_git::GitError::NotTracked { .. }) => {
+            return Err(Failure::new(
+                ErrorKind::NotFound,
+                "file is not tracked at HEAD; git log has its history",
+            ));
+        }
+        Err(err) => return Err(history_failure(err)),
+    }) else {
         return Ok((None, Vec::new(), false));
     };
     let limit = usize::try_from(request.limit).unwrap_or(usize::MAX);

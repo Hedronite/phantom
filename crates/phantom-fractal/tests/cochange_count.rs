@@ -275,12 +275,19 @@ fn a_file_not_indexed_is_not_found_in_the_decayed_mode_and_counted_in_count() {
         readme["partners"],
         json!([{ "path": "src/a.rs", "count": 1 }])
     );
-    let gone = data(
+    // A path deleted at HEAD is not tracked: the count says so and points
+    // at git, never an empty partner list (A8).
+    let (code, line) = cli(
         &repo.root,
         store.path(),
         &["cochange", "src/gone.rs", "--count"],
     );
-    assert_eq!(gone["partners"], json!([]));
+    assert_eq!(code, Some(3), "{line}");
+    let envelope: Value = serde_json::from_str(&line).expect("envelope");
+    assert_eq!(envelope["error"]["kind"], "not_found", "{line}");
+    let message = envelope["error"]["message"].as_str().expect("message");
+    assert!(message.contains("not tracked at HEAD"), "{message}");
+    assert!(message.contains("git log"), "{message}");
 }
 
 #[test]

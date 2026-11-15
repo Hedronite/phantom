@@ -12,6 +12,8 @@
 //! - A5 `Repository::find_tree`, `TreeRefIter::from_bytes`
 //! - A6 `gix::diff::tree` with `State` and `Recorder`
 //! - A7 `Repository::find_blob`
+//! - A8 `Tree::lookup_entry_by_path` (W14 G3a: is the asked path tracked
+//!   at HEAD), on the tree `Repository::find_tree` already answers
 
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap};
@@ -153,6 +155,26 @@ pub(crate) fn read(root: &Path, window: &Window) -> Result<Option<History>, GitE
         head_time,
         commits,
     }))
+}
+
+/// Whether `path` is an entry of HEAD's tree at `root`: `Ok(None)` for
+/// exactly the roots [`read`] answers `None` for. Reads the tree object
+/// only; the index is never touched.
+pub(crate) fn tracks(root: &Path, path: &str) -> Result<Option<bool>, GitError> {
+    let Some((repo, head)) = open(root)? else {
+        return Ok(None);
+    };
+    Ok(Some(tracked_at(&repo, head, path)?))
+}
+
+/// Whether `path` is an entry of the tree of `head`.
+fn tracked_at(repo: &gix::Repository, head: ObjectId, path: &str) -> Result<bool, GitError> {
+    let commit = repo.find_commit(head).map_err(GitError::new)?;
+    let tree = repo
+        .find_tree(commit.tree_id().map_err(GitError::new)?)
+        .map_err(GitError::new)?;
+    let entry = tree.lookup_entry_by_path(path).map_err(GitError::new)?;
+    Ok(entry.is_some())
 }
 
 /// The changes of `commit` against `parent`, or against the empty tree
