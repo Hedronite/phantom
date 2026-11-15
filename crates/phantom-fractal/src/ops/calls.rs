@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use super::budget::{self, Shed, Tokens, drop_last};
 use super::distinct::{Distinct, Site};
-use super::lookup::{Names, SymbolOut, current_index, kind_text, lookup, symbol_out};
+use super::lookup::{Names, Reexport, SymbolOut, current_index, kind_text, lookup, symbol_out};
 use super::{Failure, Reply, answer};
 
 /// Most hits one `callers` or `callees` returns.
@@ -45,6 +45,10 @@ pub(crate) struct CallResult {
     /// `callers_distinct`, `files` and `sites`, over `hits`.
     #[serde(flatten)]
     distinct: Option<Distinct>,
+    /// `reexported` and `confirm_with_grep`, on `callers` only, and only
+    /// when the store flags the symbol.
+    #[serde(flatten)]
+    reexport: Option<Reexport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tokens: Option<Tokens>,
 }
@@ -67,6 +71,7 @@ impl Shed for CallResult {
             hit.display = None;
         }
         self.distinct = None;
+        self.reexport = None;
     }
 }
 
@@ -108,9 +113,9 @@ fn calls(direction: Direction, request: &CallsRequest) -> Result<Reply<CallResul
     let (store, names) = current_index(&request.repo)?;
     let symbol = lookup(&store, &names, &request.symbol)?;
     let mut hits = edges(&store, &names, direction, symbol.id, &symbol.file)?;
-    let unresolved_calls = match direction {
-        Direction::Callers => None,
-        Direction::Callees => Some(store.unresolved_calls(symbol.id)?),
+    let (unresolved_calls, reexport) = match direction {
+        Direction::Callers => (None, Reexport::of(&store, symbol.id)?),
+        Direction::Callees => (Some(store.unresolved_calls(symbol.id)?), None),
     };
     let truncated = hits.len() > CALL_CAP;
     hits.truncate(CALL_CAP);
@@ -121,6 +126,7 @@ fn calls(direction: Direction, request: &CallsRequest) -> Result<Reply<CallResul
         truncated,
         unresolved_calls,
         distinct: Some(distinct),
+        reexport,
         tokens: None,
     };
     answer(result, &store, &request.repo, request.max_tokens)

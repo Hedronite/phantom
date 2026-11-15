@@ -5,7 +5,7 @@
 //! database and returns at most 100. `callers SYMBOL` and `callees SYMBOL`
 //! return the stored call edges of one symbol, at most 100. `impact SYMBOL`
 //! walks those edges backwards to say what a change to the symbol reaches,
-//! and `impact --diff` walks them from every symbol the work tree changed
+//! at most `--limit` hits of it, and `impact --diff` walks them from every symbol the work tree changed
 //! against HEAD or `--against REF`.
 //! `show SYMBOL` gives one symbol's detail, members, and a capped look at
 //! its edges, with its source under `--source`. `rank` lists the
@@ -166,6 +166,13 @@ enum Command {
         /// Counts, reasons, and risk only, without the hits.
         #[arg(long)]
         summary: bool,
+        /// Most hits listed over all depths, shallowest first, and most
+        /// tests, 1 to 100. A cut group keeps its `total` and sets
+        /// `truncated`, and `data.limit` counts what was left out. Not with
+        /// `--diff`.
+        #[arg(long, conflicts_with = "diff",
+              value_parser = clap::value_parser!(u64).range(ops::impact::LIMIT_MIN..=ops::impact::LIMIT_MAX))]
+        limit: Option<u64>,
         /// Most estimated tokens the reply may cost, 1 to 100000. List
         /// entries are dropped in a fixed order to fit, and `data.tokens`
         /// says how many.
@@ -452,6 +459,7 @@ fn main() -> ExitCode {
             min_confidence,
             no_tests,
             summary,
+            limit,
             max_tokens,
         } => {
             let options = ImpactOptions {
@@ -476,6 +484,7 @@ fn main() -> ExitCode {
                     repo,
                     options,
                     summary,
+                    limit,
                     max_tokens,
                 }))
             }

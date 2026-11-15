@@ -29,6 +29,11 @@ pub(crate) struct SymbolOut {
     /// Set only on the candidates of a `show` lookup.
     #[serde(skip_serializing_if = "Option::is_none")]
     stable_key: Option<String>,
+    /// The symbol named by file, as `src/a.rs::Type::name`. Set only on
+    /// the candidates of an `Ambiguous` failure (SPEC-w15 G1b), so a
+    /// caller can pass it back to pick one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display: Option<String>,
 }
 
 /// `data` of an `Ambiguous` failure: the first [`CANDIDATE_CAP`] matches
@@ -180,7 +185,7 @@ fn find_one(
     matches.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
     match matches.len() {
         0 => {
-            let did_you_mean = listed(store, names, suggestions(store, query)?, keyed)?;
+            let did_you_mean = listed(store, names, suggestions(store, query)?, keyed, false)?;
             Err(Failure::not_found(
                 format!("no symbol named {query}"),
                 DidYouMean { did_you_mean },
@@ -202,7 +207,7 @@ fn ambiguous(
     keyed: bool,
 ) -> Result<Failure, Failure> {
     let total = matches.len();
-    let candidates = listed(store, names, matches, keyed)?;
+    let candidates = listed(store, names, matches, keyed, true)?;
     let spelled: Vec<String> = candidates
         .iter()
         .map(|candidate| match candidate.line {
@@ -227,12 +232,13 @@ fn ambiguous(
 }
 
 /// The first [`CANDIDATE_CAP`] of `found`, named, each with its stable
-/// key when `keyed`.
+/// key when `keyed` and its `display` when `shown`.
 fn listed(
     store: &Store,
     names: &Names,
     found: Vec<SymbolMatch>,
     keyed: bool,
+    shown: bool,
 ) -> Result<Vec<SymbolOut>, Failure> {
     let mut out = Vec::new();
     for found in found.into_iter().take(CANDIDATE_CAP) {
@@ -243,8 +249,10 @@ fn listed(
         } else {
             None
         };
+        let display = shown.then(|| names.display_of(found.id, &found.file, &found.qual_name));
         out.push(SymbolOut {
             stable_key,
+            display,
             ..symbol_out(names, found)
         });
     }
@@ -269,6 +277,27 @@ pub(crate) fn symbol_out(names: &Names, found: SymbolMatch) -> SymbolOut {
         path: found.file,
         line: found.line,
         stable_key: None,
+        display: None,
+    }
+}
+
+/// `reexported` and `confirm_with_grep` (SPEC-w15 G1b): set, both true,
+/// on a `callers` or `impact` reply whose symbol the stored rows record
+/// as re-exported by a `pub use`, since a caller reached through that
+/// path may be missing from the answer. Absent otherwise.
+#[derive(Clone, Copy, Serialize)]
+pub(crate) struct Reexport {
+    reexported: bool,
+    confirm_with_grep: bool,
+}
+
+impl Reexport {
+    /// The keys for stored symbol `id`, when the store flags it.
+    pub(crate) fn of(store: &Store, id: i64) -> Result<Option<Self>, Failure> {
+        Ok(store.is_reexported(id)?.then_some(Self {
+            reexported: true,
+            confirm_with_grep: true,
+        }))
     }
 }
 

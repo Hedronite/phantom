@@ -24,6 +24,7 @@ use crate::ops::budget::{MAX_TOKENS_MAX, MAX_TOKENS_MIN};
 use crate::ops::cochange::{
     self as cochange, DEFAULT_MIN_LIFT, MIN_LIFT_MAX, min_lift_in_range, min_lift_usage,
 };
+use crate::ops::impact::{LIMIT_MAX as IMPACT_LIMIT_MAX, LIMIT_MIN as IMPACT_LIMIT_MIN};
 use crate::ops::map::{BUDGET_MAX, BUDGET_MIN};
 use crate::ops::rank::{DEFAULT_LIMIT, FOCUS_MAX, LIMIT_MAX, LIMIT_MIN, focus_cap};
 use crate::ops::{
@@ -153,6 +154,14 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
                         "type": "boolean",
                         "default": false,
                         "description": "Counts, reasons and risk only, without the hits.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": IMPACT_LIMIT_MIN,
+                        "maximum": IMPACT_LIMIT_MAX,
+                        "description": "The most hits listed over all depths, shallowest first, \
+                            and the most tests. A cut group keeps its `total` and sets \
+                            `truncated`; `data.limit` counts what was left out.",
                     },
                     "max_tokens": max_tokens(),
                 }),
@@ -500,6 +509,7 @@ fn impact_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<Impac
             "min_confidence",
             "include_tests",
             "summary",
+            "limit",
             "max_tokens",
         ],
     )?;
@@ -507,6 +517,7 @@ fn impact_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<Impac
     let symbol = args.read(args.required_string("symbol"));
     let repo = args.read(args.string("repo"));
     let summary = args.read(args.boolean("summary")).unwrap_or(false);
+    let limit = args.read(args.integer("limit", IMPACT_LIMIT_MIN, IMPACT_LIMIT_MAX));
     let max_tokens = args.read(args.max_tokens());
     args.checked()?;
     Ok(ImpactRequest {
@@ -514,6 +525,7 @@ fn impact_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<Impac
         repo: roots.indexed(repo.as_deref())?,
         options,
         summary,
+        limit,
         max_tokens,
     })
 }

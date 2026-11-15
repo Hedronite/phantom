@@ -458,7 +458,8 @@ fn key_span(raw: &[u8], at: usize, key: &str) -> Option<(usize, usize)> {
 /// The SPEC-w14 keys of `op`'s reply, as byte ranges of `line`. G1b:
 /// each hit's `display`, and `data`'s `callers_distinct`, `files` and
 /// `sites`. G3b: each `cochange` partner's `together_decayed`, and
-/// `data`'s `scope`.
+/// `data`'s `scope`. SPEC-w15 G1b adds `data`'s `limit`, `reexported` and
+/// `confirm_with_grep`, which go with them.
 fn extras(op: &str, line: &str) -> Vec<(usize, usize)> {
     let raw = line.as_bytes();
     let (data, _) = member(raw, 0, "data").expect("data");
@@ -469,7 +470,13 @@ fn extras(op: &str, line: &str) -> Vec<(usize, usize)> {
         "callers" | "callees" => (
             list(data, "hits"),
             "display",
-            &["callers_distinct", "files", "sites"],
+            &[
+                "callers_distinct",
+                "files",
+                "sites",
+                "reexported",
+                "confirm_with_grep",
+            ],
         ),
         "impact" => {
             let mut out = Vec::new();
@@ -479,7 +486,18 @@ fn extras(op: &str, line: &str) -> Vec<(usize, usize)> {
                 }
             }
             out.extend(list(data, "tests"));
-            (out, "display", &["callers_distinct", "files", "sites"])
+            (
+                out,
+                "display",
+                &[
+                    "callers_distinct",
+                    "files",
+                    "sites",
+                    "limit",
+                    "reexported",
+                    "confirm_with_grep",
+                ],
+            )
         }
         "cochange" => (list(data, "partners"), "together_decayed", &["scope"]),
         _ => return Vec::new(),

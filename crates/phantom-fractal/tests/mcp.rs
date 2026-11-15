@@ -415,6 +415,7 @@ fn tools_list_matches_the_spec_table() {
             &[
                 "depth",
                 "include_tests",
+                "limit",
                 "max_tokens",
                 "min_confidence",
                 "repo",
