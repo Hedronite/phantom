@@ -312,7 +312,9 @@ pub(crate) fn partners(
 mod tests {
     use phantom_fractal_git::{BULK_FILES, HALF_LIFE_DAYS, MIN_TOGETHER};
 
-    use super::{Scope, check_limit};
+    use std::path::PathBuf;
+
+    use super::{CochangeRequest, Scope, check_limit, checked};
 
     #[test]
     fn a_limit_is_1_to_100() {
@@ -321,6 +323,27 @@ mod tests {
         }
         for limit in [1, 20, 100] {
             assert!(check_limit(limit).is_ok(), "{limit}");
+        }
+    }
+
+    #[test]
+    fn a_request_out_of_range_is_refused_before_any_read() {
+        let request = |limit: u64, min_lift: f64, max_tokens: Option<u64>| CochangeRequest {
+            file: "src/lib.rs".to_owned(),
+            min_lift,
+            limit,
+            repo: PathBuf::from("."),
+            max_tokens,
+        };
+        assert!(checked(&request(20, 1.5, None)).is_ok());
+        assert!(checked(&request(100, 0.0, Some(100_000))).is_ok());
+        for bad in [
+            request(0, 1.5, None),
+            request(20, -1.0, None),
+            request(20, f64::NAN, None),
+            request(20, 1.5, Some(0)),
+        ] {
+            assert!(checked(&bad).is_err());
         }
     }
 
