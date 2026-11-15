@@ -42,18 +42,24 @@ impl Index<'_> {
         }
     }
 
-    /// Cure (b): the call walked from the one globbed module that gives its
-    /// first segment.
+    /// Cure (b): the one function the call names, walked from the one
+    /// globbed module that gives its first segment.
     fn place_glob(&self, call: &CallRef) -> Option<Placed> {
         if call.shadowed {
             return None;
         }
+        let entities = self.glob_walk(call)?;
+        let target = self.one_function(&entities)?;
+        Some(Placed::Edge(target, Reason::UseGlob))
+    }
+
+    /// What the call's path names when walked by the existing tiers from
+    /// the one globbed module that gives its first segment.
+    fn glob_walk(&self, call: &CallRef) -> Option<Vec<Entity>> {
         let module = self.place_of(&call.file, &call.scope)?;
         let segs = segments(&call.text)?;
         let home = self.glob_home(module, segs.first()?)?;
-        let walked = self.walk(home, &segs, 0, true).ok()?;
-        let target = self.one_function(&walked.entities)?;
-        Some(Placed::Edge(target, Reason::UseGlob))
+        Some(self.walk(home, &segs, 0, true).ok()?.entities)
     }
 
     /// The one function or method `entities` name, if exactly one.
