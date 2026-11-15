@@ -94,6 +94,10 @@ fn every_read_surfaces_a_failing_statement() {
     // The exact spellings, then the method fallback: two statements for
     // a qualified name the exact forms do not answer.
     surfaces(2, || s.symbols_matching("ghost::alpha").map(|_| ()));
+    // A file-shaped miss runs the display spelling as a third statement.
+    surfaces(3, || s.symbols_matching("ghost.rs::alpha").map(|_| ()));
+    surfaces(1, || s.use_reexports().map(|_| ()));
+    surfaces(1, || s.is_reexported(1).map(|_| ()));
     surfaces(1, || s.callers(1).map(|_| ()));
     surfaces(1, || s.callees(1).map(|_| ()));
     surfaces(1, || s.cochange_of("src/a.rs", 0.0, 5).map(|_| ()));

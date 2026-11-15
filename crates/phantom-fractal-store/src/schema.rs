@@ -256,21 +256,37 @@ pub(crate) fn create(conn: &Connection) -> Result<(), StoreError> {
 pub(crate) fn check_stamp(conn: &Connection) -> Result<i64, StoreError> {
     #[cfg(test)]
     crate::open_trace::record("check_stamp");
-    match meta_get(conn, "producer")? {
-        None => return Err(StoreError::MissingProducer),
-        Some(value) if value == PRODUCER => {}
-        Some(_) => return Err(StoreError::ForeignProducer),
-    }
-    let Some(raw) = meta_get(conn, "schema_version")? else {
-        return Err(StoreError::UnreadableStamp);
-    };
-    let found: i64 = raw.parse().map_err(|_| StoreError::UnreadableStamp)?;
+    check_producer(conn)?;
+    let found = stamped_version(conn)?;
     if found > SCHEMA_VERSION {
         return Err(StoreError::SchemaNewer { found });
     }
-    if !(1..=SCHEMA_VERSION).contains(&found) {
+    if found < 1 {
         return Err(StoreError::UnreadableStamp);
     }
+    check_user_version(conn, found)?;
+    Ok(found)
+}
+
+/// The producer row must name this product.
+fn check_producer(conn: &Connection) -> Result<(), StoreError> {
+    match meta_get(conn, "producer")? {
+        None => Err(StoreError::MissingProducer),
+        Some(value) if value == PRODUCER => Ok(()),
+        Some(_) => Err(StoreError::ForeignProducer),
+    }
+}
+
+/// The stamped `schema_version`, as a number.
+fn stamped_version(conn: &Connection) -> Result<i64, StoreError> {
+    let Some(raw) = meta_get(conn, "schema_version")? else {
+        return Err(StoreError::UnreadableStamp);
+    };
+    raw.parse().map_err(|_| StoreError::UnreadableStamp)
+}
+
+/// `user_version` must agree with the stamp.
+fn check_user_version(conn: &Connection, found: i64) -> Result<(), StoreError> {
     let user_version = user_version(conn)?;
     if user_version != found {
         return Err(StoreError::SchemaMismatch {
@@ -278,7 +294,7 @@ pub(crate) fn check_stamp(conn: &Connection) -> Result<i64, StoreError> {
             user_version,
         });
     }
-    Ok(found)
+    Ok(())
 }
 
 /// Moves a version-1 database to version 2 in one transaction. Version 3
@@ -353,13 +369,14 @@ const V3_COLUMNS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// Moves a version-2 database to version 3 in one transaction. Only
-/// nullable or defaulted columns are added; nothing is dropped.
-pub(crate) fn migrate_v2_to_v3(conn: &mut Connection) -> Result<(), StoreError> {
-    #[cfg(test)]
-    crate::open_trace::record("migrate_v2_to_v3");
-    let tx = conn.transaction()?;
-    for (table, column, add) in V3_COLUMNS {
+/// Adds each `(table, column, add)` the table does not already hold, so a
+/// migration on a downgrade-simulated database skips what a fresh create
+/// already made.
+fn add_columns(
+    tx: &rusqlite::Transaction<'_>,
+    columns: &[(&str, &str, &str)],
+) -> Result<(), StoreError> {
+    for (table, column, add) in columns {
         let present: i64 = tx.query_row(
             "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
             [table, column],
@@ -369,11 +386,27 @@ pub(crate) fn migrate_v2_to_v3(conn: &mut Connection) -> Result<(), StoreError> 
             tx.execute_batch(add)?;
         }
     }
+    Ok(())
+}
+
+/// Stamps `meta.schema_version` and `user_version` with `version`.
+fn stamp_version(tx: &rusqlite::Transaction<'_>, version: i64) -> Result<(), StoreError> {
     tx.execute(
-        "UPDATE meta SET value = '3' WHERE key = 'schema_version'",
-        [],
+        "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
+        [version.to_string()],
     )?;
-    tx.pragma_update(None, "user_version", 3)?;
+    tx.pragma_update(None, "user_version", version)?;
+    Ok(())
+}
+
+/// Moves a version-2 database to version 3 in one transaction. Only
+/// nullable or defaulted columns are added; nothing is dropped.
+pub(crate) fn migrate_v2_to_v3(conn: &mut Connection) -> Result<(), StoreError> {
+    #[cfg(test)]
+    crate::open_trace::record("migrate_v2_to_v3");
+    let tx = conn.transaction()?;
+    add_columns(&tx, V3_COLUMNS)?;
+    stamp_version(&tx, 3)?;
     tx.commit()?;
     Ok(())
 }
@@ -396,23 +429,42 @@ pub(crate) fn migrate_v3_to_v4(conn: &mut Connection) -> Result<(), StoreError> 
     #[cfg(test)]
     crate::open_trace::record("migrate_v3_to_v4");
     let tx = conn.transaction()?;
-    for (table, column, add) in V4_COLUMNS {
-        let present: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
-            [table, column],
-            |row| row.get(0),
-        )?;
-        if present == 0 {
-            tx.execute_batch(add)?;
-        }
-    }
-    tx.execute(
-        "UPDATE meta SET value = ?1 WHERE key = 'schema_version'",
-        [SCHEMA_VERSION.to_string()],
-    )?;
-    tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    add_columns(&tx, V4_COLUMNS)?;
+    stamp_version(&tx, SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
+}
+
+/// One migration step: the highest stamp it applies to, and the move.
+type Step = (i64, fn(&mut Connection) -> Result<(), StoreError>);
+
+/// Every step in order. A database stamped `v` takes each step whose
+/// number is at least `v`, so a version-2 database skips the first.
+const STEPS: &[Step] = &[
+    (1, migrate_v1_to_v2),
+    (2, migrate_v2_to_v3),
+    (3, migrate_v3_to_v4),
+];
+
+/// Brings a database stamped `version` up to [`SCHEMA_VERSION`].
+pub(crate) fn migrate(conn: &mut Connection, version: i64) -> Result<(), StoreError> {
+    for (last, step) in STEPS {
+        if version <= *last {
+            step(conn)?;
+        }
+    }
+    Ok(())
+}
+
+/// The checks and migrations an existing database gets on a write open,
+/// after the connection is hardened: it must be ours, its stamp must be
+/// readable, and it migrates to the current schema.
+pub(crate) fn prepare_existing(conn: &mut Connection) -> Result<(), StoreError> {
+    if !meta_table_exists(conn)? {
+        return Err(StoreError::ForeignDatabase);
+    }
+    let version = check_stamp(conn)?;
+    migrate(conn, version)
 }
 
 pub(crate) fn meta_get(conn: &Connection, key: &str) -> Result<Option<String>, StoreError> {

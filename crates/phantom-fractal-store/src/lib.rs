@@ -233,21 +233,7 @@ impl Store {
     fn open_existing(path: &Path) -> Result<Self, StoreError> {
         let mut conn = Connection::open_with_flags(path, open_flags(false))?;
         harden(&conn)?;
-        if !schema::meta_table_exists(&conn)? {
-            return Err(StoreError::ForeignDatabase);
-        }
-        let mut version = schema::check_stamp(&conn)?;
-        if version < 2 {
-            schema::migrate_v1_to_v2(&mut conn)?;
-            version = 2;
-        }
-        if version < 3 {
-            schema::migrate_v2_to_v3(&mut conn)?;
-            version = 3;
-        }
-        if version < SCHEMA_VERSION {
-            schema::migrate_v3_to_v4(&mut conn)?;
-        }
+        schema::prepare_existing(&mut conn)?;
         enable_wal(&conn)?;
         Ok(Self {
             conn,

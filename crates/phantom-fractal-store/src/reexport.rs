@@ -12,6 +12,7 @@
 use std::collections::BTreeSet;
 
 use crate::StoreError;
+use crate::fetch::collect_rows;
 
 /// The `use` visibility text a `pub use` stores (the shared spelling of
 /// every stored visibility).
@@ -32,11 +33,8 @@ impl crate::Store {
         #[cfg(test)]
         let queried = crate::fault::tick(queried);
         let mut rows = queried?;
-        let mut out = BTreeSet::new();
-        while let Some(row) = rows.next()? {
-            out.insert(row.get::<_, i64>(0)?);
-        }
-        Ok(out)
+        let ids = collect_rows(&mut rows, |row| Ok(row.get::<_, i64>(0)?))?;
+        Ok(ids.into_iter().collect())
     }
 
     /// Whether some `pub use` re-exports the symbol `id`. An unknown id
