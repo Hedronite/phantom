@@ -527,10 +527,11 @@ The first commit is 60 days before HEAD, and the other 22 follow one a day, the 
 
 `cochange FILE --count [--limit N] [--repo PATH] [--max-tokens N]` counts, for every other tracked file, the commits it shared with FILE, the way `git log --name-only` would show them:
 
-- **What counts.** Every tracked file, not only indexed Rust: a `Cargo.toml`, a `README.md` or a lock file is a partner like any other. FILE may be any tracked file, indexed or not.
+- **What counts.** Every tracked file, not only indexed Rust: a `Cargo.toml`, a `README.md` or a lock file is a partner like any other. FILE may be any file tracked at HEAD, indexed or not.
 - **Weights and floors.** One per kept commit, with no decay and no lift floor, so a single shared commit lists a partner.
 - **Which commits.** The ones the stored scan's window reads: the same days and commit cap, back from HEAD now. Merge commits add nothing. A commit that changes more than 30 tracked files is skipped as bulk and counted in `skipped_bulk`. A renamed file's older changes count under its current path.
 - **When it is computed.** At query time, from the history read in process. Nothing is stored and nothing is written, and the index stays as it is. Without a stored scan, or on a tree that is not a git root, `scan` is `null` and there are no partners.
+- **A file not tracked at HEAD.** A FILE that no tree at HEAD holds, deleted or never added, is `not_found`, exit 3, never an empty list. The message is `file is not tracked at HEAD, so it has no co-change count; for its history use git log -- FILE`. It names FILE as given, without a leading `./`, when that is a relative path, and as `FILE` when it is absolute, so no absolute path is printed.
 - **Arguments.** `--limit` and `--max-tokens` are as above, and partners are dropped from the end to fit. `--min-lift` has no meaning here, and `--count --min-lift` is usage, exit 1.
 
 `data` holds these keys, in this order:

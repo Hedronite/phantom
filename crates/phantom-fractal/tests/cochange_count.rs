@@ -275,19 +275,85 @@ fn a_file_not_indexed_is_not_found_in_the_decayed_mode_and_counted_in_count() {
         readme["partners"],
         json!([{ "path": "src/a.rs", "count": 1 }])
     );
-    // A path deleted at HEAD is not tracked: the count says so and points
-    // at git, never an empty partner list (A8).
+    // A path that was never tracked is not_found in count mode too (A8).
     let (code, line) = cli(
         &repo.root,
         store.path(),
         &["cochange", "src/gone.rs", "--count"],
     );
-    assert_eq!(code, Some(3), "{line}");
-    let envelope: Value = serde_json::from_str(&line).expect("envelope");
-    assert_eq!(envelope["error"]["kind"], "not_found", "{line}");
-    let message = envelope["error"]["message"].as_str().expect("message");
-    assert!(message.contains("not tracked at HEAD"), "{message}");
-    assert!(message.contains("git log"), "{message}");
+    assert_eq!((code, line), (Some(3), not_tracked("src/gone.rs")));
+}
+
+/// The `not_found` line for a file no tree at HEAD holds, naming it as
+/// `shown`.
+fn not_tracked(shown: &str) -> String {
+    format!(
+        "{{\"ok\":false,\"data\":null,\"error\":{{\"kind\":\"not_found\",\"message\":\
+         \"file is not tracked at HEAD, so it has no co-change count; for its history use \
+         git log -- {shown}\",\"exit\":3}},\"schema\":1}}"
+    )
+}
+
+/// `history()`, then a commit adding `docs/old.md` beside a change to `a`,
+/// then one deleting `docs/old.md`.
+fn deleted() -> (Repo, TempDir) {
+    let mut more = Script::after_main();
+    let (a, body) = module("a", 200);
+    more.commit(
+        HEAD + DAY,
+        &[("docs/old.md", "old\n".to_owned()), (a.as_str(), body)],
+    );
+    more.delete(HEAD + 2 * DAY, &["docs/old.md"]);
+    let repo = Repo::new("count-deleted", &history());
+    repo.import(&more);
+    let store = TempDir::new("count-deleted-data");
+    data(&repo.root, store.path(), &["index", "."]);
+    (repo, store)
+}
+
+#[test]
+fn a_deleted_or_never_tracked_file_is_not_found_and_points_to_git_log() {
+    let (repo, store) = deleted();
+    assert!(!repo.root.join("docs/old.md").exists());
+    let absolute = repo.root.join("src/a.rs");
+    let absolute = absolute.to_str().expect("utf-8");
+    for (file, shown) in [
+        ("docs/old.md", "docs/old.md"),
+        ("./docs/old.md", "docs/old.md"),
+        ("src/never.rs", "src/never.rs"),
+        ("docs", "docs"),
+        (absolute, "FILE"),
+    ] {
+        let (code, line) = cli(&repo.root, store.path(), &["cochange", file, "--count"]);
+        assert_eq!(
+            (code, line.as_str()),
+            (Some(3), not_tracked(shown).as_str()),
+            "{file}"
+        );
+        assert!(!line.contains(repo.root.to_str().expect("utf-8")), "{line}");
+    }
+    let texts = serve(
+        &repo.root,
+        store.path(),
+        &[
+            json!({ "file": "docs/old.md", "mode": "count" }),
+            json!({ "file": "src/never.rs", "mode": "count" }),
+        ],
+    );
+    assert_eq!(
+        texts,
+        [not_tracked("docs/old.md"), not_tracked("src/never.rs")]
+    );
+    // A tracked file is still counted.
+    let counted = data(
+        &repo.root,
+        store.path(),
+        &["cochange", "src/a.rs", "--count"],
+    );
+    assert_eq!(
+        counted["partners"][0],
+        json!({ "path": "src/b.rs", "count": 6 })
+    );
 }
 
 #[test]

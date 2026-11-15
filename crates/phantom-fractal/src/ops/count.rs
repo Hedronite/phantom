@@ -7,7 +7,9 @@
 //! scan, or on a tree that is no longer a git root, `scan` is null and
 //! there are no partners.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use phantom_fractal_git::{CountScan, GitError, Window};
 
 use phantom_fractal_proto::ErrorKind;
 use phantom_fractal_store::Store;
@@ -113,16 +115,7 @@ fn counts(store: &Store, request: &CountRequest, file: &str) -> Result<Counted, 
         return Ok((None, Vec::new(), false));
     };
     let root = canonical_repo(&request.repo)?;
-    let Some(counts) = (match phantom_fractal_git::cochange_counts(&root, &window, file) {
-        Ok(counts) => counts,
-        Err(phantom_fractal_git::GitError::NotTracked { .. }) => {
-            return Err(Failure::new(
-                ErrorKind::NotFound,
-                "file is not tracked at HEAD; git log has its history",
-            ));
-        }
-        Err(err) => return Err(history_failure(err)),
-    }) else {
+    let Some(counts) = read(&root, &window, file)? else {
         return Ok((None, Vec::new(), false));
     };
     let limit = usize::try_from(request.limit).unwrap_or(usize::MAX);
@@ -145,8 +138,36 @@ fn counts(store: &Store, request: &CountRequest, file: &str) -> Result<Counted, 
     Ok((Some(scan), partners, truncated))
 }
 
+/// The git crate's counts of `file`, or none on a tree that is not a git
+/// root. A path no tree at HEAD holds is `NotFound` (A8), never an empty
+/// list.
+fn read(root: &Path, window: &Window, file: &str) -> Result<Option<CountScan>, Failure> {
+    phantom_fractal_git::cochange_counts(root, window, file).map_err(|err| match err {
+        GitError::NotTracked { .. } => not_tracked(file),
+        GitError::Read(_) => history_failure(),
+    })
+}
+
+/// `NotFound` for a file no tree at HEAD holds, pointing to `git log`. It
+/// names the file as asked only when that is a relative path, so no
+/// absolute path is ever printed.
+fn not_tracked(file: &str) -> Failure {
+    let shown = if Path::new(file).is_absolute() {
+        "FILE"
+    } else {
+        file
+    };
+    Failure::new(
+        ErrorKind::NotFound,
+        format!(
+            "file is not tracked at HEAD, so it has no co-change count; \
+             for its history use git log -- {shown}"
+        ),
+    )
+}
+
 /// A git error's text may hold a path, so it is not passed on.
-fn history_failure(_: phantom_fractal_git::GitError) -> Failure {
+fn history_failure() -> Failure {
     Failure::new(
         ErrorKind::Usage,
         "git history could not be read; no co-change count was made",

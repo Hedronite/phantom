@@ -70,7 +70,8 @@ pub(crate) const COCHANGE: &str = "Which files tend to change with this file in 
     manifests or lock files. Each partner has its lift, the decayed weight of the commits they \
     changed in together (`together_decayed`, also as `together`), the confidence that a change \
     to `file` comes with one to it, and the last time they changed together; `scope` says what \
-    the scores are over. With `mode: count`, `file` may be any tracked file, and each partner is \
+    the scores are over. With `mode: count`, `file` may be any file tracked at HEAD (one that is \
+    not, deleted or never added, is `not_found` and points to `git log`), and each partner is \
     a tracked file with the number of kept commits it shared with `file`: no decay, no lift \
     floor, merges left out, bulk commits skipped and counted. Without a scan, `scan` is null and there are no partners.";
 
