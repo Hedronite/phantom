@@ -2,11 +2,14 @@
 //! co-change scan `index` stored on a git root (SPEC-w8 G3a).
 //!
 //! Nothing here reads git or writes the index. Without a scan the answer
-//! is empty, with `scan` null.
+//! is empty, with `scan` null. The reply also says what the scores are
+//! over, in `scope`, and gives each partner's decayed weight again as
+//! `together_decayed` (SPEC-w14 G3b); `together` stays as its alias.
+//! `cochange --count` is [`super::count`].
 
 use std::path::PathBuf;
 
-use phantom_fractal_git::Window;
+use phantom_fractal_git::{BULK_FILES, MIN_TOGETHER, Window};
 use phantom_fractal_proto::ErrorKind;
 use phantom_fractal_store::Store;
 use serde::{Deserialize, Serialize};
@@ -50,6 +53,9 @@ pub(crate) struct CochangeResult {
     partners: Vec<PartnerOut>,
     /// True when more partners passed `min_lift` than `partners` holds.
     truncated: bool,
+    /// What the scores are over.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<Scope>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tokens: Option<Tokens>,
 }
@@ -65,6 +71,47 @@ impl Shed for CochangeResult {
 
     fn set_tokens(&mut self, tokens: Tokens) {
         self.tokens = Some(tokens);
+    }
+
+    fn drop_extras(&mut self) {
+        self.scope = None;
+        for partner in &mut self.partners {
+            partner.together_decayed = None;
+        }
+    }
+}
+
+/// What a co-change answer counts: which files, how commits are weighted,
+/// the fewest shared commits a partner needs, and the most files a commit
+/// may change before it is skipped as bulk.
+#[derive(Clone, Serialize)]
+pub(crate) struct Scope {
+    files: &'static str,
+    weighting: &'static str,
+    min_commits: u64,
+    bulk_skip: usize,
+}
+
+impl Scope {
+    /// The stored scan's: indexed Rust files, decayed, at least
+    /// [`MIN_TOGETHER`] shared commits.
+    pub(crate) const fn decayed() -> Self {
+        Self {
+            files: "indexed .rs",
+            weighting: "decay 90d",
+            min_commits: MIN_TOGETHER,
+            bulk_skip: BULK_FILES,
+        }
+    }
+
+    /// `--count`'s: every tracked file, one per shared commit, from one.
+    pub(crate) const fn count() -> Self {
+        Self {
+            files: "tracked",
+            weighting: "none",
+            min_commits: 1,
+            bulk_skip: BULK_FILES,
+        }
     }
 }
 
@@ -86,7 +133,8 @@ struct StoredWindow {
 /// One partner: the other file, the decayed weight of the commits the two
 /// changed in together, the pair's lift, the confidence that a change to
 /// the queried file comes with one to this file, and the last time they
-/// changed together, in unix seconds.
+/// changed together, in unix seconds. `cochange` also names the weight
+/// `together_decayed`; `show` leaves that out.
 #[derive(Clone, Serialize)]
 pub(crate) struct PartnerOut {
     path: String,
@@ -94,17 +142,14 @@ pub(crate) struct PartnerOut {
     lift: f64,
     conf: f64,
     last_time: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    together_decayed: Option<f64>,
 }
 
 /// The partners of `request.file`, best lift first, then the most changes
 /// together, then path, fitted to `request.max_tokens`.
 pub(crate) fn cochange(request: &CochangeRequest) -> Result<Reply<CochangeResult>, Failure> {
-    if !(LIMIT_MIN..=LIMIT_MAX).contains(&request.limit) {
-        return Err(Failure::new(
-            ErrorKind::Usage,
-            format!("limit must be {LIMIT_MIN} to {LIMIT_MAX}"),
-        ));
-    }
+    check_limit(request.limit)?;
     if !min_lift_in_range(request.min_lift) {
         return Err(Failure::new(ErrorKind::Usage, min_lift_usage()));
     }
@@ -120,14 +165,30 @@ pub(crate) fn cochange(request: &CochangeRequest) -> Result<Reply<CochangeResult
     };
     let truncated = partners.len() > limit;
     partners.truncate(limit);
+    for partner in &mut partners {
+        partner.together_decayed = Some(partner.together);
+    }
     let result = CochangeResult {
         file,
         scan,
         partners,
         truncated,
+        scope: Some(Scope::decayed()),
         tokens: None,
     };
     answer(result, &store, &request.repo, request.max_tokens)
+}
+
+/// `Usage` unless `limit` is [`LIMIT_MIN`] to [`LIMIT_MAX`].
+pub(crate) fn check_limit(limit: u64) -> Result<(), Failure> {
+    if (LIMIT_MIN..=LIMIT_MAX).contains(&limit) {
+        Ok(())
+    } else {
+        Err(Failure::new(
+            ErrorKind::Usage,
+            format!("limit must be {LIMIT_MIN} to {LIMIT_MAX}"),
+        ))
+    }
 }
 
 /// True for a finite `min_lift` from 0 to [`MIN_LIFT_MAX`].
@@ -141,13 +202,21 @@ pub(crate) fn min_lift_usage() -> String {
     format!("min_lift must be a number from 0 to {MIN_LIFT_MAX}")
 }
 
-/// `path` as the store holds it, with any leading `./` removed, or
-/// `NotFound`. The message never holds the path, which may be absolute.
-fn indexed_file(store: &Store, path: &str) -> Result<String, Failure> {
+/// `path` with any leading `./` removed.
+pub(crate) fn relative(path: &str) -> &str {
     let mut relative = path;
     while let Some(rest) = relative.strip_prefix("./") {
         relative = rest;
     }
+    relative
+}
+
+/// `path` as the store holds it, with any leading `./` removed, or
+/// `NotFound`, which says co-change is kept only for indexed files and
+/// points to `--count` and git. The message never holds the path, which
+/// may be absolute.
+fn indexed_file(store: &Store, path: &str) -> Result<String, Failure> {
+    let relative = relative(path);
     store
         .files()?
         .into_iter()
@@ -156,13 +225,23 @@ fn indexed_file(store: &Store, path: &str) -> Result<String, Failure> {
         .ok_or_else(|| {
             Failure::new(
                 ErrorKind::NotFound,
-                "file is not an indexed file; give a path relative to the repo",
+                "file is not indexed at HEAD: co-change is kept only for indexed Rust files; \
+                 give a path relative to the repo, or for raw counts over every tracked file \
+                 use cochange --count or git log",
             )
         })
 }
 
 /// The stored scan's HEAD and window, or none without a scan.
 fn scan(store: &Store) -> Result<Option<ScanOut>, Failure> {
+    Ok(stored_scan(store)?.map(|(head, window)| ScanOut {
+        head,
+        window: window.into(),
+    }))
+}
+
+/// The stored scan's HEAD and the window it read, or none without a scan.
+pub(crate) fn stored_scan(store: &Store) -> Result<Option<(String, Window)>, Failure> {
     let Some(scan) = store.cochange_scan()? else {
         return Ok(None);
     };
@@ -170,10 +249,7 @@ fn scan(store: &Store) -> Result<Option<ScanOut>, Failure> {
     let Some(head) = scan.last_oid.filter(|head| !head.is_empty()) else {
         return Ok(None);
     };
-    Ok(Some(ScanOut {
-        head,
-        window: stored_window(&scan.window_json)?.into(),
-    }))
+    Ok(Some((head, stored_window(&scan.window_json)?)))
 }
 
 /// The window a stored scan read, from its `window_json`.
@@ -209,7 +285,41 @@ pub(crate) fn partners(
                 lift: partner.lift,
                 conf: partner.conf_of,
                 last_time: partner.last_time,
+                together_decayed: None,
             })
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use phantom_fractal_git::{BULK_FILES, HALF_LIFE_DAYS, MIN_TOGETHER};
+
+    use super::Scope;
+
+    #[test]
+    fn the_scopes_name_the_git_crate_constants() {
+        assert!(
+            (HALF_LIFE_DAYS - 90.0).abs() < f64::EPSILON,
+            "the label says 90d"
+        );
+        assert_eq!(
+            serde_json::to_value(Scope::decayed()).expect("json"),
+            serde_json::json!({
+                "files": "indexed .rs",
+                "weighting": "decay 90d",
+                "min_commits": MIN_TOGETHER,
+                "bulk_skip": BULK_FILES,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(Scope::count()).expect("json"),
+            serde_json::json!({
+                "files": "tracked",
+                "weighting": "none",
+                "min_commits": 1,
+                "bulk_skip": BULK_FILES,
+            })
+        );
+    }
 }

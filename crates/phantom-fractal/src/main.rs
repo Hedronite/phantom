@@ -46,9 +46,9 @@ use phantom_fractal_git::Window;
 use serde::Serialize;
 
 use crate::ops::{
-    CallsRequest, CochangeRequest, DiffRequest, DoctorRequest, Failure, FindRequest, ImpactRequest,
-    IndexRequest, MapRequest, PathRequest, RankKind, RankRequest, Reply, ShowRequest,
-    StatusRequest, Target, VersionRequest,
+    CallsRequest, CochangeRequest, CountRequest, DiffRequest, DoctorRequest, Failure, FindRequest,
+    ImpactRequest, IndexRequest, MapRequest, PathRequest, RankKind, RankRequest, Reply,
+    ShowRequest, StatusRequest, Target, VersionRequest,
 };
 
 /// Canon exit 1: usage or internal error.
@@ -220,10 +220,16 @@ enum Command {
         max_tokens: Option<u64>,
     },
     /// List the files that tend to change with FILE, from the co-change
-    /// `index` stored on a git root.
+    /// `index` stored on a git root. With `--count`, the raw count of
+    /// commits each tracked file shared with FILE instead.
     Cochange {
-        /// An indexed file, relative to the repo.
+        /// An indexed file, relative to the repo; with `--count`, any
+        /// tracked file.
         file: String,
+        /// Raw counts: every tracked file, one per shared commit, no decay
+        /// and no lift floor, over the stored scan's window.
+        #[arg(long, conflicts_with = "min_lift")]
+        count: bool,
         /// Lowest lift listed, a number from 0 to 1000.
         #[arg(long, default_value_t = ops::cochange::DEFAULT_MIN_LIFT, value_parser = min_lift)]
         min_lift: f64,
@@ -368,6 +374,21 @@ impl Command {
     }
 }
 
+/// `cochange`, or with `--count` its raw counts, for the same file, limit,
+/// tree and budget.
+fn cochange_command(request: CochangeRequest, count: bool) -> ExitCode {
+    if count {
+        emit(ops::cochange_count(&CountRequest {
+            file: request.file,
+            limit: request.limit,
+            repo: request.repo,
+            max_tokens: request.max_tokens,
+        }))
+    } else {
+        emit(ops::cochange(&request))
+    }
+}
+
 fn main() -> ExitCode {
     let mut cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -498,17 +519,21 @@ fn main() -> ExitCode {
         })),
         Command::Cochange {
             file,
+            count,
             min_lift,
             limit,
             repo,
             max_tokens,
-        } => emit(ops::cochange(&CochangeRequest {
-            file,
-            min_lift,
-            limit,
-            repo,
-            max_tokens,
-        })),
+        } => {
+            let request = CochangeRequest {
+                file,
+                min_lift,
+                limit,
+                repo,
+                max_tokens,
+            };
+            cochange_command(request, count)
+        }
         Command::Map {
             budget,
             focus,

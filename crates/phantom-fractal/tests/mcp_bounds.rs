@@ -57,6 +57,7 @@ fn bounds() -> Vec<(&'static str, &'static str, usize)> {
         ("repo_map", "focus", 4096),
         ("repo_map", "detail", 1024),
         ("cochange", "file", 4096),
+        ("cochange", "mode", 1024),
         ("diff_impact", "against", 256),
         ("symbol_path", "from", 1024),
         ("symbol_path", "to", 1024),

@@ -435,7 +435,7 @@ fn tools_list_matches_the_spec_table() {
         ),
         (
             "cochange",
-            &["file", "limit", "max_tokens", "min_lift", "repo"],
+            &["file", "limit", "max_tokens", "min_lift", "mode", "repo"],
             &["file"],
         ),
         (

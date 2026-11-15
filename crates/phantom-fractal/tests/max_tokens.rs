@@ -8,7 +8,8 @@
 //! `tokens` spliced in with `used` settled on the estimate of that very
 //! line. The estimate and the packing budget are computed here too, from
 //! their definitions, not from the analyze crate. The keys SPEC-w14 G1b
-//! adds to `callers`, `callees` and `impact` go first, as a whole: the
+//! adds to `callers`, `callees` and `impact`, and G3b to `cochange`, go
+//! first, as a whole: the
 //! reply is whole when it fits, and else is built as before from the
 //! reply with those keys cut out.
 
@@ -454,35 +455,40 @@ fn key_span(raw: &[u8], at: usize, key: &str) -> Option<(usize, usize)> {
     Some((fields[index - 1].2, fields[index].2))
 }
 
-/// The SPEC-w14 G1b keys of `op`'s reply, as byte ranges of `line`: each
-/// hit's `display`, and `data`'s `callers_distinct`, `files` and `sites`.
+/// The SPEC-w14 keys of `op`'s reply, as byte ranges of `line`. G1b:
+/// each hit's `display`, and `data`'s `callers_distinct`, `files` and
+/// `sites`. G3b: each `cochange` partner's `together_decayed`, and
+/// `data`'s `scope`.
 fn extras(op: &str, line: &str) -> Vec<(usize, usize)> {
     let raw = line.as_bytes();
     let (data, _) = member(raw, 0, "data").expect("data");
-    let hits = |object: usize| {
-        member(raw, object, "hits").map_or_else(Vec::new, |(start, _)| elements(raw, start))
+    let list = |object: usize, key: &str| {
+        member(raw, object, key).map_or_else(Vec::new, |(start, _)| elements(raw, start))
     };
-    let objects = match op {
-        "callers" | "callees" => hits(data),
+    let (objects, hit_key, data_keys): (Vec<(usize, usize)>, &str, &[&str]) = match op {
+        "callers" | "callees" => (
+            list(data, "hits"),
+            "display",
+            &["callers_distinct", "files", "sites"],
+        ),
         "impact" => {
             let mut out = Vec::new();
             if let Some((groups, _)) = member(raw, data, "groups") {
                 for (group, _) in elements(raw, groups) {
-                    out.extend(hits(group));
+                    out.extend(list(group, "hits"));
                 }
             }
-            if let Some((tests, _)) = member(raw, data, "tests") {
-                out.extend(elements(raw, tests));
-            }
-            out
+            out.extend(list(data, "tests"));
+            (out, "display", &["callers_distinct", "files", "sites"])
         }
+        "cochange" => (list(data, "partners"), "together_decayed", &["scope"]),
         _ => return Vec::new(),
     };
     let mut out: Vec<(usize, usize)> = objects
         .into_iter()
-        .filter_map(|(hit, _)| key_span(raw, hit, "display"))
+        .filter_map(|(hit, _)| key_span(raw, hit, hit_key))
         .collect();
-    for key in ["callers_distinct", "files", "sites"] {
+    for key in data_keys {
         out.extend(key_span(raw, data, key));
     }
     out
