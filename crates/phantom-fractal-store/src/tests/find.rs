@@ -291,3 +291,26 @@ fn a_display_spelling_takes_the_inline_scope_and_the_shared_file() {
     assert_eq!(module.len(), 1, "{module:?}");
     assert_eq!(module[0].kind, "function");
 }
+
+#[test]
+fn the_display_spelling_needs_a_file_shaped_prefix() {
+    let db = TempDb::new("displayshape");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    let language = language();
+    // A dot with no slash, a slash with no dot, and a bare word with
+    // neither: each file holds one function `go`.
+    for path in ["build.rs", "bin/tool", "notes"] {
+        put(&mut store, &language, path, "pub fn go() {}\n");
+    }
+    for spelled in ["build.rs::go", "bin/tool::go"] {
+        let hits = store.symbols_matching(spelled).expect("display");
+        assert_eq!(hits.len(), 1, "{spelled}: {hits:?}");
+    }
+    // `notes` is a module-shaped word, not a path: the form is not tried.
+    let bare = store.symbols_matching("notes::go").expect("bare word");
+    assert!(bare.is_empty(), "{bare:?}");
+    // An empty name after the separator names nothing.
+    let empty = store.symbols_matching("build.rs::").expect("empty name");
+    assert!(empty.is_empty(), "{empty:?}");
+}

@@ -298,3 +298,54 @@ fn the_dump_names_the_new_column_last_and_shows_a_pub_use() {
         "{dump}"
     );
 }
+
+/// The migration steps one open of a database stamped `stamp` runs, with
+/// the columns later versions added dropped first.
+fn open_steps(label: &str, stamp: i64, drop_sql: &str) -> Vec<&'static str> {
+    let db = TempDb::new(label);
+    assert_outside_workspace(db.path());
+    drop(Store::open(db.path()).expect("create"));
+    {
+        let conn = Connection::open(db.path()).expect("sqlite");
+        conn.execute_batch(&format!(
+            "{drop_sql}
+             UPDATE meta SET value = '{stamp}' WHERE key = 'schema_version';
+             PRAGMA user_version = {stamp};"
+        ))
+        .expect("downgrade");
+    }
+    crate::open_trace::clear();
+    let store = Store::open(db.path()).expect("open");
+    assert_eq!(store.schema_version().expect("schema"), SCHEMA_VERSION);
+    drop(store);
+    crate::open_trace::steps()
+        .into_iter()
+        .filter(|step| step.starts_with("migrate_"))
+        .collect()
+}
+
+const DROP_V4: &str = "ALTER TABLE refs DROP COLUMN visibility;";
+const DROP_V3_AND_V4: &str = "ALTER TABLE symbols DROP COLUMN scope;
+     ALTER TABLE symbols DROP COLUMN owner;
+     ALTER TABLE symbols DROP COLUMN owner_path;
+     ALTER TABLE symbols DROP COLUMN trait_name;
+     ALTER TABLE modules DROP COLUMN scope;
+     ALTER TABLE refs DROP COLUMN scope;
+     ALTER TABLE refs DROP COLUMN receiver;
+     ALTER TABLE refs DROP COLUMN shadowed;
+     ALTER TABLE refs DROP COLUMN alias;
+     ALTER TABLE refs DROP COLUMN glob;
+     ALTER TABLE refs DROP COLUMN visibility;";
+
+#[test]
+fn an_open_runs_only_the_migrations_the_stamp_needs() {
+    // A current database migrates nothing.
+    assert!(open_steps("steps-4", 4, "").is_empty());
+    // A version-3 database takes the one new step and no older one.
+    assert_eq!(open_steps("steps-3", 3, DROP_V4), vec!["migrate_v3_to_v4"]);
+    // A version-2 database skips the first step and takes the other two.
+    assert_eq!(
+        open_steps("steps-2", 2, DROP_V3_AND_V4),
+        vec!["migrate_v2_to_v3", "migrate_v3_to_v4"]
+    );
+}
