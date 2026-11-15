@@ -194,3 +194,14 @@ fn the_cure_adds_no_link() {
     call_in_tests(&mut i, check, "helper");
     assert!(links(&i.input).is_empty());
 }
+
+#[test]
+fn a_use_of_another_name_leaves_the_glob_free_to_supply_this_one() {
+    let (mut i, check) = tests_module();
+    let helper = i.function("helper");
+    i.function("other");
+    // `use super::other;` binds `other`, not `helper`.
+    i.uses(LIB, "tests", "super::other", None, false);
+    let call = call_in_tests(&mut i, check, "helper");
+    assert_eq!(i.resolve().0, [edge(call, check, helper, Reason::UseGlob)]);
+}

@@ -52,15 +52,20 @@ impl Index<'_> {
         let segs = segments(&call.text)?;
         let home = self.glob_home(module, segs.first()?)?;
         let walked = self.walk(home, &segs, 0, true).ok()?;
-        let functions: Vec<Id> = walked
-            .entities
+        let target = self.one_function(&walked.entities)?;
+        Some(Placed::Edge(target, Reason::UseGlob))
+    }
+
+    /// The one function or method `entities` name, if exactly one.
+    fn one_function(&self, entities: &[Entity]) -> Option<Id> {
+        let functions: Vec<Id> = entities
             .iter()
             .filter_map(|entity| self.function(*entity))
             .collect();
         let [target] = functions[..] else {
             return None;
         };
-        Some(Placed::Edge(target, Reason::UseGlob))
+        Some(target)
     }
 
     /// The globbed module of `module` that gives `name`, when nothing in
