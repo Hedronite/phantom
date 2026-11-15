@@ -1,6 +1,8 @@
 //! `fract doctor` (SPEC-w9 G3b, D11): seven checks in a fixed order,
 //! always exit 0, no path, and no write: not a byte, a mode or an mtime
-//! under the data directory changes, and nothing is repaired.
+//! under the data directory changes, and nothing is repaired. After the
+//! checks, `agents` says whether `nu` and the skill are found (SPEC-w14
+//! G2c), and never changes `ok`.
 
 mod support;
 
@@ -113,6 +115,14 @@ fn doctor(data: &Path, dir: &Path) -> Value {
         .map(|check| check["name"].as_str().expect("name"))
         .collect();
     assert_eq!(names, ORDER);
+    let mut keys: Vec<&str> = data
+        .as_object()
+        .expect("data")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["agents", "checks", "ok"]);
     let all = data["checks"]
         .as_array()
         .expect("checks")
@@ -449,5 +459,109 @@ fn a_database_that_is_not_sqlite_or_has_an_older_schema_is_reported() {
     assert!(
         detail.contains(&format!("{}: not an SQLite database", world.key("graph-"))),
         "{detail}"
+    );
+}
+
+/// `doctor` run in `dir` with exactly `env` set, besides the data
+/// directory: its exit code and `data`.
+fn doctor_with(dir: &Path, env: &[(&str, &std::ffi::OsStr)]) -> (Option<i32>, String, Value) {
+    let mut command = Command::new(BINS[0]);
+    command
+        .arg("doctor")
+        .current_dir(dir)
+        .env_clear()
+        .env("PHANTOM_FRACTAL_DATA", dir.join("data"));
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    let output = command.output().expect("run doctor");
+    let line = String::from_utf8(output.stdout).expect("utf-8");
+    let data = serde_json::from_str::<Value>(&line).expect("envelope")["data"].clone();
+    (output.status.code(), line, data)
+}
+
+fn place(path: &Path, mode: u32) {
+    fs::create_dir_all(path.parent().expect("parent")).expect("dirs");
+    fs::write(path, "").expect("write");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("mode");
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+}
+
+#[test]
+fn agents_reports_nu_and_the_skill_and_never_changes_ok() {
+    let root = TempDir::new("doctor-agents");
+    let (project, home, bin) = (
+        root.path().join("project"),
+        root.path().join("home"),
+        root.path().join("bin"),
+    );
+    fs::create_dir_all(&project).expect("project");
+    fs::create_dir_all(&home).expect("home");
+    fs::create_dir_all(&bin).expect("bin");
+
+    // Nothing to find: both false, and `doctor` is still ok, exit 0.
+    let (code, line, data) = doctor_with(
+        &project,
+        &[("PATH", bin.as_os_str()), ("HOME", home.as_os_str())],
+    );
+    assert_eq!(code, Some(0), "{line}");
+    assert_eq!(data["ok"], true, "{data}");
+    assert_eq!(
+        data["agents"],
+        serde_json::json!({
+            "nu": { "found": false, "via": "PATH" },
+            "skill": { "found": false, "places": [] },
+        })
+    );
+
+    // A `nu` on PATH, the skill in the project and a copy at home.
+    place(&bin.join("nu"), 0o755);
+    for dir in [
+        project.join(".agents/skills/phantom"),
+        home.join(".claude/skills/phantom"),
+    ] {
+        place(&dir.join("SKILL.md"), 0o644);
+        place(&dir.join("phantom.nu"), 0o644);
+    }
+    let (code, line, data) = doctor_with(
+        &project,
+        &[("PATH", bin.as_os_str()), ("HOME", home.as_os_str())],
+    );
+    assert_eq!(code, Some(0), "{line}");
+    assert_eq!(data["ok"], true, "{data}");
+    assert_eq!(
+        data["agents"],
+        serde_json::json!({
+            "nu": { "found": true, "via": "PATH" },
+            "skill": {
+                "found": true,
+                "places": ["./.agents/skills/phantom", "~/.claude/skills/phantom"],
+            },
+        })
+    );
+    for path in [&project, &home, &bin] {
+        assert!(!line.contains(path.to_str().expect("utf-8")), "{line}");
+    }
+
+    // PHANTOM_NU naming nothing wins over PATH, and is still no fault.
+    let absent = root.path().join("absent");
+    let (code, _, data) = doctor_with(
+        &project,
+        &[
+            ("PATH", bin.as_os_str()),
+            ("HOME", home.as_os_str()),
+            ("PHANTOM_NU", absent.as_os_str()),
+        ],
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(data["ok"], true, "{data}");
+    assert_eq!(
+        data["agents"]["nu"],
+        serde_json::json!({ "found": false, "via": "PHANTOM_NU" })
     );
 }

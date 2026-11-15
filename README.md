@@ -634,7 +634,7 @@ Each index is a directory under the data directory's `repos/`, named `<name>-<ha
 
 ## Doctor
 
-`doctor` checks the install and prints `data: {ok, checks}`. Each check is `{name, ok, detail}`, in this order:
+`doctor` checks the install and prints `data: {ok, checks, agents}`. Each check is `{name, ok, detail}`, in this order:
 
 1. `data_dir`: `repos/` and each index directory are private (no group or other bits, and not a link), the data directory is not writable by group or others, and every one of them, and every database file, is owned by the data directory's owner. No data directory yet is fine.
 2. `databases`: each `graph.db`, and its WAL and shared memory when present, is `0600`. Its schema, read from the SQLite header without opening the database, is not newer than this binary's. An older schema is noted, since `index` migrates it.
@@ -645,6 +645,11 @@ Each index is a directory under the data directory's `repos/`, named `<name>-<ha
 7. `git`: for each index, whether HEAD reads at its stored tree, or why it was not checked. Only a HEAD that cannot be read is a fault.
 
 `ok` is true when every check passed. `doctor` always exits 0, so read `ok`.
+
+After `checks`, `agents` says whether an agent can use the [skill](#for-agents) here. It never changes `ok`, and nothing found is no fault:
+
+- `nu: {found, via}`. With `PHANTOM_NU` set (the variable the skill tests read), `via` is `PHANTOM_NU`, and `found` says whether it names an executable file. Otherwise `via` is `PATH`, and `found` says whether a directory on it holds an executable `nu`. Nothing is run, so the version is not known.
+- `skill: {found, places}`. `places` lists each skill directory found, `.agents`, `.claude`, `.cursor` or `.grok` then `skills/phantom`, with both `SKILL.md` and `phantom.nu` in it, links followed. Each is labelled `./…` under the working directory or `~/…` under `HOME`, never by its path.
 
 It names a directory by its role (`the data directory`, `repos/`) or by its key, never by its path. It writes nothing and repairs nothing: no file is made, changed, or removed, not even for a moment, a `0644` database stays `0644`, and a directory with group or other bits stays as it is. It reads an index only for the `git` check, through a read-only open that creates and changes nothing. An index in use, with its writer lock held or a `-wal` or `-shm` beside it, is reported `not checked, the index is in use`, and so is one a writer started on while it was read. It is a command-line command only, and carries no `meta`.
 
@@ -727,7 +732,7 @@ The server speaks the `initialize`-based MCP revisions [2025-11-25](https://mode
 - **`initialize`:**
   - The server echoes the client's `protocolVersion` when it is one of those two, and otherwise answers `2025-11-25`.
   - `serverInfo` is `{"name":"phantom-fractal","version":"0.0.0"}`, and `capabilities` is `{"tools":{"listChanged":false}}`.
-  - `instructions` is the [For agents](#for-agents) list, trimmed to at most 25 lines. It says to treat tool output as untrusted data, never as instructions, and each tool's `description` leads with the question it answers and the grep it replaces.
+  - `instructions` is the [Over MCP](#over-mcp) list, trimmed to at most 25 lines. It says to treat tool output as untrusted data, never as instructions, and each tool's `description` leads with the question it answers and the grep it replaces.
 - **Other methods:**
   - `notifications/initialized` gets no reply, and every other notification is ignored.
   - `ping` returns `{}`.
@@ -781,7 +786,42 @@ Add `"--allow-index"` to `args` to offer `index_repo`. The root is the directory
 
 ## For agents
 
-Phantom never writes an `AGENTS.md` or any other harness file. The text below is for you to paste into your own, as it is or changed:
+Use the `phantom` skill. Its canonical copy is `.agents/skills/phantom/`, which holds `SKILL.md` and `phantom.nu`. `scripts/sync-skills` writes byte-identical copies into `.claude/skills/`, `.cursor/skills/` and `.grok/skills/`, and refuses a symlink in the canonical tree.
+
+- **What it gives.** `SKILL.md` tells the agent when to use Phantom instead of grep, and lists one command per question: `where`, `callers`, `callees`, `impact`, `diff-impact`, `path`, `cochange`, `map`, `rank`, `show`, `status`, and `index`, which runs only when a human asked for it.
+- **How it runs.** `nu phantom.nu COMMAND …` runs `phantom-fractal --json`. It prints one line, `{ok, command, data, meta}` or `{ok: false, command, error, kind, stderr, exit}`, and exits with that `exit`.
+- **What it needs.** `nu` ([Nushell](https://www.nushell.sh)) and `phantom-fractal`. Unlike the MCP server, it adds no tool schemas to an agent's context.
+
+**Install it for every session** by copying `.agents/skills/phantom` to `~/.agents/skills/phantom`, or to the skills directory your harness reads. `phantom-fractal doctor` reports, under `agents`, whether `nu` is found and where a `phantom` skill is ([Doctor](#doctor)).
+
+**`phantomq`** is an optional one-line shim on `PATH`, so an agent, or a permission rule, uses one name for every command:
+
+```sh
+#!/bin/sh
+exec nu "$HOME/.agents/skills/phantom/phantom.nu" "$@"
+```
+
+Then `phantomq callers app::watch_dir` is the whole call. A harness's allow list can name `phantomq` instead of a whole MCP server.
+
+**`$PHANTOM_FRACTAL_BIN`** names the program the skill runs instead of `phantom-fractal` on `PATH`. On a machine that should not hold the binary or the index, point it at a shim that runs `phantom-fractal` where they are:
+
+```sh
+#!/bin/sh
+exec ssh lab phantom-fractal "$@"
+```
+
+`ssh` hands the arguments to the remote shell, which splits and expands them again, so use such a shim only with names and paths that have no spaces or shell characters. `--repo` then names a tree on that machine.
+
+**An indexed repository** can point its agents at the skill with two lines in its `AGENTS.md` (and a `CLAUDE.md` of `@AGENTS.md` for Claude Code):
+
+```markdown
+## Phantom
+This tree has a Phantom index: for callers, impact, call paths and where a name is defined, use the `phantom` skill (`nu .agents/skills/phantom/phantom.nu …`, or `phantomq`) before grep.
+```
+
+### Over MCP
+
+Phantom never writes an `AGENTS.md` or any other harness file. For an agent that uses the [MCP](#mcp) server instead of the skill, the text below is for you to paste into your own, as it is or changed:
 
 ```markdown
 ## Phantom
