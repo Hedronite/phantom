@@ -820,7 +820,7 @@ Add `"--allow-index"` to `args` to offer `index_repo`. The root is the directory
 
 Use the `phantom` skill. Its canonical copy is `.agents/skills/phantom/`, which holds `SKILL.md` and `phantom.nu`. `scripts/sync-skills` writes byte-identical copies into `.claude/skills/`, `.cursor/skills/` and `.grok/skills/`, and refuses a symlink in the canonical tree.
 
-- **What it gives.** `SKILL.md` tells the agent when to use Phantom instead of grep, and lists one command per question: `where`, `callers`, `callees`, `impact`, `diff-impact`, `path`, `cochange`, `map`, `rank`, `show`, `status`, and `index`, which runs only when a human asked for it.
+- **What it gives.** `SKILL.md` tells the agent when to use Phantom instead of grep, and lists one command per question: `where`, `callers`, `callees`, `impact`, `diff-impact`, `path`, `cochange`, `map`, `rank`, `show`, `status`, and `index`, which an agent may run whenever the index is missing or stale, or to make it current. It writes only to Phantom's own data directory, never to the repository.
 - **How it runs.** `nu phantom.nu COMMAND …` runs `phantom-fractal --json`. It prints one line, `{ok, command, data, meta}` or `{ok: false, command, error, kind, stderr, exit}`, and exits with that `exit`.
 - **What it needs.** `nu` ([Nushell](https://www.nushell.sh)) and `phantom-fractal`. Unlike the MCP server, it adds no tool schemas to an agent's context.
 
@@ -868,9 +868,9 @@ This repository may have a Phantom index. Phantom answers questions about Rust c
 - What matters most here: `top_ranked`, by symbols or by files, with `focus` for the files you are working in.
 - An overview that fits your context: `repo_map` with a `budget` in tokens. The budget is an estimate, so leave room.
 - What else usually changes with a file: `cochange`, on a git root that was indexed. It is history, not a dependency.
-- Is the index current: every result's `meta.stale`. When it is true, the answer is from the last index; `repo_status` says what changed since. Ask the user to run `phantom-fractal index .` when it matters.
+- Is the index current: every result's `meta.stale`. When it is true, the answer is from the last index; `repo_status` says what changed since. When it matters, refresh it: `index_repo` if the server offers it, or `phantom-fractal index .`.
 - On `ambiguous`, pick a candidate and call `show_symbol` with its `stable_key` as `id`.
-- On `no_index`, the repo is not an indexed root of this server: ask the user to run `phantom-fractal index .`, or to start the server with `--root` for that tree.
+- On `no_index`, the repo is not an indexed root of this server. For a root, index it: `index_repo` if the server offers it, or `phantom-fractal index .`. Another tree needs the server started with `--root` for it.
 - Pass `max_tokens` to cap a long answer; `data.tokens.omitted` says how many entries were dropped to fit.
 - Ask for source (`source: true`) only when you need the lines.
 

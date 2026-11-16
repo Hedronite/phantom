@@ -183,6 +183,17 @@ impl Fixture {
         envelope["data"].clone()
     }
 
+    /// `data` of a successful run with the binary `bin`.
+    fn ok_with(&self, bin: &Bin, args: &[&str]) -> Value {
+        let (code, envelope) = self.run_with(bin, &self.repo, args);
+        assert_eq!(
+            (code, &envelope["ok"]),
+            (0, &json!(true)),
+            "{args:?}: {envelope}"
+        );
+        envelope["data"].clone()
+    }
+
     /// A failed run of `kind`, exiting `code`.
     fn fails(&self, bin: &Bin, args: &[&str], kind: &str, code: i32) -> Value {
         let (got, envelope) = self.run_with(bin, &self.repo, args);
@@ -451,7 +462,8 @@ fn cochange_counts_every_tracked_file_by_default() {
     let Some(nu) = nu() else { return };
     let (fx, repo) = history_fixture(nu);
     let (tree, db) = (support::snapshot(&repo.root), support::database(&fx.data()));
-    let (code, envelope) = fx.run_with(&Bin::OnPath, &repo.root, &["cochange", "src/a.rs"]);
+    let at = |args: &[&str]| fx.run_with(&Bin::OnPath, &repo.root, args);
+    let (code, envelope) = at(&["cochange", "src/a.rs"]);
     assert_eq!(code, 0, "{envelope}");
     let data = &envelope["data"];
     assert_eq!(data["mode"], "count", "{data}");
@@ -465,21 +477,12 @@ fn cochange_counts_every_tracked_file_by_default() {
     );
     // The first commit adds every file; then a shares 5 with b, 4 with c, 3 with g.
     let partners = data["partners"].as_array().expect("partners");
-    assert_eq!(
-        partners[0],
-        json!({"path": "src/b.rs", "count": 6}),
-        "{data}"
-    );
-    assert_eq!(
-        partners[1],
-        json!({"path": "src/c.rs", "count": 5}),
-        "{data}"
-    );
-    assert_eq!(
-        partners[2],
-        json!({"path": "src/g.rs", "count": 4}),
-        "{data}"
-    );
+    let top = [("src/b.rs", 6), ("src/c.rs", 5), ("src/g.rs", 4)];
+    let want: Vec<Value> = top
+        .iter()
+        .map(|(p, c)| json!({"path": p, "count": c}))
+        .collect();
+    assert_eq!(partners[..3], want[..], "{data}");
     assert!(
         partner_paths(data).contains(&"Cargo.toml"),
         "a tracked non-Rust file: {data}"
@@ -492,29 +495,29 @@ fn cochange_counts_every_tracked_file_by_default() {
         );
     }
 
-    let (code, explicit) = fx.run_with(
-        &Bin::OnPath,
-        &repo.root,
-        &["cochange", "--count", "src/a.rs"],
-    );
+    let (code, explicit) = at(&["cochange", "--count", "src/a.rs"]);
     assert_eq!(
         (code, &explicit["data"]),
         (0, data),
         "--count is the default"
     );
 
-    let (code, manifest) = fx.run_with(&Bin::OnPath, &repo.root, &["cochange", "Cargo.toml"]);
+    let (code, manifest) = at(&["cochange", "Cargo.toml"]);
     assert_eq!(code, 0, "{manifest}");
     assert!(
         partner_paths(&manifest["data"]).contains(&"src/a.rs"),
         "{manifest}"
     );
-
-    let (code, one) = fx.run_with(
-        &Bin::OnPath,
-        &repo.root,
-        &["cochange", "--limit", "1", "src/a.rs"],
+    // A count for a file not tracked at HEAD is not_found, with no count note.
+    let (code, untracked) = at(&["cochange", "src/nope.rs"]);
+    assert_eq!(
+        (code, untracked["kind"].as_str()),
+        (3, Some("not_found")),
+        "{untracked}"
     );
+    assert!(untracked.get("note").is_none(), "{untracked}");
+
+    let (code, one) = at(&["cochange", "--limit", "1", "src/a.rs"]);
     assert_eq!(
         (code, partner_paths(&one["data"])),
         (0, vec!["src/b.rs"]),
@@ -539,11 +542,8 @@ fn cochange_rust_is_the_labelled_decayed_mode() {
     let Some(nu) = nu() else { return };
     let (fx, repo) = history_fixture(nu);
     let (tree, db) = (support::snapshot(&repo.root), support::database(&fx.data()));
-    let (code, envelope) = fx.run_with(
-        &Bin::OnPath,
-        &repo.root,
-        &["cochange", "--rust", "src/a.rs"],
-    );
+    let at = |args: &[&str]| fx.run_with(&Bin::OnPath, &repo.root, args);
+    let (code, envelope) = at(&["cochange", "--rust", "src/a.rs"]);
     assert_eq!(code, 0, "{envelope}");
     let data = &envelope["data"];
     assert_eq!(data["mode"], "rust", "{data}");
@@ -571,18 +571,10 @@ fn cochange_rust_is_the_labelled_decayed_mode() {
             "{partner}"
         );
     }
-    let (code, lifted) = fx.run_with(
-        &Bin::OnPath,
-        &repo.root,
-        &["cochange", "--rust", "--min-lift", "0", "src/a.rs"],
-    );
+    let (code, lifted) = at(&["cochange", "--rust", "--min-lift", "0", "src/a.rs"]);
     assert_eq!(code, 0, "{lifted}");
 
-    let (code, envelope) = fx.run_with(
-        &Bin::OnPath,
-        &repo.root,
-        &["cochange", "--rust", "Cargo.toml"],
-    );
+    let (code, envelope) = at(&["cochange", "--rust", "Cargo.toml"]);
     assert_eq!(
         (code, envelope["kind"].as_str()),
         (3, Some("not_found")),
@@ -625,20 +617,8 @@ fn index_runs_through_the_skill() {
 }
 
 /// The first word of each usage `help` lists, in order.
-const HELP_COMMANDS: &[&str] = &[
-    "where",
-    "callers",
-    "callees",
-    "impact",
-    "diff-impact",
-    "path",
-    "cochange",
-    "map",
-    "rank",
-    "show",
-    "status",
-    "index",
-];
+const HELP_COMMANDS: &str =
+    "where callers callees impact diff-impact path cochange map rank show status index";
 
 #[test]
 fn help_prints_the_command_table_and_runs_nothing() {
@@ -659,7 +639,7 @@ fn help_prints_the_command_table_and_runs_nothing() {
         .map(|usage| usage.split(' ').next().expect("a word"))
         .collect();
     heads.dedup();
-    assert_eq!(heads, HELP_COMMANDS, "{table}");
+    assert_eq!(heads.join(" "), HELP_COMMANDS, "{table}");
     assert!(
         usages.contains(&"impact NAME [--depth 1..5] [--limit N] [--no-tests]"),
         "{table}"
@@ -925,4 +905,93 @@ fn a_reexported_target_carries_the_grep_flag() {
     }
     let data = fx.ok(&["callees", "entry"]);
     assert!(data.get("reexported").is_none(), "{data}");
+}
+
+/// A fake `phantom-fractal` that logs its argv and prints `reply`. It uses
+/// only shell builtins: the skill runs with an empty `PATH`.
+#[cfg(unix)]
+fn fake(fx: &Fixture, reply: &str) -> (Bin, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let (bin, log) = (fx.tmp.path().join("fake"), fx.tmp.path().join("argv"));
+    let text = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nprintf '%s\\n' '{reply}'\n",
+        log.display()
+    );
+    fs::write(&bin, text).expect("fake");
+    fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).expect("chmod");
+    fs::create_dir_all(&fx.repo).expect("repo");
+    (Bin::Override(bin), log)
+}
+
+fn argv(log: &Path) -> Vec<String> {
+    fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A reply every read command can reshape.
+const FAKE_REPLY: &str = r#"{"ok":true,"data":{"symbol":{"name":"crate::f","path":"src/a.rs","line":1},"hits":[]},"meta":null}"#;
+
+#[cfg(unix)]
+#[test]
+fn no_read_command_sends_index() {
+    let Some(nu) = nu() else { return };
+    let fx = Fixture::empty(nu, "skill-nu-reads");
+    let (bin, log) = fake(&fx, FAKE_REPLY);
+    let reads = "where f;callers f;callees f;impact f;diff-impact;path a b;cochange src/a.rs;\
+                 cochange --rust src/a.rs;map;rank;show f;status";
+    for read in reads.split(';') {
+        let args: Vec<&str> = read.split(' ').collect();
+        let (code, envelope) = fx.run_with(&bin, &fx.repo, &args);
+        assert_eq!(code, 0, "{args:?}: {envelope}");
+    }
+    let sent = argv(&log);
+    assert_eq!(sent.len(), 12, "{sent:?}");
+    let reads_only = |line: &String| line.starts_with("--json ") && !line.contains(" index");
+    assert!(sent.iter().all(reads_only), "{sent:?}");
+}
+
+/// `index` runs at any time (A4-w15), with one path and no flag.
+#[cfg(unix)]
+#[test]
+fn index_takes_one_path_and_no_flag() {
+    let Some(nu) = nu() else { return };
+    let fx = Fixture::empty(nu, "skill-nu-index-argv");
+    let (bin, log) = fake(&fx, FAKE_REPLY);
+    for args in [
+        &["index", "a", "b"][..],
+        &["index", "--force"],
+        &["index", "--repo", "x"],
+        &["index", "--", "a", "b"],
+    ] {
+        fx.fails(&bin, args, "usage", 1);
+    }
+    assert!(argv(&log).is_empty(), "a usage error ran the CLI");
+    fx.ok_with(&bin, &["index"]);
+    fx.ok_with(&bin, &["index", "src"]);
+    assert_eq!(argv(&log), ["--json index -- .", "--json index -- src"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn where_answers_an_envelope_when_show_has_no_symbol() {
+    let Some(nu) = nu() else { return };
+    let fx = Fixture::empty(nu, "skill-nu-nosym");
+    for reply in [
+        r#"{"ok":true,"data":{},"meta":null}"#,
+        r#"{"ok":true,"data":null,"meta":null}"#,
+        r#"{"ok":true,"data":{"symbol":"f"},"meta":null}"#,
+    ] {
+        let (bin, _) = fake(&fx, reply);
+        let envelope = fx.fails(&bin, &["where", "f"], "error", 1);
+        assert!(
+            envelope["error"]
+                .as_str()
+                .expect("error")
+                .contains("without a symbol"),
+            "{envelope}"
+        );
+    }
 }

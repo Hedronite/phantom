@@ -39,7 +39,8 @@
 #   show         show [--source] [--repo=R] -- NAME
 #   status       status [--repo=R]
 #   index        index -- PATH
-# `index` writes the data directory. Run it only when a human asked.
+# `index` writes Phantom's own data directory, never the repository. It may
+# run at any time; no read command sends it.
 
 const COUNT_NOTE = "raw counts: for every tracked file, the non-merge commits it shares with FILE in the scanned window, no decay and no lift floor; commits over scope.bulk_skip files are skipped and counted in scan.skipped_bulk; history, not dependency"
 const RUST_NOTE = "--rust: indexed Rust files only, decay-weighted (90 days) and lift-filtered; together_decayed is a weight, not a commit count; for raw counts over every tracked file, drop --rust"
@@ -67,7 +68,7 @@ const HELP = {
     { usage: "rank [--files] [--limit N] [--focus PATH]", answers: "the most central symbols or files" }
     { usage: "show NAME [--source]", answers: "one symbol with its callers and callees" }
     { usage: "status", answers: "is the index current" }
-    { usage: "index [PATH]", answers: "writes the index; run only when a human asked" }
+    { usage: "index [PATH]", answers: "builds or refreshes the index; Phantom's data directory only" }
   ]
   flags: "--repo R, --limit N and --depth N go before or after the command; a word after -- is never a flag"
   names: "NAME: a bare name, Type::method, module::name, or a display from any reply; on kind ambiguous, rerun with one of matches[].display"
@@ -163,6 +164,23 @@ def failure [command: string, code: int, stdout: string, stderr: string, doc: an
   let dym = (first-set [($err | get-key "did_you_mean") ($data | get-key "did_you_mean")])
   if $dym != null { $out = ($out | upsert did_you_mean $dym) }
   $out
+}
+
+def is-record [v: any] {
+  ($v | describe) | str starts-with "record"
+}
+
+# A success from the CLI that lacks the symbol the reshaping needs: an
+# envelope, never a nu error.
+def no-symbol [command: string, ran: string] {
+  {
+    ok: false
+    command: $command
+    error: $"($ran) answered without a symbol record; rerun, or run status"
+    kind: "error"
+    stderr: ""
+    exit: 1
+  }
 }
 
 def get-key [key: string] {
@@ -487,9 +505,13 @@ def --wrapped "main where" [...args: string] {
   let name = (symbol-name ($p.pos | first))
   let shown = (call "where" (["show"] ++ (repo-arg $p) ++ ["--" $name]))
   if $shown.ok {
-    finish ($shown | upsert data { hits: [(where-hit $shown.data.symbol)], total: 1 })
+    let symbol = ($shown.data | get-key "symbol")
+    if not (is-record $symbol) {
+      finish (no-symbol "where" "show")
+    }
+    finish ($shown | upsert data { hits: [(where-hit $symbol)], total: 1 })
   } else if $shown.kind == "ambiguous" and ($shown.matches? != null) {
-    let hits = ($shown.matches | each {|c| where-hit $c })
+    let hits = ($shown.matches | where {|c| is-record $c } | each {|c| where-hit $c })
     finish {
       ok: true
       command: "where"
@@ -498,7 +520,7 @@ def --wrapped "main where" [...args: string] {
     }
   } else if $shown.kind == "not_found" {
     let found = (call "where" (["find"] ++ (repo-arg $p) ++ ["--" $name]))
-    let hits = if $found.ok { $found.data.hits? | default [] } else { [] }
+    let hits = if $found.ok { $found.data | get-key "hits" | default [] | where {|h| is-record $h } } else { [] }
     if ($hits | is-empty) {
       finish $shown
     } else {
@@ -607,7 +629,7 @@ def --wrapped "main cochange" [...args: string] {
   let mode = if $rust { [] } else { ["--count"] }
   let note = if $rust { $RUST_NOTE } else { $COUNT_NOTE }
   let e = (call "cochange" (["cochange"] ++ $mode ++ (pass $p "--limit") ++ (pass $p "--min-lift") ++ (repo-arg $p) ++ ["--" ($p.pos | first)]))
-  if not $e.ok { finish ($e | upsert note $note) }
+  if not $e.ok { finish (if $rust { $e | upsert note $note } else { $e }) }
   let d = $e.data
   let partners = if $rust {
     $d.partners? | default [] | each {|x| partner-row $x }
