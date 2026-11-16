@@ -4,8 +4,10 @@
 //! fits when `estimate_tokens(line) <= packing_budget(max_tokens)`. A
 //! reply that does not fit drops entries one at a time, in its op's fixed
 //! order, until it does; [`Shed`] gives that order. A reply with keys
-//! added beside the old ones (SPEC-w14 G1b) drops them first, as a whole,
-//! and then sheds exactly as it did without them. With a budget, `data`
+//! added beside the old ones sheds them in two stages before any entry:
+//! first the SPEC-w15 keys, so a reply that fitted without them is exactly
+//! the reply it was; then the SPEC-w14 keys, after which it sheds exactly
+//! as it did without either. With a budget, `data`
 //! ends with `tokens`, whose `used` is the estimate of the final line,
 //! `tokens` and `meta` included. Without one nothing is added.
 
@@ -36,8 +38,13 @@ pub(crate) trait Shed: Serialize + Clone {
     /// is fixed, so dropping more never brings one back.
     fn shed(&mut self, count: usize);
     fn set_tokens(&mut self, tokens: Tokens);
-    /// Drops the keys added beside the reply's old ones, if it has any.
-    /// They go before any entry and are not counted in `omitted`.
+    /// Drops the SPEC-w15 keys, if the reply has any: `reexported`,
+    /// `confirm_with_grep` and `impact`'s `limit`. They go first of all,
+    /// as a whole, and are not counted in `omitted`.
+    fn drop_new(&mut self) {}
+    /// Drops every key added beside the reply's old ones, the SPEC-w15
+    /// keys included. They go before any entry and are not counted in
+    /// `omitted`.
     fn drop_extras(&mut self) {}
 }
 
@@ -53,9 +60,10 @@ pub(crate) fn check(max_tokens: Option<u64>) -> Result<(), Failure> {
 }
 
 /// `data` as is without a budget. With one, `data` whole when it fits in
-/// a line that carries `meta`; else `data` without its extra keys, if it
-/// has any, after the fewest drops that fit, with `tokens` set; `Usage`
-/// `budget_too_small` when it does not fit with every entry dropped.
+/// a line that carries `meta`; else `data` without its SPEC-w15 keys when
+/// that fits; else `data` without any extra key, after the fewest drops
+/// that fit. `tokens` is set on each. `Usage` `budget_too_small` when it
+/// does not fit with every entry dropped.
 pub(crate) fn fit<T: Shed>(data: T, max_tokens: Option<u64>, meta: &Meta) -> Result<T, Failure> {
     let Some(max) = max_tokens else {
         return Ok(data);
@@ -63,9 +71,14 @@ pub(crate) fn fit<T: Shed>(data: T, max_tokens: Option<u64>, meta: &Meta) -> Res
     let room = packing_budget(max);
     let mut lean = data.clone();
     lean.drop_extras();
+    let mut plain = data.clone();
+    plain.drop_new();
     let mut whole = data;
     if settle(&mut whole, max, 0, meta)? <= room {
         return Ok(whole);
+    }
+    if settle(&mut plain, max, 0, meta)? <= room {
+        return Ok(plain);
     }
     shed_to_fit(lean, max, room, meta)
 }

@@ -214,7 +214,8 @@ pub(crate) fn insert_symbols(
     Ok(index)
 }
 
-/// Inserts one `use` row per import leaf, with alias, glob, and scope.
+/// Inserts one `use` row per import leaf, with alias, glob, scope, and
+/// the declaration's visibility (`public` marks a `pub use` re-export).
 pub(crate) fn insert_uses(
     conn: &Transaction<'_>,
     file_id: i64,
@@ -222,8 +223,9 @@ pub(crate) fn insert_uses(
 ) -> Result<(), StoreError> {
     let mut statement = conn.prepare(
         "INSERT INTO refs(
-            file_id, kind, text, last_segment, line, scope, shadowed, alias, glob
-         ) VALUES (?1, 'use', ?2, ?3, ?4, ?5, 0, ?6, ?7)",
+            file_id, kind, text, last_segment, line, scope, shadowed, alias, glob,
+            visibility
+         ) VALUES (?1, 'use', ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8)",
     )?;
     for (position, import) in extract.imports.iter().enumerate() {
         let scope = extract
@@ -238,6 +240,7 @@ pub(crate) fn insert_uses(
             scope.clone(),
             &import.alias,
             i64::from(import.glob),
+            visibility_to_text(&import.visibility),
         ))?;
     }
     Ok(())

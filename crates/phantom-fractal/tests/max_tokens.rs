@@ -458,7 +458,8 @@ fn key_span(raw: &[u8], at: usize, key: &str) -> Option<(usize, usize)> {
 /// The SPEC-w14 keys of `op`'s reply, as byte ranges of `line`. G1b:
 /// each hit's `display`, and `data`'s `callers_distinct`, `files` and
 /// `sites`. G3b: each `cochange` partner's `together_decayed`, and
-/// `data`'s `scope`.
+/// `data`'s `scope`. SPEC-w15 G1b adds `data`'s `limit`, `reexported` and
+/// `confirm_with_grep`, which go with them.
 fn extras(op: &str, line: &str) -> Vec<(usize, usize)> {
     let raw = line.as_bytes();
     let (data, _) = member(raw, 0, "data").expect("data");
@@ -469,7 +470,13 @@ fn extras(op: &str, line: &str) -> Vec<(usize, usize)> {
         "callers" | "callees" => (
             list(data, "hits"),
             "display",
-            &["callers_distinct", "files", "sites"],
+            &[
+                "callers_distinct",
+                "files",
+                "sites",
+                "reexported",
+                "confirm_with_grep",
+            ],
         ),
         "impact" => {
             let mut out = Vec::new();
@@ -479,7 +486,18 @@ fn extras(op: &str, line: &str) -> Vec<(usize, usize)> {
                 }
             }
             out.extend(list(data, "tests"));
-            (out, "display", &["callers_distinct", "files", "sites"])
+            (
+                out,
+                "display",
+                &[
+                    "callers_distinct",
+                    "files",
+                    "sites",
+                    "limit",
+                    "reexported",
+                    "confirm_with_grep",
+                ],
+            )
         }
         "cochange" => (list(data, "partners"), "together_decayed", &["scope"]),
         _ => return Vec::new(),
@@ -529,8 +547,9 @@ fn trimmed(line: &str, drops: &[(usize, usize)], count: usize, max: u64) -> Stri
 }
 
 /// What a budgeted run must print: the whole reply when it fits; else the
-/// reply without its SPEC-w14 keys after the fewest drops that fit, or
-/// none when nothing fits.
+/// reply without its SPEC-w15 keys when that fits; else the reply without
+/// its SPEC-w14 keys either, after the fewest drops that fit, or none when
+/// nothing fits.
 fn expected(op: &str, line: &str, max: u64) -> Option<String> {
     let extras = extras(op, line);
     if extras.is_empty() {
@@ -540,7 +559,25 @@ fn expected(op: &str, line: &str, max: u64) -> Option<String> {
     if estimate(&whole) <= room(max) {
         return Some(whole);
     }
+    let newest = newest(line);
+    if !newest.is_empty() {
+        let plain = trimmed(&cut(line, &newest), &[], 0, max);
+        if estimate(&plain) <= room(max) {
+            return Some(plain);
+        }
+    }
     fewest(op, &cut(line, &extras), max)
+}
+
+/// The SPEC-w15 keys of a reply's `data`, as byte ranges of `line`: the
+/// first stage shed, before the SPEC-w14 keys.
+fn newest(line: &str) -> Vec<(usize, usize)> {
+    let raw = line.as_bytes();
+    let (data, _) = member(raw, 0, "data").expect("data");
+    ["limit", "reexported", "confirm_with_grep"]
+        .iter()
+        .filter_map(|key| key_span(raw, data, key))
+        .collect()
 }
 
 /// The reply after the fewest drops that fit, or none when nothing fits.
@@ -663,6 +700,12 @@ fn every_budgeted_reply_is_the_fewest_drops_that_fit() {
             &["impact", "hub", "--summary"],
             "impact",
             json!({ "symbol": "hub", "summary": true }),
+        ),
+        case(
+            "impact",
+            &["impact", "hub", "--limit", "3"],
+            "impact",
+            json!({ "symbol": "hub", "limit": 3 }),
         ),
         case(
             "show",

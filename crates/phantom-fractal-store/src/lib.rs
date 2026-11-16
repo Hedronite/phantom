@@ -5,8 +5,8 @@
 //! A new database gets the canon §6.3 tables, `producer = phantom-fractal`,
 //! and `user_version` equal to [`SCHEMA_VERSION`]. Opening a database with
 //! no producer row fails. A `schema_version` newer than this binary fails
-//! too. A version-1 or version-2 database migrates additively to
-//! [`SCHEMA_VERSION`].
+//! too. A version-1, version-2 or version-3 database migrates additively
+//! to [`SCHEMA_VERSION`].
 //!
 //! `put_source` replaces a path's rows in one transaction, so an edit and
 //! a new index cannot collide on `UNIQUE`, and `remove_file` drops a
@@ -24,6 +24,7 @@ mod impact;
 mod lock;
 mod meta;
 mod rank;
+mod reexport;
 mod rows;
 mod schema;
 mod scoring;
@@ -49,7 +50,7 @@ pub const PRODUCER: &str = "phantom-fractal";
 
 /// Schema this binary creates and will open. A higher `meta.schema_version`
 /// is refused.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Open failure, or a write that could not be stored.
 #[derive(Debug)]
@@ -232,17 +233,7 @@ impl Store {
     fn open_existing(path: &Path) -> Result<Self, StoreError> {
         let mut conn = Connection::open_with_flags(path, open_flags(false))?;
         harden(&conn)?;
-        if !schema::meta_table_exists(&conn)? {
-            return Err(StoreError::ForeignDatabase);
-        }
-        let mut version = schema::check_stamp(&conn)?;
-        if version < 2 {
-            schema::migrate_v1_to_v2(&mut conn)?;
-            version = 2;
-        }
-        if version < SCHEMA_VERSION {
-            schema::migrate_v2_to_v3(&mut conn)?;
-        }
+        schema::prepare_existing(&mut conn)?;
         enable_wal(&conn)?;
         Ok(Self {
             conn,

@@ -41,7 +41,8 @@ pub(crate) const CALLERS: &str = "Who calls this symbol. Use instead of grepping
     `path` and `line`, its `confidence` and `reason`; `callers_distinct` groups the sites by \
     caller, and `files` and `sites` give the distinct files and the count. A caller reached only \
     through a re-export or a macro may be missing, so confirm with one grep when completeness \
-    matters.";
+    matters. When the stored rows show the symbol re-exported by a `pub use`, `reexported` and \
+    `confirm_with_grep` are true: grep its bare name across crates as well.";
 
 pub(crate) const CALLEES: &str = "What does this symbol call. Use instead of reading its body and \
     grepping each call: at most 100 resolved calls, each with `display`, `confidence` and \
@@ -51,7 +52,10 @@ pub(crate) const CALLEES: &str = "What does this symbol call. Use instead of rea
 pub(crate) const IMPACT: &str = "What does a change to this symbol reach: the calls into it walked \
     backwards, hits by depth with `display`, tests apart, counts, `callers_distinct`, `files` and \
     `sites`, the reasons the answer may be incomplete, and a risk level. Use for 'what breaks if \
-    I change X' instead of grepping for callers of callers by hand.";
+    I change X' instead of grepping for callers of callers by hand. `limit` lists at most that \
+    many hits, shallowest first, and tests; a cut group keeps its `total` and sets `truncated`, \
+    and `data.limit` gives `omitted_hits` and `omitted_tests`. `reexported` and \
+    `confirm_with_grep` are true when the symbol is re-exported by a `pub use`, as in `callers`.";
 
 pub(crate) const TOP_RANKED: &str = "What matters most in this tree: the best-ranked symbols or \
     files of the index, by PageRank over its calls, trait impls and imports, with each score. \

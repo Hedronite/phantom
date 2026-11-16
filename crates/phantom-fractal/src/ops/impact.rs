@@ -13,8 +13,12 @@ use serde::Serialize;
 
 use super::budget::{self, Shed, Tokens, drop_last};
 use super::distinct::{Distinct, Site};
-use super::lookup::{Names, SymbolOut, current_index, lookup, symbol_out};
+use super::lookup::{Names, Reexport, SymbolOut, current_index, lookup_flagged, symbol_out};
 use super::{Failure, Reply};
+
+/// The smallest and largest `--limit`.
+pub(crate) const LIMIT_MIN: u64 = 1;
+pub(crate) const LIMIT_MAX: u64 = 100;
 
 /// What `impact` is asked for.
 pub(crate) struct ImpactRequest {
@@ -27,6 +31,10 @@ pub(crate) struct ImpactRequest {
     pub(crate) options: ImpactOptions,
     /// Drop `groups` and `tests` from the answer.
     pub(crate) summary: bool,
+    /// The most hits listed over all groups, shallowest first, and the
+    /// most tests, [`LIMIT_MIN`] to [`LIMIT_MAX`]: the command line and the
+    /// MCP tool refuse any other value. Without it nothing is cut.
+    pub(crate) limit: Option<u64>,
     /// The most estimated tokens the reply may cost.
     pub(crate) max_tokens: Option<u64>,
 }
@@ -49,8 +57,25 @@ pub(crate) struct ImpactResult {
     options: OptionsOut,
     #[serde(flatten)]
     distinct: Option<Distinct>,
+    /// Present only when `--limit` was given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit: Option<LimitOut>,
+    /// `reexported` and `confirm_with_grep`, only when the store flags
+    /// the symbol.
+    #[serde(flatten)]
+    reexport: Option<Reexport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tokens: Option<Tokens>,
+}
+
+/// `data.limit` (SPEC-w15 G1b): the `--limit` asked for, and how many hits
+/// and tests it left out of the lists. A group it cut keeps its `total`
+/// and sets `truncated`, as a group cut at its cap of 100 does.
+#[derive(Clone, Copy, Serialize)]
+pub(crate) struct LimitOut {
+    max: u64,
+    omitted_hits: u64,
+    omitted_tests: u64,
 }
 
 /// Under a budget, the deepest group's hits go first, from the end, then
@@ -82,6 +107,11 @@ impl Shed for ImpactResult {
         self.tokens = Some(tokens);
     }
 
+    fn drop_new(&mut self) {
+        self.limit = None;
+        self.reexport = None;
+    }
+
     fn drop_extras(&mut self) {
         let groups = self.groups.iter_mut().flatten();
         for hit in groups.flat_map(|group| &mut group.hits) {
@@ -91,6 +121,8 @@ impl Shed for ImpactResult {
             test.hit.display = None;
         }
         self.distinct = None;
+        self.limit = None;
+        self.reexport = None;
     }
 }
 
@@ -172,10 +204,10 @@ pub(crate) fn impact(request: &ImpactRequest) -> Result<Reply<ImpactResult>, Fai
     }
     budget::check(request.max_tokens)?;
     let (store, names) = current_index(&request.repo)?;
-    let found = lookup(&store, &names, &request.symbol)?;
+    let (found, reexport) = lookup_flagged(&store, &names, &request.symbol)?;
     let options = request.options;
     let answer = phantom_fractal_analyze::impact(&store, found.id, &options)?;
-    let (groups, tests) = if request.summary {
+    let (mut groups, mut tests) = if request.summary {
         (None, None)
     } else {
         let groups = answer
@@ -192,6 +224,9 @@ pub(crate) fn impact(request: &ImpactRequest) -> Result<Reply<ImpactResult>, Fai
         });
         (Some(groups), tests)
     };
+    let limit = request
+        .limit
+        .map(|max| cut(max, groups.as_mut(), tests.as_mut()));
     let distinct = groups.as_ref().map(|groups: &Vec<GroupOut>| {
         let hits = groups.iter().flat_map(|group| &group.hits);
         let tests = tests.iter().flatten().map(|test: &TestOut| &test.hit);
@@ -207,9 +242,44 @@ pub(crate) fn impact(request: &ImpactRequest) -> Result<Reply<ImpactResult>, Fai
         tests,
         options: options_out(&options),
         distinct,
+        limit,
+        reexport,
         tokens: None,
     };
     super::answer(result, &store, &request.repo, request.max_tokens)
+}
+
+/// Keeps at most `max` hits over `groups`, shallowest group first, and at
+/// most `max` of `tests`. A group that loses hits sets `truncated`; its
+/// `total` is unchanged.
+fn cut(max: u64, groups: Option<&mut Vec<GroupOut>>, tests: Option<&mut Vec<TestOut>>) -> LimitOut {
+    let max_len = usize::try_from(max).unwrap_or(usize::MAX);
+    let mut room = max_len;
+    let mut omitted_hits = 0;
+    if let Some(groups) = groups {
+        let mut order: Vec<&mut GroupOut> = groups.iter_mut().collect();
+        order.sort_by_key(|group| group.depth);
+        for group in order {
+            let keep = room.min(group.hits.len());
+            let dropped = group.hits.len() - keep;
+            if dropped > 0 {
+                group.hits.truncate(keep);
+                group.truncated = true;
+                omitted_hits += dropped;
+            }
+            room -= keep;
+        }
+    }
+    let omitted_tests = tests.map_or(0, |tests| {
+        let dropped = tests.len().saturating_sub(max_len);
+        tests.truncate(max_len);
+        dropped
+    });
+    LimitOut {
+        max,
+        omitted_hits: u64::try_from(omitted_hits).unwrap_or(u64::MAX),
+        omitted_tests: u64::try_from(omitted_tests).unwrap_or(u64::MAX),
+    }
 }
 
 pub(crate) fn reason_out(reason: ReasonCount) -> ReasonOut {

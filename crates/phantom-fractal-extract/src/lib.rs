@@ -45,8 +45,9 @@ pub use walk::{Candidate, MAX_FILE_BYTES, SkipReason, Skipped, Walk, is_secret, 
 /// module trees; version 10 places `macro_arg` refs, with their receivers,
 /// hints and shadowing; version 11 adds the return, path-call and
 /// same-file field hints; version 12 adds the `use-glob` edges and the
-/// parse budget.
-pub const EXTRACTOR_VERSION: u32 = 12;
+/// parse budget; version 13 stores the visibility of each `use` row, so a
+/// `pub use` re-export reads differently from a private import.
+pub const EXTRACTOR_VERSION: u32 = 13;
 
 /// What one [`index`] pass did, by repo-relative path, in walk order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

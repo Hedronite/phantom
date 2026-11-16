@@ -344,6 +344,24 @@ fn every_read_tool_matches_the_cli_on_fixtures_impact() {
         ),
         case(
             "impact",
+            json!({ "symbol": "root_fn", "repo": "impact", "limit": 3 }),
+            &["impact", "root_fn", "--repo", "impact", "--limit", "3"],
+        ),
+        case(
+            "impact",
+            json!({ "symbol": "root_fn", "repo": "impact", "limit": 1, "summary": true }),
+            &[
+                "impact",
+                "root_fn",
+                "--repo",
+                "impact",
+                "--limit",
+                "1",
+                "--summary",
+            ],
+        ),
+        case(
+            "impact",
             json!({ "symbol": "absent", "repo": "impact" }),
             &["impact", "absent", "--repo", "impact"],
         ),
@@ -365,6 +383,8 @@ fn every_read_tool_matches_the_cli_on_fixtures_impact() {
         "ambiguous",
         "ok",
         "not_found",
+        "ok",
+        "ok",
         "ok",
         "ok",
         "ok",

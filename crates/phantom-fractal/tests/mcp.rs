@@ -415,6 +415,7 @@ fn tools_list_matches_the_spec_table() {
             &[
                 "depth",
                 "include_tests",
+                "limit",
                 "max_tokens",
                 "min_confidence",
                 "repo",
@@ -603,6 +604,10 @@ fn unknown_tools_and_bad_arguments() {
             ),
             call(20, "impact", json!({ "symbol": "a", "include_tests": 1 })),
             call(21, "impact", json!({ "symbol": "a", "summary": "no" })),
+            call(22, "impact", json!({ "symbol": "a", "limit": 0 })),
+            call(23, "impact", json!({ "symbol": "a", "limit": 101 })),
+            call(24, "impact", json!({ "symbol": "a", "limit": 2.5 })),
+            call(25, "impact", json!({ "symbol": "a", "limit": "3" })),
         ]),
     );
     for reply in &replies[1..5] {
@@ -625,6 +630,10 @@ fn unknown_tools_and_bad_arguments() {
         "min_confidence must be a number above 0 and at most 1",
         "include_tests must be true or false",
         "summary must be true or false",
+        "limit must be an integer from 1 to 100",
+        "limit must be an integer from 1 to 100",
+        "limit must be an integer from 1 to 100",
+        "limit must be an integer from 1 to 100",
     ];
     assert_eq!(replies.len(), 5 + messages.len());
     for (reply, message) in replies[5..].iter().zip(messages) {

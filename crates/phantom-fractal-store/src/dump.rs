@@ -119,6 +119,7 @@ const TABLES: &[(&str, &[&str])] = &[
             "shadowed",
             "alias",
             "glob",
+            "visibility",
         ],
     ),
     (
@@ -352,7 +353,7 @@ fn refs_table_and_keys(
     let raw = query_values(
         conn,
         "SELECT id, file_id, from_symbol, kind, text, last_segment, line, col,
-                receiver_hint, scope, receiver, shadowed, alias, glob
+                receiver_hint, scope, receiver, shadowed, alias, glob, visibility
          FROM refs
          ORDER BY id",
     )?;
@@ -401,6 +402,7 @@ fn refs_table_and_keys(
             row[11].clone(),
             row[12].clone(),
             row[13].clone(),
+            row[14].clone(),
         ]);
     }
     Ok((rows, keys))

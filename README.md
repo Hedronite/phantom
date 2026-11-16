@@ -89,8 +89,8 @@ SYMBOL is one of:
 
 Output names a symbol by its qualified name from `crate`, such as `crate::tests::check`. In a workspace, `crate` is the symbol's own target, and `path` or `symbol_path` says which package it is in. A symbol in an orphan file has no module, so its name starts at its own name or `impl` type.
 
-- No symbol matches: `not_found`, exit 3. `data.did_you_mean` lists up to 10 symbols whose bare name is the query's last segment, each in the shape of an `ambiguous` candidate, or none: `{"did_you_mean":[]}`. The message is unchanged.
-- More than one matches: `ambiguous`, exit 6. The message lists up to 10 candidates with their paths and lines, `data.candidates` holds the same ones, and `data.total` counts them all. Qualify the name further to pick one.
+- No symbol matches: `not_found`, exit 3. `data.did_you_mean` lists up to 10 symbols whose bare name is the query's last segment, each in the shape of an `ambiguous` candidate without its `display`, or none: `{"did_you_mean":[]}`. The message is unchanged.
+- More than one matches: `ambiguous`, exit 6. The message lists up to 10 candidates with their paths and lines, `data.candidates` holds the same ones, and `data.total` counts them all. Each candidate ends with `display`, its file-qualified name such as `src/inner.rs::Pair::new`. Qualify the name further to pick one.
 - The tree has no index, or its index predates call edges: `no_index`, exit 2. Run `index` again.
 
 On success, `data.symbol` is the symbol's qualified name, kind, path, and line. Each entry in `data.hits` is one edge:
@@ -108,7 +108,7 @@ After the hits, three keys answer "which functions, in which files" without coun
 - `files`: the files the other symbols are declared in, distinct and sorted.
 - `sites`: how many hits are listed.
 
-A caller reached only through a re-export or a macro may be missing; confirm with one grep when completeness matters.
+A caller reached only through a re-export or a macro may be missing; confirm with one grep when completeness matters. When the stored rows record a `pub use` of the symbol, `callers` ends `data` with `reexported: true` and `confirm_with_grep: true`, after `sites`: then grep its bare name across crates as well. A symbol not re-exported has neither key, and `callees` never has them.
 
 ```
 $ fract callers util::helper
@@ -228,10 +228,11 @@ Phantom reads source text only. Macros are never expanded: they are counted by n
 - `--min-confidence F`: the lowest path confidence reported, above 0 and at most 1. The default is 0.2.
 - `--no-tests`: leave tests out. `data.tests` is then absent.
 - `--summary`: drop `groups` and `tests`, and keep the rest.
+- `--limit N`: list at most N hits over all groups, shallowest group first and in each group's own order, and at most N tests, 1 to 100. A group it cuts keeps its `total` and sets `truncated`, as one cut at the cap of 100 does; a group cut to nothing stays with empty `hits`. Not with `--diff`.
 
 A value out of range, or one that is not a number, is usage and exits 1.
 
-`data` holds `symbol` (as in [Calls](#calls)), `risk`, `exact`, `reasons`, `counts`, `groups`, `tests`, and `options`, which echoes `depth`, `min_confidence`, and `include_tests`. Then come `callers_distinct`, `files`, and `sites`, as in [Calls](#calls), over the hits and tests listed: each entry groups the reached symbol's `site_line`s, and `files` holds the reached symbols' `path`s. Under `--summary` those three are absent. Every path is relative to the indexed tree.
+`data` holds `symbol` (as in [Calls](#calls)), `risk`, `exact`, `reasons`, `counts`, `groups`, `tests`, and `options`, which echoes `depth`, `min_confidence`, and `include_tests`. Then come `callers_distinct`, `files`, and `sites`, as in [Calls](#calls), over the hits and tests listed: each entry groups the reached symbol's `site_line`s, and `files` holds the reached symbols' `path`s. Under `--summary` those three are absent. With `--limit`, `limit: {max, omitted_hits, omitted_tests}` comes next: the limit, and how many hits and tests it left out of the lists. A symbol re-exported by a `pub use` ends `data` with `reexported` and `confirm_with_grep`, as in [Calls](#calls). Every path is relative to the indexed tree.
 
 ### What is walked
 
@@ -668,9 +669,9 @@ Each index is a directory under the data directory's `repos/`, named `<name>-<ha
 `doctor` checks the install and prints `data: {ok, checks, agents}`. Each check is `{name, ok, detail}`, in this order:
 
 1. `data_dir`: `repos/` and each index directory are private (no group or other bits, and not a link), the data directory is not writable by group or others, and every one of them, and every database file, is owned by the data directory's owner. No data directory yet is fine.
-2. `databases`: each `graph.db`, and its WAL and shared memory when present, is `0600`. Its schema, read from the SQLite header without opening the database, is not newer than this binary's. An older schema is noted, since `index` migrates it.
+2. `databases`: each `graph.db`, and its WAL and shared memory when present, is `0600`. Its schema, read from the SQLite header without opening the database, is not newer than this binary's. An older schema is noted. The detail names `index`, but any command that opens the index migrates it, a read included, once: after that it is at this binary's schema.
 3. `locks`: whether a writer holds each index. A held lock is not a fault.
-4. `extractor`: the extractor version this binary writes, 12.
+4. `extractor`: the extractor version this binary writes, 13.
 5. `grammar`: the tree-sitter-rust version the binary was built with.
 6. `network`: `none: Phantom has no network code`.
 7. `git`: for each index, whether HEAD reads at its stored tree, or why it was not checked. Only a HEAD that cannot be read is a fault.
@@ -715,7 +716,7 @@ The server is read-only by default. It offers these tools:
 | `show_symbol` | exactly one of `symbol?` and `id?`; `repo?`; `source?`, default false; `max_tokens?` | `show` |
 | `callers` | `symbol`, `repo?`, `max_tokens?` | `callers` |
 | `callees` | `symbol`, `repo?`, `max_tokens?` | `callees` |
-| `impact` | `symbol`, `repo?`, `depth?` (1 to 5, default 3), `min_confidence?` (above 0 and at most 1, default 0.2), `include_tests?` (default true), `summary?` (default false), `max_tokens?` | `impact` |
+| `impact` | `symbol`, `repo?`, `depth?` (1 to 5, default 3), `min_confidence?` (above 0 and at most 1, default 0.2), `include_tests?` (default true), `summary?` (default false), `limit?` (1 to 100), `max_tokens?` | `impact` |
 | `top_ranked` | `kind?` (`symbols` or `files`, default `symbols`), `focus?` (an array of at most 100 paths), `limit?` (1 to 100, default 20), `repo?`, `max_tokens?` | `rank` |
 | `repo_map` | `budget` (1 to 100000), `focus?` (an array of at most 100 paths), `detail?` (`files`, `symbols`, or `full`, default `symbols`), `repo?` | `map` |
 | `cochange` | `file`, `mode?` (`decayed` or `count`, default `decayed`), `min_lift?` (0 to 1000, default 1.5; `decayed` only), `limit?` (1 to 100, default 20), `repo?`, `max_tokens?` | `cochange`, or with `mode: "count"` `cochange --count` |
@@ -749,9 +750,9 @@ The server is read-only by default. It offers these tools:
   - `impact --diff`: as `impact`, within `impact`, then `files_only` and `changed` from the end;
   - `show`: `source` as a whole, then the `cochange` partners, the callees' hits, the callers' hits, and the members' hits, each from the end.
 
-  Before any of these, `callers`, `callees`, and `impact` drop the keys added beside the old ones, as a whole: each hit's `display`, and `callers_distinct`, `files`, and `sites`. A reply that fits with them keeps them all; one that does not loses them all and is then cut exactly as it was before they existed. They are not counted in `omitted`.
+  Before any of these, `callers`, `callees`, and `impact` drop the keys added beside the old ones, in two stages, each as a whole. First go the newest: `impact`'s `limit` and the `reexported` and `confirm_with_grep` flags. A reply that fits without them is exactly the reply it was before they existed. Then go each hit's `display`, and `callers_distinct`, `files`, and `sites`; a reply that fits without those either is then cut exactly as it was before any of them existed. None is counted in `omitted`.
 
-  The target symbol, the counts, `risk`, `exact`, `reasons`, the groups themselves, and every `truncated` flag stay. `truncated` still says only whether the command's own cap cut the list.
+  The target symbol, the counts, `risk`, `exact`, `reasons`, the groups themselves, and every `truncated` flag stay. `truncated` still says only whether the command's own cap, or `impact --limit`, cut the list.
 - **`data.tokens`:** with a budget, `data` ends with `tokens: {max, used, omitted}`. `max` is the budget, `used` is the estimate of the printed line, `tokens` and `meta` included, and `omitted` counts the entries dropped. Without a budget there is no `tokens` key, and `data` is byte for byte what it was.
 - **Too small:** when the reply does not fit even with every list empty, the result is `usage`, exit 1, with a message that starts `budget_too_small:`.
 - An error envelope, such as `not_found` or `ambiguous`, is never cut and carries no `tokens`.
@@ -847,7 +848,7 @@ exec ssh lab phantom-fractal "$@"
 
 ```markdown
 ## Phantom
-This tree has a Phantom index: for callers, impact, call paths and where a name is defined, use the `phantom` skill (`nu .agents/skills/phantom/phantom.nu …`, or `phantomq`) before grep.
+This tree has a Phantom index: for callers, impact, call paths, where a name is defined, and which files change together, use the `phantom` skill (`nu .agents/skills/phantom/phantom.nu …`, or `phantomq`) before grep. Read its SKILL.md first (`nu phantom.nu help` prints the command table).
 ```
 
 ### Over MCP
@@ -883,7 +884,7 @@ The answers are heuristic. Only resolved calls, trait impls, and imports are edg
 `phantom-fractal version` prints one line and exits 0:
 
 ```
-{"ok":true,"data":{"name":"phantom-fractal","version":"0.0.0","git_sha":"<40 lowercase hex, or null>","extractor_version":12,"store_schema":3},"error":null,"schema":1}
+{"ok":true,"data":{"name":"phantom-fractal","version":"0.0.0","git_sha":"<40 lowercase hex, or null>","extractor_version":13,"store_schema":4},"error":null,"schema":1}
 ```
 
 `phantom-fractal --json version`, `phantom-fractal version --json`, and `fract version` print the same line. `data` holds these fields, in this order:
@@ -893,8 +894,8 @@ The answers are heuristic. Only resolved calls, trait impls, and imports are edg
 | `name` | `phantom-fractal`, under `fract` too |
 | `version` | the CLI crate's version, `0.0.0` |
 | `git_sha` | the commit the binary was built from, as 40 lowercase hex characters, or `null` when unknown |
-| `extractor_version` | the extractor version the binary writes, 12 |
-| `store_schema` | the store schema version the binary writes, 3 |
+| `extractor_version` | the extractor version the binary writes, 13 |
+| `store_schema` | the store schema version the binary writes, 4 |
 
 `git_sha` is fixed at build time. `PHANTOM_FRACTAL_GIT_SHA`, when it holds 40 hex characters, sets it, for packagers. Otherwise it is the output of `git rev-parse HEAD` in the CLI crate's directory. With no git, no `.git` (as in a crates.io tarball), or a refused repository, it is `null`, and the build still succeeds.
 

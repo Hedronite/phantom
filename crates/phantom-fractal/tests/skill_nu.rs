@@ -109,8 +109,27 @@ impl Fixture {
         }
     }
 
-    /// The exit code and the one envelope line `phantom.nu ARGS` prints.
+    /// The exit code and the one envelope line `phantom.nu ARGS` prints,
+    /// whose `command` is the first argument.
     fn run_with(&self, bin: &Bin, cwd: &Path, args: &[&str]) -> (i32, Value) {
+        self.run_as(bin, cwd, args, args.first().copied().unwrap_or(""))
+    }
+
+    /// As `run_with`, for an envelope whose `command` is `command`. A
+    /// success carries `exit: 0` as its last key.
+    fn run_as(&self, bin: &Bin, cwd: &Path, args: &[&str], command: &str) -> (i32, Value) {
+        let (code, envelope, _) = self.run_line(bin, cwd, args, command);
+        (code, envelope)
+    }
+
+    /// As `run_as`, with the line as printed, keys in their printed order.
+    fn run_line(
+        &self,
+        bin: &Bin,
+        cwd: &Path,
+        args: &[&str],
+        command: &str,
+    ) -> (i32, Value, String) {
         let mut cmd = Command::new(&self.nu);
         cmd.arg("--no-config-file")
             .arg(script())
@@ -142,12 +161,14 @@ impl Fixture {
             i64::from(code),
             "{stdout}"
         );
-        assert_eq!(
-            envelope["command"],
-            args.first().copied().unwrap_or(""),
-            "{stdout}"
-        );
-        (code, envelope)
+        assert_eq!(envelope["command"], command, "{stdout}");
+        if envelope["ok"] == true {
+            assert!(
+                stdout.trim_end().ends_with(r#","exit":0}"#),
+                "a success ends with exit 0: {stdout}"
+            );
+        }
+        (code, envelope, stdout)
     }
 
     fn run(&self, args: &[&str]) -> (i32, Value) {
@@ -318,7 +339,6 @@ fn usage_errors_are_envelopes_and_run_nothing() {
         &["cochange", "--count", "--min-lift=1", "src/a.rs"],
         &["map", "--budget", "big"],
         &["rank", "extra"],
-        &["status", "--help"],
         &["index", "a", "b"],
     ] {
         fx.fails(&nowhere, args, "usage", 1);
@@ -602,4 +622,307 @@ fn index_runs_through_the_skill() {
     let again = fx.ok(&["index", "."]);
     assert_eq!(again["written"], 0, "{again}");
     assert_eq!(support::snapshot(&fx.repo), tree, "index wrote the tree");
+}
+
+/// The first word of each usage `help` lists, in order.
+const HELP_COMMANDS: &[&str] = &[
+    "where",
+    "callers",
+    "callees",
+    "impact",
+    "diff-impact",
+    "path",
+    "cochange",
+    "map",
+    "rank",
+    "show",
+    "status",
+    "index",
+];
+
+#[test]
+fn help_prints_the_command_table_and_runs_nothing() {
+    let Some(nu) = nu() else { return };
+    let fx = Fixture::dogfood(nu);
+    // A run would be `missing_phantom`, exit 127: help proves none started.
+    let nowhere = Bin::Override(fx.tmp.path().join("nowhere"));
+    let (code, table) = fx.run_as(&nowhere, &fx.repo, &["help"], "help");
+    assert_eq!((code, &table["ok"]), (0, &json!(true)), "{table}");
+    let usages: Vec<&str> = table["data"]["commands"]
+        .as_array()
+        .expect("commands")
+        .iter()
+        .map(|row| row["usage"].as_str().expect("usage"))
+        .collect();
+    let mut heads: Vec<&str> = usages
+        .iter()
+        .map(|usage| usage.split(' ').next().expect("a word"))
+        .collect();
+    heads.dedup();
+    assert_eq!(heads, HELP_COMMANDS, "{table}");
+    assert!(
+        usages.contains(&"impact NAME [--depth 1..5] [--limit N] [--no-tests]"),
+        "{table}"
+    );
+    for key in ["flags", "names", "envelope", "read"] {
+        assert!(table["data"][key].as_str().is_some(), "{key}: {table}");
+    }
+    // One line a harness raised to 8192 columns shows whole.
+    assert!(table.to_string().len() < 8192, "{table}");
+
+    for args in [
+        &["--help"][..],
+        &["-h"],
+        &["callers", "--help"],
+        &["impact", "x", "-h"],
+        &["status", "--help"],
+        &["--repo", "elsewhere", "--help"],
+        &["help", "where"],
+    ] {
+        let (code, again) = fx.run_as(&nowhere, &fx.repo, args, "help");
+        assert_eq!((code, &again), (0, &table), "{args:?}");
+    }
+    // After `--`, `--help` is a name.
+    fx.fails(&Bin::OnPath, &["callers", "--", "--help"], "not_found", 3);
+}
+
+#[test]
+fn global_flags_may_come_before_the_command() {
+    let Some(nu) = nu() else { return };
+    let fx = Fixture::dogfood(nu);
+    let repo = fx.repo.to_str().expect("utf-8");
+    let joined = format!("--repo={repo}");
+    let elsewhere = fx.tmp.path().join("home");
+    let pairs: [(&[&str], &[&str]); 5] = [
+        (
+            &["--repo", repo, "where", "build"],
+            &["where", "--repo", repo, "build"],
+        ),
+        (&[&joined, "status"], &["status", &joined]),
+        (
+            &["--repo", repo, "--limit", "1", "callers", "fixture_data"],
+            &["callers", "fixture_data", "--limit", "1", "--repo", repo],
+        ),
+        (
+            &[
+                "--depth",
+                "2",
+                "--repo",
+                repo,
+                "impact",
+                "--no-tests",
+                "build",
+            ],
+            &[
+                "impact",
+                "--no-tests",
+                "--depth",
+                "2",
+                "--repo",
+                repo,
+                "build",
+            ],
+        ),
+        (
+            &["--repo", repo, "path", "entry", "build"],
+            &["path", "entry", "build", "--repo", repo],
+        ),
+    ];
+    for (before, after) in pairs {
+        let command = after[0];
+        let (code, lead) = fx.run_as(&Bin::OnPath, &elsewhere, before, command);
+        let (again, tail) = fx.run_as(&Bin::OnPath, &elsewhere, after, command);
+        assert_eq!((code, again), (0, 0), "{lead}\n{tail}");
+        assert_eq!(lead, tail, "{before:?}");
+    }
+
+    // Usage errors run nothing: a run would be `missing_phantom`.
+    let nowhere = Bin::Override(fx.tmp.path().join("nowhere"));
+    for (args, command) in [
+        (&["--depth", "2", "where", "build"][..], "where"),
+        (&["--limit", "1", "bogus"], "bogus"),
+        (&["--repo"], ""),
+        (&["--repo", repo], ""),
+        (&["--bogus", "where", "build"], ""),
+        (&["--", "where", "build"], ""),
+    ] {
+        let (code, envelope) = fx.run_as(&nowhere, &fx.repo, args, command);
+        assert_eq!(
+            (code, envelope["kind"].as_str()),
+            (1, Some("usage")),
+            "{args:?}: {envelope}"
+        );
+    }
+}
+
+/// A copy of `fixtures/impact`, indexed: `root_fn` has 5 callers at depth
+/// 1, 2 at depth 2, 1 at depth 3, and 2 tests.
+fn impact_fixture(nu: PathBuf) -> Fixture {
+    let fixture = Fixture::empty(nu, "skill-nu-impact");
+    support::copy_fixture("impact", &fixture.repo);
+    fixture.index(&fixture.repo);
+    fixture
+}
+
+fn totals(data: &Value) -> Vec<&Value> {
+    data["by_depth"]
+        .as_array()
+        .expect("by_depth")
+        .iter()
+        .map(|group| &group["total"])
+        .collect()
+}
+
+fn kept(data: &Value) -> usize {
+    data["by_depth"]
+        .as_array()
+        .expect("by_depth")
+        .iter()
+        .map(|group| group["callers"].as_array().expect("callers").len())
+        .sum()
+}
+
+#[test]
+fn impact_limit_passes_through_and_counts_what_it_cut() {
+    let Some(nu) = nu() else { return };
+    let fx = impact_fixture(nu);
+    let all = fx.ok(&["impact", "--no-tests", "root_fn"]);
+    assert!(all.get("limit").is_none(), "no limit, no key: {all}");
+    assert_eq!(kept(&all), 8, "{all}");
+
+    let cut = fx.ok(&["impact", "--no-tests", "--limit", "2", "root_fn"]);
+    assert_eq!(totals(&cut), totals(&all), "cut groups keep their totals");
+    assert_eq!(kept(&cut), 2, "{cut}");
+    assert_eq!(
+        displays(&cut["by_depth"][0]["callers"]),
+        ["app/src/main.rs::run", "app/src/main.rs::report"],
+        "the shallowest first"
+    );
+    for group in cut["by_depth"].as_array().expect("by_depth") {
+        assert_eq!(group["truncated"], true, "{group}");
+    }
+    assert_eq!(
+        cut["limit"],
+        json!({"max": 2, "omitted_hits": 6, "omitted_tests": 0})
+    );
+    let (code, lead) = fx.run_as(
+        &Bin::OnPath,
+        &fx.repo,
+        &["--limit", "2", "impact", "--no-tests", "root_fn"],
+        "impact",
+    );
+    assert_eq!(
+        (code, &lead["data"]),
+        (0, &cut),
+        "--limit before the command"
+    );
+
+    let (_, _, line) = fx.run_line(
+        &Bin::OnPath,
+        &fx.repo,
+        &["impact", "--limit", "2", "root_fn"],
+        "impact",
+    );
+    assert!(
+        line.contains(r#""files":["app/src/main.rs","engine/src/tests.rs"],"limit":{"#),
+        "limit follows the W14 keys: {line}"
+    );
+
+    let tests = fx.ok(&["impact", "--limit=1", "root_fn"]);
+    assert_eq!(tests["tests"].as_array().map(Vec::len), Some(1), "{tests}");
+    assert_eq!(tests["limit"]["omitted_tests"], 1, "{tests}");
+
+    // The skill refuses a non-number and runs nothing; the CLI's range is its own.
+    let nowhere = Bin::Override(fx.tmp.path().join("nowhere"));
+    for args in [
+        &["impact", "--limit", "0", "root_fn"][..],
+        &["impact", "--limit", "two", "root_fn"],
+        &["diff-impact", "--limit", "1"],
+    ] {
+        fx.fails(&nowhere, args, "usage", 1);
+    }
+    fx.fails(
+        &Bin::OnPath,
+        &["impact", "--limit", "101", "root_fn"],
+        "usage",
+        1,
+    );
+}
+
+#[test]
+fn a_display_from_any_reply_is_a_name() {
+    let Some(nu) = nu() else { return };
+    let fx = Fixture::dogfood(nu);
+    let ambiguous = fx.fails(&Bin::OnPath, &["callers", "twin"], "ambiguous", 6);
+    let listed = fx.ok(&["where", "twin"]);
+    let mut seen = Vec::new();
+    for (matched, hit) in ambiguous["matches"]
+        .as_array()
+        .expect("matches")
+        .iter()
+        .zip(listed["hits"].as_array().expect("hits"))
+    {
+        assert_eq!(matched["name"], hit["name"], "the same order");
+        for display in [&matched["display"], &hit["display"]] {
+            let name = display.as_str().expect("display");
+            for command in ["callers", "impact", "show"] {
+                let data = fx.ok(&[command, name]);
+                assert_eq!(data["symbol"]["name"], matched["name"], "{command} {name}");
+            }
+            let again = fx.ok(&["where", name]);
+            assert_eq!(again["hits"][0]["display"], hit["display"], "{name}");
+            seen.push(name.to_owned());
+        }
+    }
+    assert_eq!(
+        seen,
+        [
+            "src/alt.rs::twin",
+            "src/alt.rs:1 twin",
+            "src/model.rs::twin",
+            "src/model.rs:5 twin"
+        ]
+    );
+    let data = fx.ok(&["where", "src/model.rs:14 Gadget::new"]);
+    assert_eq!(data["hits"][0]["name"], "crate::model::Gadget::new");
+    let data = fx.ok(&["path", "src/lib.rs:15 entry", "src/model.rs::build"]);
+    assert_eq!(data["route"], "src/lib.rs::entry -> src/model.rs::build");
+    // A line that names nothing there is still not found.
+    fx.fails(
+        &Bin::OnPath,
+        &["callers", "src/alt.rs:1 nope"],
+        "not_found",
+        3,
+    );
+}
+
+#[test]
+fn a_reexported_target_carries_the_grep_flag() {
+    let Some(nu) = nu() else { return };
+    let fx = Fixture::dogfood(nu);
+    // `mid` and `prelude` both `pub use` the model's `Gadget`.
+    for command in ["callers", "impact"] {
+        let (code, envelope, line) =
+            fx.run_line(&Bin::OnPath, &fx.repo, &[command, "Gadget"], command);
+        assert_eq!(code, 0, "{envelope}");
+        assert_eq!(
+            (
+                &envelope["data"]["reexported"],
+                &envelope["data"]["confirm_with_grep"]
+            ),
+            (&json!(true), &json!(true)),
+            "{envelope}"
+        );
+        assert!(
+            line.contains(r#","reexported":true,"confirm_with_grep":true},"meta":"#),
+            "the flags end data: {line}"
+        );
+        for name in ["build", "fixture_data"] {
+            let data = fx.ok(&[command, name]);
+            assert!(data.get("reexported").is_none(), "{command} {name}: {data}");
+            assert!(data.get("confirm_with_grep").is_none(), "{data}");
+        }
+    }
+    let data = fx.ok(&["callees", "entry"]);
+    assert!(data.get("reexported").is_none(), "{data}");
 }
