@@ -39,7 +39,7 @@ nu phantom.nu map [--budget 1500] [--focus PATH]...     # orient: ranked files a
 nu phantom.nu rank [--files] [--limit 20] [--focus PATH]...
 nu phantom.nu show NAME [--source]       # one symbol: signature, docs, members, grouped callers and callees
 nu phantom.nu status                     # is the index current, and what changed since
-nu phantom.nu index [PATH]               # writes the index; run only when a human asked
+nu phantom.nu index [PATH]               # builds or refreshes the index in Phantom's own data directory, never the repo; run it when there is none or status says stale
 ```
 
 Flags: `--repo`, `--limit` and `--depth` may come before or after the
