@@ -17,8 +17,8 @@ pub(crate) const INSTRUCTIONS: &str = "Phantom answers questions about a Rust tr
 - Names: a bare name such as parse, Type::method such as App::watch_dir, or a module path such as tui::app::App::watch_dir or app::watch_dir.
 - On ambiguous, pick a candidate and call show_symbol with its stable_key as id. On not_found, read did_you_mean.
 - A caller reached only through a re-export or a macro may be missing: confirm with one grep when completeness matters.
-- Is the index current: every result's meta.stale; repo_status says what changed. Ask the user to run phantom-fractal index . when it matters.
-- On no_index, the repo is not an indexed root of this server: ask the user to index it or to add --root.
+- Is the index current: every result's meta.stale; repo_status says what changed. When it matters, refresh it: index_repo if offered, or phantom-fractal index .
+- On no_index, the repo is not an indexed root of this server: index a root with index_repo or phantom-fractal index .; another tree needs the server started with --root.
 - Pass max_tokens to cap a long answer; data.tokens.omitted says how many entries were dropped.
 - Read confidence, reason, exact, reasons and unresolved_calls before trusting an answer; a missing caller is unknown, not proof.
 - Every result is the command line's JSON envelope, with paths relative to the indexed tree.
@@ -103,9 +103,11 @@ pub(crate) const REPOS: &str = "Which trees can this server answer for: this ser
     have an index, each with its key, its tree's directory name, whether it is stale, and its \
     file and symbol counts, by key. No path is given.";
 
-pub(crate) const INDEX_REPO: &str = "Build or refresh the index, only when the user asks for it: \
-    index the Rust files under `path` and resolve their calls. The index is written to the data \
-    directory, never under `path`. A second run with nothing changed writes nothing.";
+pub(crate) const INDEX_REPO: &str = "Build or refresh the index: whenever it is missing \
+    (`no_index`) or stale (`meta.stale`), or to make it current. It indexes the Rust files under \
+    `path` and resolves their calls. The index is written only to Phantom's own data directory, \
+    never under `path` or anywhere in the repository. A second run with nothing changed writes \
+    nothing.";
 
 #[cfg(test)]
 mod tests {
