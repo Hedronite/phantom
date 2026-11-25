@@ -841,14 +841,12 @@ exec nu "$HOME/.agents/skills/phantom/phantom.nu" "$@"
 
 Then `phantomq callers app::watch_dir` is the whole call. A harness's allow list can name `phantomq` instead of a whole MCP server.
 
-**`$PHANTOM_FRACTAL_BIN`** names the program the skill runs instead of `phantom-fractal` on `PATH`. On a machine that should not hold the binary or the index, point it at a shim that runs `phantom-fractal` where they are:
+**`$PHANTOM_FRACTAL_BIN`** names the program the skill runs instead of `phantom-fractal` on `PATH`. On a machine that should not hold the binary or the index, point it at [`scripts/phantom-fractal-tower`](scripts/phantom-fractal-tower), which single-quotes every argument over `ssh` so shell metacharacters never execute remotely and refuses unmapped local absolute or `..` `--repo` paths before invoking `ssh`. Configure it via environment variables:
 
-```sh
-#!/bin/sh
-exec ssh lab phantom-fractal "$@"
-```
-
-`ssh` hands the arguments to the remote shell, which splits and expands them again, so use such a shim only with names and paths that have no spaces or shell characters. `--repo` then names a tree on that machine.
+- `PHANTOM_SSH_HOST` (required): remote SSH target host (its remote login shell must be POSIX: `sh`, `bash`, `zsh`, `dash`, or `ksh`; backslashes are refused so `fish` cannot reopen single quotes).
+- `PHANTOM_REMOTE_BIN`: remote `phantom-fractal` binary (default: `phantom-fractal`).
+- `PHANTOM_REMOTE_DATA_DIR`: optional remote `PHANTOM_FRACTAL_DATA` directory.
+- `PHANTOM_REMOTE_REPO` / `PHANTOM_LOCAL_REPO`: optional remote repo root and local prefix to map `--repo` paths safely.
 
 **An indexed repository** can point its agents at the skill with this block in its `AGENTS.md` (and a `CLAUDE.md` of `@AGENTS.md` for Claude Code). It is written to be enough on its own, so an agent's first call can be the question:
 

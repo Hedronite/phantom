@@ -4,6 +4,8 @@ set -eu
 # Safe-quoted SSH shim for running phantom-fractal on a remote host.
 # Every argument is single-quoted so shell metacharacters never execute
 # remotely and arrive at the remote binary as single literal argv tokens.
+# The remote login shell must be POSIX (sh, bash, zsh, dash, ksh);
+# backslashes are refused so fish cannot reopen single quotes.
 #
 # Environment:
 #   PHANTOM_SSH_HOST         Required remote SSH target host.
@@ -15,6 +17,14 @@ set -eu
 die() {
   printf '%s\n' "phantom-fractal-ssh: $1" >&2
   exit 1
+}
+
+reject_backslash() {
+  case $1 in
+    *\\*)
+      die "refused $2 containing '\\' (POSIX remote login shell required)"
+      ;;
+  esac
 }
 
 sh_quote() {
@@ -117,9 +127,11 @@ remote_bin=${PHANTOM_REMOTE_BIN-phantom-fractal}
 if [ -z "$remote_bin" ]; then
   die "PHANTOM_REMOTE_BIN must not be empty"
 fi
+reject_backslash "$remote_bin" "PHANTOM_REMOTE_BIN"
 
 remote_cmd=""
 if [ -n "${PHANTOM_REMOTE_DATA_DIR-}" ]; then
+  reject_backslash "$PHANTOM_REMOTE_DATA_DIR" "PHANTOM_REMOTE_DATA_DIR"
   remote_cmd="PHANTOM_FRACTAL_DATA=$(sh_quote "$PHANTOM_REMOTE_DATA_DIR") "
 fi
 remote_cmd="${remote_cmd}exec $(sh_quote "$remote_bin")"
@@ -127,8 +139,10 @@ remote_cmd="${remote_cmd}exec $(sh_quote "$remote_bin")"
 after_double_dash=0
 expect_repo_val=0
 for arg in "$@"; do
+  reject_backslash "$arg" "argument"
   if [ "$expect_repo_val" -eq 1 ]; then
     mapped=$(validate_and_map_repo "$arg")
+    reject_backslash "$mapped" "--repo path"
     remote_cmd="$remote_cmd $(sh_quote "$mapped")"
     expect_repo_val=0
     continue
@@ -148,6 +162,7 @@ for arg in "$@"; do
       --repo=*)
         _val=${arg#--repo=}
         mapped=$(validate_and_map_repo "$_val")
+        reject_backslash "$mapped" "--repo path"
         remote_cmd="$remote_cmd $(sh_quote "--repo=$mapped")"
         continue
         ;;

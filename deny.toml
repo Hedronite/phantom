@@ -2,9 +2,17 @@
 
 [advisories]
 yanked = "deny"
-# ignore = [
-#   { id = "RUSTSEC-0000-0000", reason = "dev-only; tracked in rust-tops.yaml exemptions" },
-# ]
+ignore = [
+  { id = "RUSTSEC-2026-0574", reason = "transitive heapless 0.8.0 via faster-hex 0.10.1 <- gix-hash 0.28.1 <- gix 0.89.0; >=0.9.4 major bump unavailable via faster-hex, and Phantom only encodes hashes via faster-hex without calling heapless data structures" },
+  { id = "RUSTSEC-2026-0575", reason = "transitive heapless 0.8.0 via faster-hex 0.10.1 <- gix-hash 0.28.1 <- gix 0.89.0; >=0.9.4 major bump unavailable via faster-hex, and Phantom only encodes hashes via faster-hex without calling heapless data structures" },
+  { id = "RUSTSEC-2026-0576", reason = "transitive heapless 0.8.0 via faster-hex 0.10.1 <- gix-hash 0.28.1 <- gix 0.89.0; >=0.9.4 major bump unavailable via faster-hex, and Phantom only encodes hashes via faster-hex without calling heapless data structures" },
+  { id = "RUSTSEC-2026-0577", reason = "transitive heapless 0.8.0 via faster-hex 0.10.1 <- gix-hash 0.28.1 <- gix 0.89.0; >=0.9.4 major bump unavailable via faster-hex, and Phantom only encodes hashes via faster-hex without calling heapless data structures" },
+  { id = "RUSTSEC-2026-0578", reason = "transitive heapless 0.8.0 via faster-hex 0.10.1 <- gix-hash 0.28.1 <- gix 0.89.0; >=0.9.4 major bump unavailable via faster-hex, and Phantom only encodes hashes via faster-hex without calling heapless data structures" },
+  { id = "RUSTSEC-2026-0579", reason = "transitive heapless 0.8.0 via faster-hex 0.10.1 <- gix-hash 0.28.1 <- gix 0.89.0; >=0.9.4 major bump unavailable via faster-hex, and Phantom only encodes hashes via faster-hex without calling heapless data structures" },
+  { id = "RUSTSEC-2026-0580", reason = "transitive heapless 0.8.0 via faster-hex 0.10.1 <- gix-hash 0.28.1 <- gix 0.89.0; >=0.9.4 major bump unavailable via faster-hex, and Phantom only encodes hashes via faster-hex without calling heapless data structures" },
+  { id = "RUSTSEC-2026-0581", reason = "transitive heapless 0.8.0 via faster-hex 0.10.1 <- gix-hash 0.28.1 <- gix 0.89.0; >=0.9.4 major bump unavailable via faster-hex, and Phantom only encodes hashes via faster-hex without calling heapless data structures" },
+  { id = "RUSTSEC-2026-0582", reason = "transitive heapless 0.8.0 via faster-hex 0.10.1 <- gix-hash 0.28.1 <- gix 0.89.0; >=0.9.4 major bump unavailable via faster-hex, and Phantom only encodes hashes via faster-hex without calling heapless data structures" },
+]
 
 [licenses]
 allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib"]
