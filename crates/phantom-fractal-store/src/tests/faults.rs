@@ -91,11 +91,15 @@ fn every_read_surfaces_a_failing_statement() {
     surfaces(1, || s.map_rows().map(|_| ()));
     surfaces(1, || s.edges_of_kind("call").map(|_| ()));
     surfaces(1, || s.symbols_matching("alpha").map(|_| ()));
-    // The exact spellings, then the method fallback: two statements for
-    // a qualified name the exact forms do not answer.
-    surfaces(2, || s.symbols_matching("ghost::alpha").map(|_| ()));
-    // A file-shaped miss runs the display spelling as a third statement.
-    surfaces(3, || s.symbols_matching("ghost.rs::alpha").map(|_| ()));
+    // Exact, method fallback, then package-alias target scan: three statements
+    // when the prefix does not name a stored package or target.
+    surfaces(3, || s.symbols_matching("ghost::alpha").map(|_| ()));
+    // A file-shaped miss also checks display before the alias target scan.
+    surfaces(4, || s.symbols_matching("ghost.rs::alpha").map(|_| ()));
+    // A matching package prefix runs scoped exact and scoped method as well.
+    surfaces(5, || s.symbols_matching("sample::sub::missing").map(|_| ()));
+    surfaces(1, || s.symbols_at_line("src/a.rs", 1).map(|_| ()));
+    surfaces(1, || s.did_you_mean("src/a.rs:1").map(|_| ()));
     surfaces(1, || s.use_reexports().map(|_| ()));
     surfaces(1, || s.is_reexported(1).map(|_| ()));
     surfaces(1, || s.callers(1).map(|_| ()));

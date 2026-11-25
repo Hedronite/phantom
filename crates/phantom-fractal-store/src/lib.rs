@@ -14,6 +14,7 @@
 //! [`Store::resolve_input`], [`Store::replace_edges`], and the caller
 //! counters) serves the resolver on top of the same rows.
 
+mod alias;
 mod cochange;
 mod detail;
 mod dirs;
@@ -37,6 +38,7 @@ use phantom_fractal_lang::{ExtractError, Item, Language};
 use rusqlite::config::DbConfig;
 use rusqlite::{Connection, OpenFlags};
 
+pub use crate::alias::{AliasRewrite, IndexState, PackageAlias, PathLine, parse_path_line};
 pub use crate::cochange::{CochangeGroup, CochangePartner, CochangeScan, FileRow, PairRow};
 pub use crate::detail::SymbolDetail;
 pub use crate::graph::{CallHit, EdgeRow, FindRow, Package, SymbolMatch};
@@ -113,6 +115,8 @@ pub enum StoreError {
         /// Flags the reset was called with.
         flags: usize,
     },
+    /// Resolving a `path:line` query was refused because the index is stale.
+    StalePathLine,
 }
 
 impl std::fmt::Display for StoreError {
@@ -161,6 +165,9 @@ impl std::fmt::Display for StoreError {
                     "{flags} own test flags do not match the file's {stored} symbols"
                 )
             }
+            Self::StalePathLine => {
+                f.write_str("index is stale; run index before resolving path:line")
+            }
         }
     }
 }
@@ -191,6 +198,7 @@ pub struct Store {
     ///
     /// [`read_only_still_valid`]: Self::read_only_still_valid
     read_only_path: Option<std::path::PathBuf>,
+    batch_depth: usize,
 }
 
 impl Store {
@@ -227,6 +235,7 @@ impl Store {
         Ok(Self {
             conn,
             read_only_path: None,
+            batch_depth: 0,
         })
     }
 
@@ -238,6 +247,7 @@ impl Store {
         Ok(Self {
             conn,
             read_only_path: None,
+            batch_depth: 0,
         })
     }
 
@@ -317,6 +327,7 @@ impl Store {
         Ok(Self {
             conn,
             read_only_path: Some(path.to_path_buf()),
+            batch_depth: 0,
         })
     }
 
@@ -362,8 +373,69 @@ impl Store {
     /// Deletes the rows stored for `path` and the file row, with every
     /// edge that named its symbols. `Ok(true)` when a row was deleted,
     /// `Ok(false)` when `path` had none.
+    /// Runs `op` inside one atomic SQLite transaction (or nested savepoint)
+    /// so a mid-batch failure or interruption rolls back every write together.
+    pub fn atomic_batch<T, E>(&mut self, op: impl FnOnce(&mut Self) -> Result<T, E>) -> Result<T, E>
+    where
+        E: From<StoreError>,
+    {
+        let depth = self.batch_depth;
+        self.begin_batch(depth)?;
+        self.batch_depth = depth + 1;
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op(self)));
+        self.batch_depth = depth;
+        match outcome {
+            Ok(Ok(value)) => {
+                self.commit_batch(depth)?;
+                Ok(value)
+            }
+            Ok(Err(err)) => {
+                let _ = self.rollback_batch(depth);
+                Err(err)
+            }
+            Err(payload) => {
+                let _ = self.rollback_batch(depth);
+                std::panic::resume_unwind(payload);
+            }
+        }
+    }
+
+    fn begin_batch(&self, depth: usize) -> Result<(), StoreError> {
+        if depth == 0 {
+            self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        } else {
+            self.conn
+                .execute_batch(&format!("SAVEPOINT phantom_batch_{depth}"))?;
+        }
+        Ok(())
+    }
+
+    fn commit_batch(&self, depth: usize) -> Result<(), StoreError> {
+        if depth == 0 {
+            self.conn.execute_batch("COMMIT")?;
+        } else {
+            self.conn
+                .execute_batch(&format!("RELEASE phantom_batch_{depth}"))?;
+        }
+        Ok(())
+    }
+
+    fn rollback_batch(&self, depth: usize) -> Result<(), StoreError> {
+        if depth == 0 {
+            self.conn.execute_batch("ROLLBACK")?;
+        } else {
+            self.conn.execute_batch(&format!(
+                "ROLLBACK TO phantom_batch_{depth}; RELEASE phantom_batch_{depth}"
+            ))?;
+        }
+        Ok(())
+    }
+
     pub fn remove_file(&mut self, path: &str) -> Result<bool, StoreError> {
-        rows::delete_file_rows(&self.conn, path)
+        let sp = self.conn.savepoint()?;
+        let removed = rows::delete_file_rows(&sp, path)?;
+        sp.commit()?;
+        Ok(removed)
     }
 
     /// Every stored repo-relative path, sorted.

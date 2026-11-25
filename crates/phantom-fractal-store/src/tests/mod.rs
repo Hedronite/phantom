@@ -10,6 +10,7 @@ use std::process;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::UNIX_EPOCH;
 
+mod alias;
 mod cochange;
 mod defects;
 mod detail;

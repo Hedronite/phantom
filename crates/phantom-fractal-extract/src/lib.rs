@@ -23,7 +23,7 @@ use std::path::Path;
 use phantom_fractal_git::GitError;
 use phantom_fractal_lang::{Edge, Reason, ResolveCounts};
 use phantom_fractal_lang_rust::RustLanguage;
-use phantom_fractal_store::{Store, StoreError};
+use phantom_fractal_store::{IndexState, Store, StoreError, SymbolMatch, parse_path_line};
 
 use fingerprint::{Unread, read_manifests, stamp};
 
@@ -203,71 +203,93 @@ impl From<StoreError> for IndexError {
 /// The fingerprint covers every walked `Cargo.toml`, and every `.rs` file
 /// the walk or the read skipped or that is not UTF-8. So a manifest edit
 /// alone, or a change in which `.rs` files are skipped, rebuilds.
+/// Resolves `query` against `store`, probing `root` when `query` is a `path:line`
+/// location so stale indexes refuse line-number resolution honestly.
+pub fn resolve_query(
+    root: &Path,
+    store: &Store,
+    query: &str,
+) -> Result<Vec<SymbolMatch>, IndexError> {
+    if parse_path_line(query).is_some() {
+        let freshness = probe(root, store)?;
+        let state = if freshness.stale() {
+            IndexState::Stale
+        } else {
+            IndexState::Fresh
+        };
+        return Ok(store.symbols_matching_for(query, state)?);
+    }
+    Ok(store.symbols_matching(query)?)
+}
+
 pub fn index(
     root: &Path,
     store: &mut Store,
     language: &RustLanguage,
 ) -> Result<IndexReport, IndexError> {
     let walk = walk(root)?;
-    let reextract = store.extractor_version()? != Some(EXTRACTOR_VERSION);
-    let mut report = IndexReport {
-        skipped: walk.skipped.clone(),
-        ..IndexReport::default()
-    };
-    let mut kept: Vec<&Candidate> = Vec::new();
-    for file in walk.files.iter().filter(|file| is_rust(&file.path)) {
-        let (bytes, mtime_ns) = match read_source(&file.abs_path)? {
-            Source::Bytes { bytes, mtime_ns } => (bytes, mtime_ns),
-            Source::Skipped(reason) => {
-                report.skipped.push(Skipped {
-                    path: file.path.clone(),
-                    reason,
-                });
+    store.atomic_batch(|store| {
+        let walk = &walk;
+        let reextract = store.extractor_version()? != Some(EXTRACTOR_VERSION);
+        let mut report = IndexReport {
+            skipped: walk.skipped.clone(),
+            ..IndexReport::default()
+        };
+        let mut kept: Vec<&Candidate> = Vec::new();
+        for file in walk.files.iter().filter(|file| is_rust(&file.path)) {
+            let (bytes, mtime_ns) = match read_source(&file.abs_path)? {
+                Source::Bytes { bytes, mtime_ns } => (bytes, mtime_ns),
+                Source::Skipped(reason) => {
+                    report.skipped.push(Skipped {
+                        path: file.path.clone(),
+                        reason,
+                    });
+                    continue;
+                }
+            };
+            let Ok(source) = String::from_utf8(bytes) else {
+                report.not_utf8.push(file.path.clone());
+                continue;
+            };
+            kept.push(file);
+            if !reextract && is_unchanged(store, &file.path, &source)? {
+                report.unchanged.push(file.path.clone());
                 continue;
             }
-        };
-        let Ok(source) = String::from_utf8(bytes) else {
-            report.not_utf8.push(file.path.clone());
-            continue;
-        };
-        kept.push(file);
-        if !reextract && is_unchanged(store, &file.path, &source)? {
-            report.unchanged.push(file.path.clone());
-            continue;
+            store.put_source(&file.path, &source, mtime_ns, language)?;
+            report.written.push(file.path.clone());
         }
-        store.put_source(&file.path, &source, mtime_ns, language)?;
-        report.written.push(file.path.clone());
-    }
-    let kept_paths: HashSet<&str> = kept.iter().map(|file| file.path.as_str()).collect();
-    for path in store.file_paths()? {
-        if !kept_paths.contains(path.as_str()) {
-            store.remove_file(&path)?;
-            report.removed.push(path);
+        let kept_paths: HashSet<&str> = kept.iter().map(|file| file.path.as_str()).collect();
+        for path in store.file_paths()? {
+            if !kept_paths.contains(path.as_str()) {
+                store.remove_file(&path)?;
+                report.removed.push(path);
+            }
         }
-    }
-    // Every skipped `.rs` file, the walk's skips then the read's, then
-    // every one that is not UTF-8, each in walk order.
-    let unread: Vec<(&str, Unread)> = report
-        .skipped
-        .iter()
-        .filter(|skip| is_rust(&skip.path))
-        .map(|skip| (skip.path.as_str(), Unread::Skipped))
-        .chain(
-            report
-                .not_utf8
-                .iter()
-                .map(|path| (path.as_str(), Unread::NotUtf8)),
-        )
-        .collect();
-    let manifests = read_manifests(&walk)?;
-    let stamp = stamp(&manifests, &unread);
-    let stale = store.workspace_fingerprint()? != Some(stamp.fingerprint);
-    if reextract || !report.written.is_empty() || !report.removed.is_empty() || stale {
-        report.graph = Some(rebuild::rebuild(
-            &manifests, &stamp, &kept, store, language,
-        )?);
-    }
-    Ok(report)
+        // Every skipped `.rs` file, the walk's skips then the read's, then
+        // every one that is not UTF-8, each in walk order.
+        let unread: Vec<(&str, Unread)> = report
+            .skipped
+            .iter()
+            .filter(|skip| is_rust(&skip.path))
+            .map(|skip| (skip.path.as_str(), Unread::Skipped))
+            .chain(
+                report
+                    .not_utf8
+                    .iter()
+                    .map(|path| (path.as_str(), Unread::NotUtf8)),
+            )
+            .collect();
+        let manifests = read_manifests(walk)?;
+        let stamp = stamp(&manifests, &unread);
+        let stale = store.workspace_fingerprint()? != Some(stamp.fingerprint);
+        if reextract || !report.written.is_empty() || !report.removed.is_empty() || stale {
+            report.graph = Some(rebuild::rebuild(
+                &manifests, &stamp, &kept, store, language,
+            )?);
+        }
+        Ok(report)
+    })
 }
 
 fn is_rust(path: &str) -> bool {

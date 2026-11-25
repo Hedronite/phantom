@@ -114,7 +114,10 @@ fn parse_fingerprint(text: &str) -> Option<[u8; 32]> {
 }
 
 /// One matching row, with the row id read by the caller.
-fn symbol_match_row(row: &rusqlite::Row<'_>, id: i64) -> Result<SymbolMatch, StoreError> {
+pub(crate) fn symbol_match_row(
+    row: &rusqlite::Row<'_>,
+    id: i64,
+) -> Result<SymbolMatch, StoreError> {
     Ok(SymbolMatch {
         id,
         kind: row.get(1)?,
@@ -138,7 +141,7 @@ fn find_row(row: &rusqlite::Row<'_>, id: i64) -> Result<FindRow, StoreError> {
 /// True when the first segment of a `display` spelling names a file: it
 /// carries a directory separator or a dot, so `src/tui/app.rs` and
 /// `build.rs` qualify while `std`, `crate` and `crate::util` do not.
-fn is_file_path(segment: &str) -> bool {
+pub(crate) fn is_file_path(segment: &str) -> bool {
     segment.contains('/') || segment.contains('.')
 }
 pub(crate) fn reason_from_text(reason: &str) -> Result<Reason, StoreError> {
@@ -219,7 +222,7 @@ impl crate::Store {
         modules: &[Module],
         test_modules: &[Id],
     ) -> Result<(), StoreError> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.savepoint()?;
         // Module ids are referenced from files and symbols with foreign
         // keys; a replace first clears both, then deletes the tables.
         tx.execute("UPDATE symbols SET module_id = NULL", [])?;
@@ -467,7 +470,7 @@ impl crate::Store {
     /// here, in the same transaction, and nothing else ever moves it —
     /// a no-change pass calls nothing, so the epoch stands still.
     pub fn replace_edges(&mut self, edges: &[Edge]) -> Result<(), StoreError> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.savepoint()?;
         tx.execute("DELETE FROM edges", [])?;
         for edge in edges {
             tx.execute(
@@ -500,7 +503,7 @@ impl crate::Store {
     /// text `LinkReason::as_str`; no `call` edge changes, so every
     /// call-edge read keeps its rows and filters.
     pub fn write_links(&mut self, links: &[Link]) -> Result<(), StoreError> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.savepoint()?;
         tx.execute("DELETE FROM edges WHERE kind IN ('import', 'impl')", [])?;
         for link in links {
             tx.execute(
@@ -579,7 +582,7 @@ impl crate::Store {
     ) -> Result<(), StoreError> {
         let hex = hex_lower(fingerprint);
         let skipped = rs_skipped.to_string();
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.savepoint()?;
         for (key, value) in [
             ("workspace_fingerprint", hex.as_str()),
             ("rs_skipped", skipped.as_str()),
@@ -602,7 +605,7 @@ impl crate::Store {
     /// unattributed. `members` reads the result back (SPEC-w6 G0b,
     /// PM ruling: members come from the resolver).
     pub fn write_method_owners(&mut self, pairs: &[(Id, Id)]) -> Result<(), StoreError> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.savepoint()?;
         tx.execute(
             "UPDATE symbols SET parent_id = NULL WHERE kind = 'method'",
             [],
@@ -670,7 +673,7 @@ impl crate::Store {
                 flags: flags.len(),
             });
         }
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.savepoint()?;
         for (id, flag) in ids.iter().zip(flags) {
             tx.execute(
                 "UPDATE symbols SET is_test = ?1 WHERE id = ?2",
@@ -713,15 +716,43 @@ impl crate::Store {
     /// `src/tui/app.rs::App::start_watcher`. `query` is bound, never
     /// spliced.
     pub fn symbols_matching(&self, query: &str) -> Result<Vec<SymbolMatch>, StoreError> {
+        if crate::alias::parse_path_line(query).is_some() {
+            return Err(StoreError::StalePathLine);
+        }
         let exact = self.symbols_matching_exact(query)?;
         if !exact.is_empty() {
             return Ok(exact);
         }
+        self.symbols_matching_fallback(query)
+    }
+
+    fn symbols_matching_fallback(&self, query: &str) -> Result<Vec<SymbolMatch>, StoreError> {
         let method = self.symbols_matching_method(query)?;
         if !method.is_empty() {
             return Ok(method);
         }
-        self.symbols_matching_display(query)
+        let display = self.symbols_matching_display(query)?;
+        if !display.is_empty() {
+            return Ok(display);
+        }
+        self.symbols_matching_alias(query)
+    }
+
+    /// Resolves `query` with explicit index freshness. Exact `path:line`
+    /// queries are refused with [`StoreError::StalePathLine`] when `state`
+    /// is [`IndexState::Stale`].
+    pub fn symbols_matching_for(
+        &self,
+        query: &str,
+        state: crate::IndexState,
+    ) -> Result<Vec<SymbolMatch>, StoreError> {
+        if let Some(pl) = crate::alias::parse_path_line(query) {
+            return match state {
+                crate::IndexState::Stale => Err(StoreError::StalePathLine),
+                crate::IndexState::Fresh => self.symbols_at_line(pl.path, pl.line),
+            };
+        }
+        self.symbols_matching(query)
     }
     /// The spellings the base answers: the bare name, the in-file
     /// qualified name, and the file module path joined to it, `crate::`
@@ -844,6 +875,9 @@ impl crate::Store {
     /// `query`, ordered as [`symbols_matching`](Self::symbols_matching)
     /// orders its rows: the candidates a `not_found` reply offers.
     pub fn did_you_mean(&self, query: &str) -> Result<Vec<SymbolMatch>, StoreError> {
+        if let Some(pl) = crate::alias::parse_path_line(query) {
+            return self.did_you_mean_at_line(pl.path, pl.line);
+        }
         let last = query.rsplit("::").next().unwrap_or(query);
         let mut statement = self.conn.prepare(
             "SELECT s.id, s.kind, COALESCE(m.path, ''), s.qual_name, f.path, s.start_line

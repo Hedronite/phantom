@@ -205,7 +205,7 @@ impl crate::Store {
         symbols: &[(Id, f64)],
         files: &[(Id, f64)],
     ) -> Result<(), StoreError> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.savepoint()?;
         tx.execute("DELETE FROM rank", [])?;
         {
             let mut symbol_statement = tx.prepare(

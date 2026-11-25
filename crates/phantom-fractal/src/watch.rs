@@ -140,13 +140,7 @@ fn watch(
         if !std::mem::take(&mut first) {
             sleep(request.interval);
         }
-        let step = settle(&root, &store, request.debounce).and_then(|stale| {
-            if !stale {
-                return Ok(None);
-            }
-            let window = window(&store)?;
-            pass(&root, &mut store, &language, window).map(Some)
-        });
+        let step = run_step(&root, &mut store, &language, request.debounce);
         let done = match step {
             Ok(done) => {
                 failed = false;
@@ -228,5 +222,140 @@ fn window(store: &Store) -> Result<Window, Failure> {
             stored_window(&scan.window_json)
         }
         _ => Ok(Window::default()),
+    }
+}
+
+/// Runs one probe-and-pass step. All index, graph, rank, co-change, and
+/// metadata writes commit in a single atomic SQLite transaction so a
+/// mid-write or mid-batch kill leaves the previous consistent batch intact.
+fn run_step(
+    root: &Path,
+    store: &mut Store,
+    language: &RustLanguage,
+    debounce: Duration,
+) -> Result<Option<crate::ops::index::Pass>, Failure> {
+    let stale = settle(root, store, debounce)?;
+    if !stale {
+        return Ok(None);
+    }
+    store
+        .atomic_batch(|store| {
+            let window = window(store)?;
+            pass(root, store, language, window)
+        })
+        .map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
+    use phantom_fractal_git::Window;
+    use phantom_fractal_lang_rust::RustLanguage;
+    use phantom_fractal_store::{Store, WriterLock};
+
+    use crate::ops::index::pass;
+
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            static NEXT: AtomicU32 = AtomicU32::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "phantom-watch-unit-{label}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).expect("dir");
+            Self(path.canonicalize().expect("canon"))
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn mid_batch_interruption_with_barrier_rolls_back_and_index_catches_all() {
+        let tree = TempDir::new("tree");
+        let data = TempDir::new("data");
+        fs::create_dir_all(tree.0.join("src")).expect("src");
+        fs::write(
+            tree.0.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        )
+        .expect("toml");
+        fs::write(tree.0.join("src/lib.rs"), "pub fn init() {}\n").expect("lib");
+
+        // Initial index completes batch 1.
+        let db = data.0.join("repos/app/graph.db");
+        let lang = RustLanguage::new().expect("lang");
+        {
+            let _lock = WriterLock::acquire(&db).expect("lock");
+            let mut store = Store::open(&db).expect("open");
+            let batch1 = store.atomic_batch(|s| pass(&tree.0, s, &lang, Window::default()));
+            assert!(batch1.is_ok(), "batch 1 failed");
+        }
+
+        // Write 30 new files while watch is active.
+        for n in 0..30 {
+            fs::write(
+                tree.0.join(format!("src/gen_{n}.rs")),
+                format!("pub fn gen_{n}() {{}}\n"),
+            )
+            .expect("gen file");
+        }
+
+        // Deterministic Barrier-synchronized mid-batch interruption (no sleep).
+        let mid_write = Arc::new(Barrier::new(2));
+        let aborted = Arc::new(Barrier::new(2));
+        let mid_c = Arc::clone(&mid_write);
+        let abort_c = Arc::clone(&aborted);
+        let db_c = db.clone();
+        let root_c = tree.0.clone();
+
+        let handle = thread::spawn(move || {
+            let _lock = WriterLock::acquire(&db_c).expect("lock");
+            let mut store = Store::open(&db_c).expect("open");
+            let lang = RustLanguage::new().expect("lang");
+            let res: Result<(), crate::ops::Failure> = store.atomic_batch(|s| {
+                let _ = phantom_fractal_extract::index(&root_c, s, &lang)?;
+                mid_c.wait();
+                abort_c.wait();
+                Err(crate::ops::Failure::new(
+                    phantom_fractal_proto::ErrorKind::Usage,
+                    "simulated mid-batch kill",
+                ))
+            });
+            assert!(res.is_err());
+        });
+
+        mid_write.wait();
+        aborted.wait();
+        handle.join().expect("join");
+
+        // Nothing from the aborted batch leaked into files.
+        let store = Store::open(&db).expect("reopen");
+        assert_eq!(store.file_paths().expect("paths"), vec!["src/lib.rs"]);
+        drop(store);
+
+        // Subsequent index catches all 30 files cleanly.
+        let fresh_data = TempDir::new("fresh");
+
+        let mut recovered = Store::open(&db).expect("open recovered");
+        let recovered_pass = pass(&tree.0, &mut recovered, &lang, Window::default());
+        assert!(recovered_pass.is_ok(), "recovered pass failed");
+        assert_eq!(recovered.file_paths().expect("all").len(), 31);
+        let mut fresh = Store::open(&fresh_data.0.join("graph.db")).expect("fresh");
+        let fresh_pass = pass(&tree.0, &mut fresh, &lang, Window::default());
+        assert!(fresh_pass.is_ok(), "fresh pass failed");
+        assert_eq!(
+            recovered.canonical_dump().expect("dump"),
+            fresh.canonical_dump().expect("fresh dump")
+        );
     }
 }
