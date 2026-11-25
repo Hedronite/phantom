@@ -85,11 +85,13 @@ SYMBOL is one of:
 - a bare name, such as `helper`;
 - a name within its file, such as `Counter::new` or `tests::check` for a function in an inline `mod tests`;
 - a module-qualified name: the file's whole module path from the target root, with or without `crate::`, joined to the name within the file, such as `util::deep::sink` or `crate::util::deep::sink`. A partial path such as `deep::sink` does not match;
-- a method by its module and bare name, leaving out its type, such as `tricky::greet` for `Guest::greet` in `src/tricky.rs`, or `app::watch_dir` for `App::watch_dir` in a module `tui::app`.
+- a method by its module and bare name, leaving out its type, such as `tricky::greet` for `Guest::greet` in `src/tricky.rs`, or `app::watch_dir` for `App::watch_dir` in a module `tui::app`;
+- any of these under a workspace crate's own name in place of `crate`, with `-` or `_`, such as `my_crate::util::helper`;
+- `path:line`, the file and line a definition starts at, such as `src/util.rs:5`. It is answered only while the index is fresh: on a stale one it is usage, exit 1, `store: index is stale; run index before resolving path:line`. Two definitions that start on one line are `ambiguous`.
 
 Output names a symbol by its qualified name from `crate`, such as `crate::tests::check`. In a workspace, `crate` is the symbol's own target, and `path` or `symbol_path` says which package it is in. A symbol in an orphan file has no module, so its name starts at its own name or `impl` type.
 
-- No symbol matches: `not_found`, exit 3. `data.did_you_mean` lists up to 10 symbols whose bare name is the query's last segment, each in the shape of an `ambiguous` candidate without its `display`, or none: `{"did_you_mean":[]}`. The message is unchanged.
+- No symbol matches: `not_found`, exit 3. `data.did_you_mean` lists up to 10 symbols whose bare name is the query's last segment (for `path:line`, the file's symbols, nearest the line first), each in the shape of an `ambiguous` candidate without its `display`, or none: `{"did_you_mean":[]}`. When it lists any, `data.retry` is the command line that asks about the first, such as `phantom-fractal callers -- src/util/deep.rs::sink`, quoted for a POSIX shell. It holds the command and its names only, so add `--repo` and any other flag you gave. Phantom never answers for a suggestion itself.
 - More than one matches: `ambiguous`, exit 6. The message lists up to 10 candidates with their paths and lines, `data.candidates` holds the same ones, and `data.total` counts them all. Each candidate ends with `display`, its file-qualified name such as `src/inner.rs::Pair::new`. Qualify the name further to pick one.
 - The tree has no index, or its index predates call edges: `no_index`, exit 2. Run `index` again.
 
@@ -228,7 +230,7 @@ Phantom reads source text only. Macros are never expanded: they are counted by n
 - `--min-confidence F`: the lowest path confidence reported, above 0 and at most 1. The default is 0.2.
 - `--no-tests`: leave tests out. `data.tests` is then absent.
 - `--summary`: drop `groups` and `tests`, and keep the rest.
-- `--limit N`: list at most N hits over all groups, shallowest group first and in each group's own order, and at most N tests, 1 to 100. A group it cuts keeps its `total` and sets `truncated`, as one cut at the cap of 100 does; a group cut to nothing stays with empty `hits`. Not with `--diff`.
+- `--limit N`: list at most N hits over all groups, shallowest group first and in each group's own order, and at most N tests, 1 to 100, or more, as [Limits above 100](#limits-above-100) says. A group it cuts keeps its `total` and sets `truncated`, as one cut at the cap of 100 does; a group cut to nothing stays with empty `hits`. Not with `--diff`.
 
 A value out of range, or one that is not a number, is usage and exits 1.
 
@@ -409,7 +411,7 @@ Edges inside one file do not count.
 
 ### `rank`
 
-`rank [--symbols | --files] [--focus PATH]... [--limit N] [--repo PATH] [--max-tokens N]` ranks symbols unless `--files` is given. `--limit` is 1 to 100, 20 by default; any other value is usage and exits 1, and so is giving both `--symbols` and `--files`. Without an index it is `no_index`, exit 2.
+`rank [--symbols | --files] [--focus PATH]... [--limit N] [--repo PATH] [--max-tokens N]` ranks symbols unless `--files` is given. `--limit` is 1 to 100, 20 by default, and a larger one is [cut to 100](#limits-above-100); 0, or a value that is not a whole number, is usage and exits 1, and so is giving both `--symbols` and `--files`. Without an index it is `no_index`, exit 2.
 
 `data` holds these keys, in this order:
 
@@ -495,7 +497,7 @@ On a git root, `index`'s `data` ends with `cochange: {head, commits_seen, skippe
 
 `cochange FILE [--min-lift X] [--limit N] [--repo PATH] [--max-tokens N]` lists FILE's partners from the stored scan. `cochange FILE --count` gives raw counts instead, as [below](#cochange---count) describes.
 
-- **Arguments.** FILE is an indexed file, relative to the indexed tree; a leading `./` is allowed. `--min-lift` is a number from 0 to 1000, 1.5 by default. `--limit` is 1 to 100, 20 by default.
+- **Arguments.** FILE is an indexed file, relative to the indexed tree; a leading `./` is allowed. `--min-lift` is a number from 0 to 1000, 1.5 by default. `--limit` is 1 to 100, 20 by default, and a larger one is [cut to 100](#limits-above-100).
 - **Errors.** Any other value is usage, exit 1. No index is `no_index`, exit 2. A FILE that is not indexed, such as a `README.md`, a `Cargo.toml` or a file deleted since, is `not_found`, exit 3, with the message `file is not indexed at HEAD: co-change is kept only for indexed Rust files; give a path relative to the repo, or for raw counts over every tracked file use cochange --count or git log`. The message never holds the path.
 - **It never writes.** The same index and arguments always give the same bytes.
 
@@ -564,7 +566,11 @@ An index describes the tree as it was at the last `index`. Every success envelop
 - **`head`** is the tree's git HEAD now, and **`index_head`** the HEAD the last pass stored, each `null` off a git root. A commit that changes no indexed file still makes the index stale, because the co-change history moved.
 - **`rank_epoch`** is the epoch of the stored rank.
 - **Reads never re-index.** A stale index still answers, from what it holds, and nothing is written. Run `index` again to bring it up to date. A tree the check cannot read is reported stale.
-- `meta` holds exactly these four keys. It is part of the line that `--max-tokens` fits, so it counts toward the budget like any other byte.
+- `meta` holds these four keys, and `limit` after them only when a limit was cut. It is part of the line that `--max-tokens` fits, so it counts toward the budget like any other byte.
+
+### Limits above 100
+
+`impact`, `rank` and `cochange`, with or without `--count`, take a `--limit` above 100 and work as if it were 100. The reply says so: `meta.limit` is `{"asked":200,"used":100}` and `data.truncated` is true, even when nothing was left out. The MCP `limit` arguments do the same. A limit of 0, a negative one, or one that is not a whole number is still refused.
 
 ### The writer lock
 
@@ -716,10 +722,10 @@ The server is read-only by default. It offers these tools:
 | `show_symbol` | exactly one of `symbol?` and `id?`; `repo?`; `source?`, default false; `max_tokens?` | `show` |
 | `callers` | `symbol`, `repo?`, `max_tokens?` | `callers` |
 | `callees` | `symbol`, `repo?`, `max_tokens?` | `callees` |
-| `impact` | `symbol`, `repo?`, `depth?` (1 to 5, default 3), `min_confidence?` (above 0 and at most 1, default 0.2), `include_tests?` (default true), `summary?` (default false), `limit?` (1 to 100), `max_tokens?` | `impact` |
-| `top_ranked` | `kind?` (`symbols` or `files`, default `symbols`), `focus?` (an array of at most 100 paths), `limit?` (1 to 100, default 20), `repo?`, `max_tokens?` | `rank` |
+| `impact` | `symbol`, `repo?`, `depth?` (1 to 5, default 3), `min_confidence?` (above 0 and at most 1, default 0.2), `include_tests?` (default true), `summary?` (default false), `limit?` (1 to 100; above is cut to 100), `max_tokens?` | `impact` |
+| `top_ranked` | `kind?` (`symbols` or `files`, default `symbols`), `focus?` (an array of at most 100 paths), `limit?` (1 to 100, default 20; above is cut to 100), `repo?`, `max_tokens?` | `rank` |
 | `repo_map` | `budget` (1 to 100000), `focus?` (an array of at most 100 paths), `detail?` (`files`, `symbols`, or `full`, default `symbols`), `repo?` | `map` |
-| `cochange` | `file`, `mode?` (`decayed` or `count`, default `decayed`), `min_lift?` (0 to 1000, default 1.5; `decayed` only), `limit?` (1 to 100, default 20), `repo?`, `max_tokens?` | `cochange`, or with `mode: "count"` `cochange --count` |
+| `cochange` | `file`, `mode?` (`decayed` or `count`, default `decayed`), `min_lift?` (0 to 1000, default 1.5; `decayed` only), `limit?` (1 to 100, default 20; above is cut to 100), `repo?`, `max_tokens?` | `cochange`, or with `mode: "count"` `cochange --count` |
 | `diff_impact` | `against?` (a branch, a tag, or a commit id of at least 7 hex digits), `depth?`, `min_confidence?` and `include_tests?` as for `impact`, `summary_only?` (default false), `max_tokens?`, `repo?` | `impact --diff`, or `--against` |
 | `symbol_path` | `from`, `to`, `max_depth?` (1 to 20, default 10), `max_tokens?`, `repo?` | `path` |
 | `repo_status` | `repo?` | `status` |
@@ -835,20 +841,25 @@ exec nu "$HOME/.agents/skills/phantom/phantom.nu" "$@"
 
 Then `phantomq callers app::watch_dir` is the whole call. A harness's allow list can name `phantomq` instead of a whole MCP server.
 
-**`$PHANTOM_FRACTAL_BIN`** names the program the skill runs instead of `phantom-fractal` on `PATH`. On a machine that should not hold the binary or the index, point it at a shim that runs `phantom-fractal` where they are:
+**`$PHANTOM_FRACTAL_BIN`** names the program the skill runs instead of `phantom-fractal` on `PATH`. On a machine that should not hold the binary or the index, point it at [`scripts/phantom-fractal-tower`](scripts/phantom-fractal-tower), which single-quotes every argument over `ssh` so shell metacharacters never execute remotely and refuses unmapped local absolute or `..` `--repo` paths before invoking `ssh`. Configure it via environment variables:
 
-```sh
-#!/bin/sh
-exec ssh lab phantom-fractal "$@"
-```
+- `PHANTOM_SSH_HOST` (required): remote SSH target host (its remote login shell must be POSIX: `sh`, `bash`, `zsh`, `dash`, or `ksh`; backslashes are refused so `fish` cannot reopen single quotes).
+- `PHANTOM_REMOTE_BIN`: remote `phantom-fractal` binary (default: `phantom-fractal`).
+- `PHANTOM_REMOTE_DATA_DIR`: optional remote `PHANTOM_FRACTAL_DATA` directory.
+- `PHANTOM_REMOTE_REPO` / `PHANTOM_LOCAL_REPO`: optional remote repo root and local prefix to map `--repo` paths safely.
 
-`ssh` hands the arguments to the remote shell, which splits and expands them again, so use such a shim only with names and paths that have no spaces or shell characters. `--repo` then names a tree on that machine.
-
-**An indexed repository** can point its agents at the skill with two lines in its `AGENTS.md` (and a `CLAUDE.md` of `@AGENTS.md` for Claude Code):
+**An indexed repository** can point its agents at the skill with this block in its `AGENTS.md` (and a `CLAUDE.md` of `@AGENTS.md` for Claude Code). It is written to be enough on its own, so an agent's first call can be the question:
 
 ```markdown
 ## Phantom
-This tree has a Phantom index: for callers, impact, call paths, where a name is defined, and which files change together, use the `phantom` skill (`nu .agents/skills/phantom/phantom.nu …`, or `phantomq`) before grep. Read its SKILL.md first (`nu phantom.nu help` prints the command table).
+This tree has a Phantom index. For code structure, run these before grep; nothing else needs reading first. (No `phantomq` shim: put `nu .agents/skills/phantom/phantom.nu` in its place.)
+- Symbols: `phantomq where NAME`, `phantomq show NAME`, `phantomq callers NAME`, `phantomq callees NAME`, `phantomq impact NAME`, `phantomq path FROM TO`
+- Tree: `phantomq map --budget 1500`, `phantomq cochange FILE`, `phantomq diff-impact`, `phantomq status`, `phantomq index`
+- NAME: a bare name, `Type::method`, `module::name`, `<crate>::item`, a reply's `display`, or `path:line` of a definition (fresh index only).
+- Keep output small (a harness may cut it near 10 KB): `--limit 20` on callers, callees, impact and cochange. Above 100, `--limit` is cut to 100 and `meta.limit` says so.
+- A miss is never guessed at: on `not_found` pick from `did_you_mean`, or run `retry` if its symbol is the one you meant. On `ambiguous` rerun with a `matches[].display`.
+- Trust: answer `where`, `show`, `path` and `cochange` from the reply, with no grep or file read. `callers`, `callees`, `impact` and `diff-impact` follow resolved calls only: confirm with one grep of the bare name, and search further only on `confirm_with_grep: true`.
+- No index, or `meta.stale: true`: run `phantomq index`. It writes only to Phantom's own data directory, never the repo.
 ```
 
 ### Over MCP

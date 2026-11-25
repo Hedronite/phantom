@@ -16,16 +16,17 @@ use phantom_fractal_store::Store;
 use serde::Serialize;
 
 use super::budget::{self, Shed, Tokens, drop_last};
-use super::cochange::{Scope, check_limit, relative, stored_scan};
+use super::cochange::{Scope, relative, stored_scan};
 use super::index::WindowOut;
+use super::limit::Limit;
 use super::lookup::current_store;
-use super::{Failure, Reply, answer, canonical_repo};
+use super::{Failure, Reply, answer_limited, canonical_repo};
 
 /// What `cochange --count` is asked for.
 pub(crate) struct CountRequest {
     /// A tracked file, relative to the repo; it need not be indexed.
     pub(crate) file: String,
-    /// 1 to 100, as `cochange` takes it.
+    /// As `cochange` takes it: at least 1, above 100 used as 100.
     pub(crate) limit: u64,
     /// The indexed tree.
     pub(crate) repo: PathBuf,
@@ -87,21 +88,22 @@ struct CountOut {
 /// The raw co-change counts of `request.file`, at most `request.limit`,
 /// fitted to `request.max_tokens`.
 pub(crate) fn cochange_count(request: &CountRequest) -> Result<Reply<CountResult>, Failure> {
-    check_limit(request.limit)?;
+    let asked = Limit::new(request.limit)?;
+    let clamped = asked.note();
     budget::check(request.max_tokens)?;
     let store = current_store(&request.repo)?;
     let file = relative(&request.file).to_owned();
-    let (scan, partners, truncated) = counts(&store, request, &file)?;
+    let (scan, partners, truncated) = counts(&store, request, &file, asked)?;
     let result = CountResult {
         file,
         mode: "count",
         scan,
         scope: Scope::count(),
         partners,
-        truncated,
+        truncated: asked.truncated(truncated),
         tokens: None,
     };
-    answer(result, &store, &request.repo, request.max_tokens)
+    answer_limited(result, &store, &request.repo, request.max_tokens, clamped)
 }
 
 /// What `counts` reads: the history, its first `limit` partners, and
@@ -110,7 +112,12 @@ type Counted = (Option<CountScanOut>, Vec<CountOut>, bool);
 
 /// `file`'s counts over the stored scan's window, or nothing without a
 /// scan or a git root.
-fn counts(store: &Store, request: &CountRequest, file: &str) -> Result<Counted, Failure> {
+fn counts(
+    store: &Store,
+    request: &CountRequest,
+    file: &str,
+    limit: Limit,
+) -> Result<Counted, Failure> {
     let Some((_, window)) = stored_scan(store)? else {
         return Ok((None, Vec::new(), false));
     };
@@ -118,7 +125,7 @@ fn counts(store: &Store, request: &CountRequest, file: &str) -> Result<Counted, 
     let Some(counts) = read(&root, &window, file)? else {
         return Ok((None, Vec::new(), false));
     };
-    let limit = usize::try_from(request.limit).unwrap_or(usize::MAX);
+    let limit = usize::try_from(limit.used()).unwrap_or(usize::MAX);
     let truncated = counts.partners.len() > limit;
     let partners = counts
         .partners

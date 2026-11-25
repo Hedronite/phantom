@@ -7,7 +7,9 @@ use serde::Serialize;
 
 use super::budget::{self, Shed, Tokens, drop_last};
 use super::distinct::{Distinct, Site};
-use super::lookup::{Names, Reexport, SymbolOut, current_index, kind_text, lookup, symbol_out};
+use super::lookup::{
+    Names, Query, Reexport, Retry, SymbolOut, current_index, kind_text, lookup, symbol_out,
+};
 use super::{Failure, Reply, answer};
 
 /// Most hits one `callers` or `callees` returns.
@@ -30,6 +32,16 @@ pub(crate) enum Direction {
     Callers,
     /// Symbols the queried symbol's calls resolve to.
     Callees,
+}
+
+impl Direction {
+    /// The command that asks for this side.
+    const fn verb(self) -> &'static str {
+        match self {
+            Self::Callers => "callers",
+            Self::Callees => "callees",
+        }
+    }
 }
 
 /// `data` of a successful `callers` or `callees`.
@@ -115,7 +127,12 @@ pub(crate) fn callees(request: &CallsRequest) -> Result<Reply<CallResult>, Failu
 fn calls(direction: Direction, request: &CallsRequest) -> Result<Reply<CallResult>, Failure> {
     budget::check(request.max_tokens)?;
     let (store, names) = current_index(&request.repo)?;
-    let symbol = lookup(&store, &names, &request.symbol)?;
+    let query = Query {
+        repo: &request.repo,
+        text: &request.symbol,
+        retry: Retry::Verb(direction.verb()),
+    };
+    let symbol = lookup(&store, &names, &query)?;
     let mut hits = edges(&store, &names, direction, symbol.id, &symbol.file)?;
     let (unresolved_calls, reexport) = side_keys(&store, direction, symbol.id)?;
     let truncated = hits.len() > CALL_CAP;

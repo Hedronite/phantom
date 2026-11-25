@@ -296,3 +296,40 @@ fn a_fingerprint_or_a_target_this_slice_never_writes_is_refused() {
         Err(crate::StoreError::UnknownTarget(99))
     ));
 }
+
+#[test]
+fn put_source_prepare_failures_roll_back_and_keep_prior_rows() {
+    let language = RustLanguage::new().expect("grammar");
+    let source =
+        "use crate::b;\npub struct S;\nimpl S {\n    pub fn m(&self) {\n        b();\n    }\n}\n";
+    for (label, sql) in [
+        ("item-col", "ALTER TABLE symbols DROP COLUMN is_test"),
+        ("method-col", "ALTER TABLE symbols DROP COLUMN module_id"),
+        ("use-col", "ALTER TABLE refs DROP COLUMN visibility"),
+        ("call-col", "ALTER TABLE refs DROP COLUMN shadowed"),
+    ] {
+        let db = TempDb::new(&format!("defects-prep-{label}"));
+        assert_outside_workspace(db.path());
+        let mut store = Store::open(db.path()).expect("open");
+        store
+            .put_source("src/a.rs", source, 0, &language)
+            .expect("initial put");
+        let original_hash = store
+            .stored_blake3("src/a.rs")
+            .expect("blake3")
+            .expect("stored");
+        store.conn.execute_batch(sql).expect("drop column");
+        let err = store
+            .put_source("src/a.rs", "pub fn replaced() {}\n", 1, &language)
+            .expect_err("prepare must fail");
+        assert!(
+            matches!(err, crate::StoreError::Sqlite(_)),
+            "{label}: {err}"
+        );
+        assert_eq!(store.file_paths().expect("paths"), vec!["src/a.rs"]);
+        assert_eq!(
+            store.stored_blake3("src/a.rs").expect("blake3 after"),
+            Some(original_hash)
+        );
+    }
+}

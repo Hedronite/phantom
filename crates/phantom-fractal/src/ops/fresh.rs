@@ -26,6 +26,7 @@ pub(crate) fn meta(root: &Path, store: &Store) -> Result<Meta, Failure> {
             head: phantom_fractal_git::head(root).ok().flatten(),
             index_head: store.index_head()?,
             rank_epoch,
+            limit: None,
         },
     })
 }
@@ -37,5 +38,6 @@ pub(crate) fn of(freshness: &Freshness, rank_epoch: u64) -> Meta {
         head: freshness.head.clone(),
         index_head: freshness.index_head.clone(),
         rank_epoch,
+        limit: None,
     }
 }

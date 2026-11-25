@@ -14,8 +14,8 @@ pub(crate) const INSTRUCTIONS: &str = "Phantom answers questions about a Rust tr
 - What a change to X reaches: impact. What the uncommitted change reaches: diff_impact, on a git root.
 - What matters most here: top_ranked; an overview that fits your context: repo_map with a budget in tokens.
 - What usually changes with a file: cochange. It is decay-weighted, lift-filtered and over indexed Rust files only; for raw commit counts over every tracked file use mode count, or git.
-- Names: a bare name such as parse, Type::method such as App::watch_dir, or a module path such as tui::app::App::watch_dir or app::watch_dir.
-- On ambiguous, pick a candidate and call show_symbol with its stable_key as id. On not_found, read did_you_mean.
+- Names: a bare name such as parse, Type::method such as App::watch_dir, a module path such as tui::app::App::watch_dir or app::watch_dir, the same under a workspace crate's name, or path:line of a definition while the index is fresh.
+- On ambiguous, pick a candidate and call show_symbol with its stable_key as id. On not_found nothing is guessed: read did_you_mean; data.retry is the command line that asks about the first suggestion.
 - A caller reached only through a re-export or a macro may be missing: confirm with one grep when completeness matters.
 - Is the index current: every result's meta.stale; repo_status says what changed. When it matters, refresh it: index_repo if offered, or phantom-fractal index .
 - On no_index, the repo is not an indexed root of this server: index a root with index_repo or phantom-fractal index .; another tree needs the server started with --root.

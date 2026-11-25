@@ -1,0 +1,178 @@
+#!/bin/sh
+set -eu
+
+# Safe-quoted SSH shim for running phantom-fractal on a remote host.
+# Every argument is single-quoted so shell metacharacters never execute
+# remotely and arrive at the remote binary as single literal argv tokens.
+# The remote login shell must be POSIX (sh, bash, zsh, dash, ksh);
+# backslashes are refused so fish cannot reopen single quotes.
+#
+# Environment:
+#   PHANTOM_SSH_HOST         Required remote SSH target host.
+#   PHANTOM_REMOTE_BIN       Remote binary path or name (default: phantom-fractal).
+#   PHANTOM_REMOTE_DATA_DIR  Optional remote PHANTOM_FRACTAL_DATA directory.
+#   PHANTOM_REMOTE_REPO      Optional allowed remote repo root path.
+#   PHANTOM_LOCAL_REPO       Optional local repo root path mapped to PHANTOM_REMOTE_REPO.
+
+die() {
+  printf '%s\n' "phantom-fractal-ssh: $1" >&2
+  exit 1
+}
+
+reject_backslash() {
+  case $1 in
+    *\\*)
+      die "refused $2 containing '\\' (POSIX remote login shell required)"
+      ;;
+  esac
+}
+
+sh_quote() {
+  _sq_in=$1
+  _sq_out="'"
+  while :; do
+    case $_sq_in in
+      *"'"*)
+        _sq_head=${_sq_in%%"'"*}
+        _sq_out="$_sq_out$_sq_head'\\''"
+        _sq_in=${_sq_in#*"'"}
+        ;;
+      *)
+        _sq_out="$_sq_out$_sq_in'"
+        break
+        ;;
+    esac
+  done
+  printf '%s' "$_sq_out"
+}
+
+strip_trailing_slash() {
+  _p=$1
+  while [ "${#_p}" -gt 1 ]; do
+    case $_p in
+      */) _p=${_p%/} ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "$_p"
+}
+
+has_parent_traversal() {
+  case $1 in
+    ..|../*|*/..|*/../*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+validate_and_map_repo() {
+  _repo=$1
+  if [ -z "$_repo" ]; then
+    die "refused empty --repo path"
+  fi
+  if has_parent_traversal "$_repo"; then
+    die "refused --repo path containing '..'"
+  fi
+  case $_repo in
+    /*)
+      _local=""
+      _remote=""
+      if [ -n "${PHANTOM_LOCAL_REPO-}" ]; then
+        _local=$(strip_trailing_slash "$PHANTOM_LOCAL_REPO")
+      fi
+      if [ -n "${PHANTOM_REMOTE_REPO-}" ]; then
+        _remote=$(strip_trailing_slash "$PHANTOM_REMOTE_REPO")
+      fi
+      if [ -n "$_local" ] && [ -n "$_remote" ]; then
+        if [ "$_repo" = "$_local" ]; then
+          printf '%s' "$_remote"
+          return 0
+        fi
+        case $_repo in
+          "$_local"/*)
+            printf '%s' "$_remote/${_repo#"$_local"/}"
+            return 0
+            ;;
+        esac
+      fi
+      if [ -n "$_remote" ]; then
+        if [ "$_repo" = "$_remote" ]; then
+          printf '%s' "$_repo"
+          return 0
+        fi
+        case $_repo in
+          "$_remote"/*)
+            printf '%s' "$_repo"
+            return 0
+            ;;
+        esac
+      fi
+      die "refused unmapped local absolute --repo path; set PHANTOM_REMOTE_REPO or pass a remote path"
+      ;;
+    *)
+      printf '%s' "$_repo"
+      ;;
+  esac
+}
+
+ssh_host=${PHANTOM_SSH_HOST-}
+if [ -z "$ssh_host" ]; then
+  die "PHANTOM_SSH_HOST is required"
+fi
+
+remote_bin=${PHANTOM_REMOTE_BIN-phantom-fractal}
+if [ -z "$remote_bin" ]; then
+  die "PHANTOM_REMOTE_BIN must not be empty"
+fi
+reject_backslash "$remote_bin" "PHANTOM_REMOTE_BIN"
+
+remote_cmd=""
+if [ -n "${PHANTOM_REMOTE_DATA_DIR-}" ]; then
+  reject_backslash "$PHANTOM_REMOTE_DATA_DIR" "PHANTOM_REMOTE_DATA_DIR"
+  remote_cmd="PHANTOM_FRACTAL_DATA=$(sh_quote "$PHANTOM_REMOTE_DATA_DIR") "
+fi
+remote_cmd="${remote_cmd}exec $(sh_quote "$remote_bin")"
+
+after_double_dash=0
+expect_repo_val=0
+for arg in "$@"; do
+  reject_backslash "$arg" "argument"
+  if [ "$expect_repo_val" -eq 1 ]; then
+    mapped=$(validate_and_map_repo "$arg")
+    reject_backslash "$mapped" "--repo path"
+    remote_cmd="$remote_cmd $(sh_quote "$mapped")"
+    expect_repo_val=0
+    continue
+  fi
+  if [ "$after_double_dash" -eq 0 ]; then
+    case $arg in
+      --)
+        after_double_dash=1
+        remote_cmd="$remote_cmd '--'"
+        continue
+        ;;
+      --repo)
+        expect_repo_val=1
+        remote_cmd="$remote_cmd '--repo'"
+        continue
+        ;;
+      --repo=*)
+        _val=${arg#--repo=}
+        mapped=$(validate_and_map_repo "$_val")
+        reject_backslash "$mapped" "--repo path"
+        remote_cmd="$remote_cmd $(sh_quote "--repo=$mapped")"
+        continue
+        ;;
+    esac
+  fi
+  remote_cmd="$remote_cmd $(sh_quote "$arg")"
+done
+
+if [ "$expect_repo_val" -eq 1 ]; then
+  die "missing path after --repo"
+fi
+
+exec ssh -o BatchMode=yes -- "$ssh_host" "$remote_cmd"

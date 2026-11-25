@@ -551,7 +551,6 @@ fn exits_are_usage_no_index_and_not_found() {
         for args in [
             &["rank", "--files", "--symbols"][..],
             &["rank", "--limit", "0"],
-            &["rank", "--limit", "101"],
             &["rank", "--limit", "many"],
             &["rank", "app"],
             &["map"],

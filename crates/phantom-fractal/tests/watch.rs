@@ -773,3 +773,92 @@ fn a_closed_stdout_stops_the_watch_with_exit_one() {
     };
     assert_eq!(code, Some(1));
 }
+
+/// Deterministic non-sleep proof of the W14 watch kill-race fix:
+/// synchronizes with `std::sync::Barrier` mid-batch (after `put_source`
+/// writes all 30 new files inside `atomic_batch`, before commit), aborts
+/// the batch, and verifies `fract status` reads and subsequent `fract index`
+/// catches all 30 newly written files to match a fresh index byte-for-byte.
+#[test]
+fn a_mid_batch_interruption_with_barrier_recovers_all_new_files() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Barrier};
+
+    let tree = package();
+    let data = TempDir::new("watch-barrier-data");
+    let mut w = Watched::spawn(tree.path(), data, DEBOUNCE_MS, &["--max-batches", "1"]);
+    // Deterministic pipe sync: wait for batch 1 to print and exit 0.
+    w.batch();
+    assert!(w.child.wait().expect("wait batch 1").success());
+
+    for n in 0..30 {
+        write(
+            tree.path(),
+            &format!("src/gen_{n}.rs"),
+            &format!("pub fn gen_{n}() {{}}\n"),
+        );
+    }
+
+    let db = database_path(w.data.path());
+    let mid_batch = Arc::new(Barrier::new(2));
+    let proceed = Arc::new(Barrier::new(2));
+    let aborted = Arc::new(AtomicBool::new(false));
+
+    let mid_c = Arc::clone(&mid_batch);
+    let proc_c = Arc::clone(&proceed);
+    let aborted_c = Arc::clone(&aborted);
+    let root_c = tree.path().to_path_buf();
+
+    let worker = thread::spawn(move || {
+        let _lock = phantom_fractal_store::WriterLock::acquire(&db).expect("lock");
+        let mut store = Store::open(&db).expect("open");
+        let language = phantom_fractal_lang_rust::RustLanguage::new().expect("lang");
+        let res: Result<(), phantom_fractal_extract::IndexError> = store.atomic_batch(|s| {
+            // Write all 30 files + rebuild inside the outer batch, then interrupt before commit.
+            let report = phantom_fractal_extract::index(&root_c, s, &language)?;
+            assert_eq!(report.written.len(), 30);
+            mid_c.wait();
+            proc_c.wait();
+            if aborted_c.load(Ordering::SeqCst) {
+                return Err(phantom_fractal_store::StoreError::UnknownTable.into());
+            }
+            Ok(())
+        });
+        assert!(res.is_err());
+    });
+
+    mid_batch.wait();
+    aborted.store(true, Ordering::SeqCst);
+    proceed.wait();
+    worker.join().expect("worker");
+
+    let status = Command::new(FRACT)
+        .args(["status", "--repo"])
+        .arg(tree.path())
+        .env("PHANTOM_FRACTAL_DATA", w.data.path())
+        .output()
+        .expect("status");
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+    let status_json: Value = serde_json::from_slice(&status.stdout).expect("status json");
+    assert_eq!(status_json["data"]["stale"], true);
+    assert_eq!(status_json["data"]["changes"]["added"], 30);
+
+    let index = Command::new(FRACT)
+        .arg("index")
+        .arg(tree.path())
+        .env("PHANTOM_FRACTAL_DATA", w.data.path())
+        .output()
+        .expect("index");
+    assert!(
+        index.status.success(),
+        "{}",
+        String::from_utf8_lossy(&index.stdout)
+    );
+    let index_json: Value = serde_json::from_slice(&index.stdout).expect("index json");
+    assert_eq!(index_json["data"]["written"], 30);
+    assert_eq!(dump(w.data.path()), fresh_dump(tree.path()));
+}

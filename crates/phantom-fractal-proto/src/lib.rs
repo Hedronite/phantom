@@ -130,12 +130,24 @@ impl<'de> Deserialize<'de> for EnvelopeError {
 /// `stale` is true when an index pass would change the index. `head` is
 /// the tree's git HEAD now and `index_head` the HEAD the last pass stored,
 /// each null off a git root. `rank_epoch` is the stored rank's epoch.
+/// `limit` is present, and last, only when the limit asked for was above
+/// the cap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Meta {
     pub stale: bool,
     pub head: Option<String>,
     pub index_head: Option<String>,
     pub rank_epoch: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<LimitNote>,
+}
+
+/// A limit above the command's cap: what was asked for, and the cap used
+/// in its place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LimitNote {
+    pub asked: u64,
+    pub used: u64,
 }
 
 /// `{ ok, data, meta, error, schema }`, `meta` on a success only.
@@ -308,6 +320,7 @@ where
             head: Option<String>,
             index_head: Option<String>,
             rank_epoch: Option<u64>,
+            limit: Option<LimitNote>,
         }
 
         let raw = Raw::deserialize(deserializer)?;
@@ -317,6 +330,7 @@ where
                 head: meta.head,
                 index_head: meta.index_head,
                 rank_epoch: meta.rank_epoch?,
+                limit: meta.limit,
             })
         });
         let meta = if raw.ok { meta } else { None };
@@ -368,6 +382,7 @@ mod tests {
             head: Some("a".repeat(40)),
             index_head: None,
             rank_epoch: 3,
+            limit: None,
         };
         let success = Envelope::success_with_meta(String::from("row"), meta.clone());
         assert_eq!(success.meta(), Some(&meta));
@@ -383,6 +398,27 @@ mod tests {
         let plain = serde_json::to_string(&Envelope::success(String::from("row"))).expect("json");
         assert_eq!(plain, r#"{"ok":true,"data":"row","error":null,"schema":1}"#);
         assert_eq!(Envelope::success(String::from("row")).meta(), None);
+    }
+
+    #[test]
+    fn a_clamped_limit_ends_meta_and_round_trips() {
+        let meta = Meta {
+            stale: false,
+            head: None,
+            index_head: None,
+            rank_epoch: 1,
+            limit: Some(LimitNote {
+                asked: 200,
+                used: 100,
+            }),
+        };
+        let success = Envelope::success_with_meta(String::from("row"), meta);
+        assert_eq!(round_trip(&success), success);
+        let json = serde_json::to_string(&success).expect("json");
+        assert!(
+            json.contains(r#""rank_epoch":1,"limit":{"asked":200,"used":100}},"error""#),
+            "{json}"
+        );
     }
 
     #[test]

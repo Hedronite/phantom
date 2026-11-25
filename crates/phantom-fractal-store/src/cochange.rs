@@ -123,7 +123,7 @@ impl crate::Store {
     /// answers no files row drops at write time; the next rewritten
     /// scan rebuilds it. No migration runs.
     pub fn write_cochange(&mut self, scan: &CochangeScan) -> Result<(), StoreError> {
-        let tx = self.conn.transaction()?;
+        let tx = self.conn.savepoint()?;
         tx.execute("DELETE FROM git_scan", [])?;
         tx.execute("DELETE FROM file_history", [])?;
         tx.execute("DELETE FROM cochange", [])?;

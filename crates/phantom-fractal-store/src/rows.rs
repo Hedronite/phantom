@@ -5,7 +5,7 @@
 //! also survive edits and deletions, so the whole replace is one
 //! transaction driven from here.
 
-use rusqlite::{Connection, Transaction};
+use rusqlite::Connection;
 
 use phantom_fractal_lang::{Caller, Extract, Item, ItemKind, RefKind, Visibility};
 
@@ -71,7 +71,7 @@ pub(crate) fn replace_extract(
     lang_name: &str,
     extract: &Extract,
 ) -> Result<(), StoreError> {
-    let tx = conn.transaction()?;
+    let tx = conn.savepoint()?;
     delete_file_rows(&tx, path)?;
     let file_id = insert_file(&tx, path, source, mtime_ns, lang_name)?;
     let index = insert_symbols(&tx, file_id, path, extract)?;
@@ -83,7 +83,7 @@ pub(crate) fn replace_extract(
 
 /// Inserts the file row for one fresh extract and returns its id.
 pub(crate) fn insert_file(
-    conn: &Transaction<'_>,
+    conn: &Connection,
     path: &str,
     source: &str,
     mtime_ns: i64,
@@ -129,7 +129,7 @@ impl SymbolIndex {
 /// [`crate::Store::read_items`] keeps the W2 order. Returns the
 /// [`SymbolIndex`] for the ref inserts.
 pub(crate) fn insert_symbols(
-    conn: &Transaction<'_>,
+    conn: &Connection,
     file_id: i64,
     path: &str,
     extract: &Extract,
@@ -217,7 +217,7 @@ pub(crate) fn insert_symbols(
 /// Inserts one `use` row per import leaf, with alias, glob, scope, and
 /// the declaration's visibility (`public` marks a `pub use` re-export).
 pub(crate) fn insert_uses(
-    conn: &Transaction<'_>,
+    conn: &Connection,
     file_id: i64,
     extract: &Extract,
 ) -> Result<(), StoreError> {
@@ -250,7 +250,7 @@ pub(crate) fn insert_uses(
 /// or `macro`; `from_symbol` is the enclosing symbol in the same file, or
 /// nothing when the call sits outside any function.
 pub(crate) fn insert_calls(
-    conn: &Transaction<'_>,
+    conn: &Connection,
     file_id: i64,
     extract: &Extract,
     index: &SymbolIndex,

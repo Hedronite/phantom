@@ -137,7 +137,7 @@ fn the_tool_sits_after_repo_map_with_the_cli_ranges() {
     );
     described(
         "limit",
-        json!({ "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }),
+        json!({ "type": "integer", "minimum": 1, "default": 20 }),
     );
     described("repo", json!({ "type": "string", "maxLength": 4096 }));
     described(
@@ -275,10 +275,6 @@ fn bad_cochange_arguments_are_usage() {
         ),
         (
             json!({ "file": "src/a.rs", "limit": 0 }),
-            "limit must be an integer from 1 to 100",
-        ),
-        (
-            json!({ "file": "src/a.rs", "limit": 101 }),
             "limit must be an integer from 1 to 100",
         ),
         (

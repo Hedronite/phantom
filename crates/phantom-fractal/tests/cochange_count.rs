@@ -236,7 +236,6 @@ fn count_and_min_lift_and_bad_values_are_usage() {
     for args in [
         &["cochange", "src/a.rs", "--count", "--min-lift", "2"][..],
         &["cochange", "src/a.rs", "--count", "--limit", "0"][..],
-        &["cochange", "src/a.rs", "--count", "--limit", "101"][..],
         &["cochange", "src/a.rs", "--count", "--max-tokens", "0"][..],
     ] {
         assert_eq!(

@@ -14,7 +14,7 @@ use serde::Serialize;
 use super::budget::{Shed, Tokens, drop_last};
 use super::calls::{CallOut, Direction, edges};
 use super::cochange::{DEFAULT_MIN_LIFT, PartnerOut, partners};
-use super::lookup::{Names, checked_index, lookup_keyed};
+use super::lookup::{Names, Query, Retry, checked_index, lookup_keyed};
 use super::source::{SourceOut, read_source};
 use super::{Failure, Reply, answer, canonical_repo};
 
@@ -138,7 +138,7 @@ struct Calls {
 /// `request.repo`, fitted to `request.max_tokens`.
 pub(crate) fn show(request: &ShowRequest) -> Result<Reply<ShowResult>, Failure> {
     let (store, names) = checked_index(request.max_tokens, &request.repo)?;
-    let id = target_id(&store, &names, &request.target)?;
+    let id = target_id(&store, &names, request)?;
     let detail = indexed_detail(&store, id)?;
     let around = around(&store, &names, id, &detail)?;
     let source = source(request, &store, &detail)?;
@@ -166,9 +166,16 @@ struct Around {
 
 /// The id of the symbol `target` names: by name as `callers` looks it up,
 /// or by exact stable key.
-fn target_id(store: &Store, names: &Names, target: &Target) -> Result<i64, Failure> {
-    match target {
-        Target::Name(query) => Ok(lookup_keyed(store, names, query)?.id),
+fn target_id(store: &Store, names: &Names, request: &ShowRequest) -> Result<i64, Failure> {
+    match &request.target {
+        Target::Name(text) => {
+            let query = Query {
+                repo: &request.repo,
+                text,
+                retry: Retry::Verb("show"),
+            };
+            Ok(lookup_keyed(store, names, &query)?.id)
+        }
         Target::Id(key) => store
             .symbol_by_stable_key(key)?
             .ok_or_else(|| Failure::new(ErrorKind::NotFound, "no symbol has that stable key")),

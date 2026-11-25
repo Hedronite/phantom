@@ -13,12 +13,11 @@ use serde::Serialize;
 
 use super::budget::{self, Shed, Tokens, drop_last};
 use super::distinct::{Distinct, Site};
-use super::lookup::{Names, Reexport, SymbolOut, current_index, lookup_flagged, symbol_out};
-use super::{Failure, Reply};
-
-/// The smallest and largest `--limit`.
-pub(crate) const LIMIT_MIN: u64 = 1;
-pub(crate) const LIMIT_MAX: u64 = 100;
+use super::limit::Limit;
+use super::lookup::{
+    Names, Query, Reexport, Retry, SymbolOut, current_index, lookup_flagged, symbol_out,
+};
+use super::{Failure, Reply, answer_limited};
 
 /// What `impact` is asked for.
 pub(crate) struct ImpactRequest {
@@ -32,8 +31,8 @@ pub(crate) struct ImpactRequest {
     /// Drop `groups` and `tests` from the answer.
     pub(crate) summary: bool,
     /// The most hits listed over all groups, shallowest first, and the
-    /// most tests, [`LIMIT_MIN`] to [`LIMIT_MAX`]: the command line and the
-    /// MCP tool refuse any other value. Without it nothing is cut.
+    /// most tests. 0 is usage, and a value above the cap of 100 is used as
+    /// 100. Without it nothing is cut.
     pub(crate) limit: Option<u64>,
     /// The most estimated tokens the reply may cost.
     pub(crate) max_tokens: Option<u64>,
@@ -57,6 +56,9 @@ pub(crate) struct ImpactResult {
     options: OptionsOut,
     #[serde(flatten)]
     distinct: Option<Distinct>,
+    /// True, and present, only when `--limit` was above the cap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    truncated: Option<bool>,
     /// Present only when `--limit` was given.
     #[serde(skip_serializing_if = "Option::is_none")]
     limit: Option<LimitOut>,
@@ -196,15 +198,15 @@ pub(crate) struct OptionsOut {
 /// The impact of the one symbol `request.symbol` names in the index of
 /// `request.repo`, fitted to `request.max_tokens`.
 pub(crate) fn impact(request: &ImpactRequest) -> Result<Reply<ImpactResult>, Failure> {
-    if !request.options.in_range() {
-        return Err(Failure::new(
-            ErrorKind::Usage,
-            "depth must be 1 to 5 and min_confidence above 0 and at most 1",
-        ));
-    }
-    budget::check(request.max_tokens)?;
+    let asked = checked(request)?;
+    let clamped = asked.and_then(Limit::note);
     let (store, names) = current_index(&request.repo)?;
-    let (found, reexport) = lookup_flagged(&store, &names, &request.symbol)?;
+    let query = Query {
+        repo: &request.repo,
+        text: &request.symbol,
+        retry: Retry::Verb("impact"),
+    };
+    let (found, reexport) = lookup_flagged(&store, &names, &query)?;
     let options = request.options;
     let answer = phantom_fractal_analyze::impact(&store, found.id, &options)?;
     let (mut groups, mut tests) = if request.summary {
@@ -224,9 +226,7 @@ pub(crate) fn impact(request: &ImpactRequest) -> Result<Reply<ImpactResult>, Fai
         });
         (Some(groups), tests)
     };
-    let limit = request
-        .limit
-        .map(|max| cut(max, groups.as_mut(), tests.as_mut()));
+    let limit = asked.map(|asked| cut(asked.used(), groups.as_mut(), tests.as_mut()));
     let distinct = groups.as_ref().map(|groups: &Vec<GroupOut>| {
         let hits = groups.iter().flat_map(|group| &group.hits);
         let tests = tests.iter().flatten().map(|test: &TestOut| &test.hit);
@@ -242,11 +242,25 @@ pub(crate) fn impact(request: &ImpactRequest) -> Result<Reply<ImpactResult>, Fai
         tests,
         options: options_out(&options),
         distinct,
+        truncated: clamped.map(|_| true),
         limit,
         reexport,
         tokens: None,
     };
-    super::answer(result, &store, &request.repo, request.max_tokens)
+    answer_limited(result, &store, &request.repo, request.max_tokens, clamped)
+}
+
+/// The limit, if one was given, unless it is 0 or the options or
+/// `max_tokens` are out of range: those are `Usage`.
+fn checked(request: &ImpactRequest) -> Result<Option<Limit>, Failure> {
+    if !request.options.in_range() {
+        return Err(Failure::new(
+            ErrorKind::Usage,
+            "depth must be 1 to 5 and min_confidence above 0 and at most 1",
+        ));
+    }
+    budget::check(request.max_tokens)?;
+    request.limit.map(Limit::new).transpose()
 }
 
 /// Keeps at most `max` hits over `groups`, shallowest group first, and at

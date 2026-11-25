@@ -15,12 +15,10 @@ use phantom_fractal_store::{Store, StoreError};
 use serde::Serialize;
 
 use super::budget::{self, Shed, Tokens, drop_last};
-use super::lookup::current_index;
-use super::{Failure, Reply, answer};
+use super::limit::Limit;
+use super::lookup::{Names, current_index};
+use super::{Failure, Reply, answer_limited};
 
-/// The fewest and most hits one `rank` returns.
-pub(crate) const LIMIT_MIN: u64 = 1;
-pub(crate) const LIMIT_MAX: u64 = 100;
 /// The hits `rank` returns when no limit is given.
 pub(crate) const DEFAULT_LIMIT: u64 = 20;
 /// The most focus paths `rank` and `map` take.
@@ -58,7 +56,7 @@ pub(crate) struct RankRequest {
     /// Indexed file paths, relative to the repo, to personalise the rank
     /// to. Empty for the global rank.
     pub(crate) focus: Vec<String>,
-    /// [`LIMIT_MIN`] to [`LIMIT_MAX`].
+    /// At least 1; above 100 it is used as 100.
     pub(crate) limit: u64,
     /// The indexed tree.
     pub(crate) repo: PathBuf,
@@ -130,37 +128,51 @@ struct FileHit {
 /// The top `request.limit` symbols or files, best first, fitted to
 /// `request.max_tokens`. Ties break by path, then line.
 pub(crate) fn rank(request: &RankRequest) -> Result<Reply<RankResult>, Failure> {
-    if !(LIMIT_MIN..=LIMIT_MAX).contains(&request.limit) {
-        return Err(Failure::new(
-            ErrorKind::Usage,
-            format!("limit must be {LIMIT_MIN} to {LIMIT_MAX}"),
-        ));
-    }
-    focus_cap(&request.focus)?;
-    budget::check(request.max_tokens)?;
+    let asked = checked(request)?;
+    let clamped = asked.note();
     let (store, names) = current_index(&request.repo)?;
     let focus = focus_files(&store, &request.focus)?;
     let ranks = ranks(&store, &focus.ids)?;
-    let limit = usize::try_from(request.limit).unwrap_or(usize::MAX);
-    let (hits, total) = match request.kind {
-        RankKind::Symbols => {
-            let hits = top_symbols(&store, &ranks, limit, |id| names.of(id))?;
-            (Hits::Symbols(hits), ranks.symbols.len())
-        }
-        RankKind::Files => {
-            let hits = top_files(&store, &ranks, limit)?;
-            (Hits::Files(hits), ranks.files.len())
-        }
-    };
+    let limit = usize::try_from(asked.used()).unwrap_or(usize::MAX);
+    let (hits, total) = top(&store, &names, &ranks, request.kind, limit)?;
     let result = RankResult {
         kind: request.kind.as_str(),
         epoch: ranks.epoch,
         focus: focus.paths,
         hits,
-        truncated: total > limit,
+        truncated: asked.truncated(total > limit),
         tokens: None,
     };
-    answer(result, &store, &request.repo, request.max_tokens)
+    answer_limited(result, &store, &request.repo, request.max_tokens, clamped)
+}
+
+/// The limit, unless it is 0, or the focus paths or `max_tokens` are out
+/// of range: those are `Usage`.
+fn checked(request: &RankRequest) -> Result<Limit, Failure> {
+    let limit = Limit::new(request.limit)?;
+    focus_cap(&request.focus)?;
+    budget::check(request.max_tokens)?;
+    Ok(limit)
+}
+
+/// The best `limit` hits of `kind`, and how many were ranked.
+fn top(
+    store: &Store,
+    names: &Names,
+    ranks: &Ranks,
+    kind: RankKind,
+    limit: usize,
+) -> Result<(Hits, usize), Failure> {
+    Ok(match kind {
+        RankKind::Symbols => {
+            let hits = top_symbols(store, ranks, limit, |id| names.of(id))?;
+            (Hits::Symbols(hits), ranks.symbols.len())
+        }
+        RankKind::Files => {
+            let hits = top_files(store, ranks, limit)?;
+            (Hits::Files(hits), ranks.files.len())
+        }
+    })
 }
 
 /// `Usage` when there are more than [`FOCUS_MAX`] focus paths.

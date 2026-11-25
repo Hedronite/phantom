@@ -513,7 +513,7 @@ fn tools_list_matches_the_spec_table() {
     assert_eq!(
         ranked["limit"],
         json!({
-            "type": "integer", "minimum": 1, "maximum": 100, "default": 20,
+            "type": "integer", "minimum": 1, "default": 20,
             "description": ranked["limit"]["description"],
         })
     );
@@ -605,7 +605,7 @@ fn unknown_tools_and_bad_arguments() {
             call(20, "impact", json!({ "symbol": "a", "include_tests": 1 })),
             call(21, "impact", json!({ "symbol": "a", "summary": "no" })),
             call(22, "impact", json!({ "symbol": "a", "limit": 0 })),
-            call(23, "impact", json!({ "symbol": "a", "limit": 101 })),
+            call(23, "impact", json!({ "symbol": "a", "limit": -1 })),
             call(24, "impact", json!({ "symbol": "a", "limit": 2.5 })),
             call(25, "impact", json!({ "symbol": "a", "limit": "3" })),
         ]),
@@ -663,11 +663,6 @@ fn top_ranked_and_repo_map_refuse_bad_arguments() {
         (
             "top_ranked",
             json!({ "limit": 0 }),
-            "limit must be an integer from 1 to 100",
-        ),
-        (
-            "top_ranked",
-            json!({ "limit": 101 }),
             "limit must be an integer from 1 to 100",
         ),
         (
