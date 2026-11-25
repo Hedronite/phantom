@@ -10,7 +10,7 @@ use phantom_fractal_store::Store;
 use serde::Serialize;
 
 use super::budget::{self, Shed, Tokens};
-use super::lookup::{Names, current_index, lookup_keyed};
+use super::lookup::{Names, Query, Retry, current_index, lookup_keyed};
 use super::{Failure, Reply, answer};
 
 /// What `path` is asked for.
@@ -83,16 +83,9 @@ struct HopOut {
 /// The best shortest path from `request.from` to `request.to` in the
 /// index of `request.repo`, fitted to `request.max_tokens`.
 pub(crate) fn symbol_path(request: &PathRequest) -> Result<Reply<PathResult>, Failure> {
-    if !(PATH_MIN_DEPTH..=PATH_MAX_DEPTH).contains(&request.max_depth) {
-        return Err(Failure::new(
-            ErrorKind::Usage,
-            format!("max_depth must be {PATH_MIN_DEPTH} to {PATH_MAX_DEPTH}"),
-        ));
-    }
-    budget::check(request.max_tokens)?;
+    checked(request)?;
     let (store, names) = current_index(&request.repo)?;
-    let from = resolve(&store, &names, &request.from)?;
-    let to = resolve(&store, &names, &request.to)?;
+    let (from, to) = ends(&store, &names, request)?;
     let found = path(&store, from, to, request.max_depth)?;
     let start = found
         .start
@@ -109,14 +102,38 @@ pub(crate) fn symbol_path(request: &PathRequest) -> Result<Reply<PathResult>, Fa
     answer(result, &store, &request.repo, request.max_tokens)
 }
 
-/// The symbol `text` names: its exact stable key, or else a name as
+/// `Usage` unless `max_depth` and `max_tokens` are in range.
+fn checked(request: &PathRequest) -> Result<(), Failure> {
+    if !(PATH_MIN_DEPTH..=PATH_MAX_DEPTH).contains(&request.max_depth) {
+        return Err(Failure::new(
+            ErrorKind::Usage,
+            format!("max_depth must be {PATH_MIN_DEPTH} to {PATH_MAX_DEPTH}"),
+        ));
+    }
+    budget::check(request.max_tokens)
+}
+
+/// FROM and then TO, each looked up with the retry that keeps the other.
+fn ends(store: &Store, names: &Names, request: &PathRequest) -> Result<(i64, i64), Failure> {
+    let end = |text, retry| Query {
+        repo: &request.repo,
+        text,
+        retry,
+    };
+    let from = end(&request.from, Retry::PathFrom(&request.to));
+    let from = resolve(store, names, &from)?;
+    let to = end(&request.to, Retry::PathTo(&request.from));
+    Ok((from, resolve(store, names, &to)?))
+}
+
+/// The symbol `query` names: its exact stable key, or else a name as
 /// `show` looks it up, `NotFound` when none and `Ambiguous`, with keyed
 /// candidates, when more than one.
-fn resolve(store: &Store, names: &Names, text: &str) -> Result<i64, Failure> {
-    if let Some(id) = store.symbol_by_stable_key(text)? {
+fn resolve(store: &Store, names: &Names, query: &Query) -> Result<i64, Failure> {
+    if let Some(id) = store.symbol_by_stable_key(query.text)? {
         return Ok(id);
     }
-    Ok(lookup_keyed(store, names, text)?.id)
+    Ok(lookup_keyed(store, names, query)?.id)
 }
 
 fn node_out(node: PathNode) -> NodeOut {
@@ -136,5 +153,32 @@ fn hop_out(hop: Hop) -> HopOut {
         line: hop.line,
         edge_kind: hop.edge_kind.as_str(),
         confidence: hop.confidence,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{PATH_MAX_DEPTH, PATH_MIN_DEPTH, PathRequest, checked};
+
+    #[test]
+    fn a_request_out_of_range_is_refused_before_any_read() {
+        let request = |max_depth: u8, max_tokens: Option<u64>| PathRequest {
+            from: "a".to_owned(),
+            to: "b".to_owned(),
+            max_depth,
+            repo: PathBuf::from("."),
+            max_tokens,
+        };
+        assert!(checked(&request(PATH_MIN_DEPTH, None)).is_ok());
+        assert!(checked(&request(PATH_MAX_DEPTH, Some(100_000))).is_ok());
+        for bad in [
+            request(PATH_MIN_DEPTH - 1, None),
+            request(PATH_MAX_DEPTH + 1, None),
+            request(PATH_MIN_DEPTH, Some(0)),
+        ] {
+            assert!(checked(&bad).is_err());
+        }
     }
 }

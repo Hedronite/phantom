@@ -1,16 +1,20 @@
 //! Answers agents can use (SPEC-w14 G1b): `find` over methods, a missed
 //! lookup's `did_you_mean`, and the `display`, `callers_distinct`,
 //! `files` and `sites` keys of `callers`, `callees` and `impact`, which
-//! sit after the old keys and go first under a budget.
+//! sit after the old keys and go first under a budget. And SPEC-w16 G1b,
+//! on the command line and over MCP: the crate-name and `path:line` forms,
+//! the `retry` of a miss, and a limit above 100.
 
 use std::collections::BTreeSet;
-use std::process::Command;
+use std::io::Write;
+use std::path::Path;
+use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
 
 mod support;
 
-use support::{TempDir, copy_fixture, raw_keys};
+use support::{Repo, TempDir, copy_fixture, history, raw_keys};
 
 const BINS: [&str; 2] = [
     env!("CARGO_BIN_EXE_phantom-fractal"),
@@ -487,4 +491,340 @@ fn an_ambiguous_message_lists_every_candidate_with_no_tail_up_to_ten() {
             assert!(message.contains(&format!("{name} ({path}:")), "{message}");
         }
     }
+}
+
+/// The envelope line each `tools/call` returns, and its `isError`, from a
+/// server rooted at `root`.
+fn mcp(root: &Path, data: &Path, calls: &[(&str, Value)]) -> Vec<(bool, String)> {
+    let mut input = vec![
+        json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": { "name": "answers", "version": "0" },
+        }}),
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+    ];
+    input.extend((1..).zip(calls).map(|(id, (name, arguments))| {
+        json!({ "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": { "name": name, "arguments": arguments } })
+    }));
+    let mut child = Command::new(BINS[0])
+        .arg("mcp")
+        .current_dir(root)
+        .env("PHANTOM_FRACTAL_DATA", data)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("serve");
+    let mut stdin = child.stdin.take().expect("stdin");
+    for message in &input {
+        writeln!(stdin, "{message}").expect("write");
+    }
+    drop(stdin);
+    let out = child.wait_with_output().expect("server");
+    assert!(out.status.success());
+    String::from_utf8(out.stdout)
+        .expect("utf-8")
+        .lines()
+        .skip(1)
+        .map(|line| {
+            let reply: Value = serde_json::from_str(line).expect("reply");
+            let result = &reply["result"];
+            let text = result["content"][0]["text"].as_str().expect("text");
+            (result["isError"] == true, text.to_owned())
+        })
+        .collect()
+}
+
+/// A command line `retry`, run as printed. Its words here are all plain.
+fn run_retry(world: &World, retry: &str) -> (Option<i32>, Value) {
+    let words: Vec<&str> = retry.split(' ').collect();
+    assert_eq!(words[0], "phantom-fractal", "{retry}");
+    assert!(!retry.contains('\''), "{retry}");
+    world.run(BINS[0], &words[1..])
+}
+
+/// The symbol's qualified name: `show` gives it as `qual_name`.
+fn symbol_name(env: &Value) -> &Value {
+    let symbol = &env["data"]["symbol"];
+    symbol.get("qual_name").unwrap_or(&symbol["name"])
+}
+
+/// `fixtures/resolve` is the package `resolve-fixture`.
+#[test]
+fn a_workspace_crate_name_stands_for_crate_in_every_symbol_command() {
+    let world = World::new();
+    for command in ["show", "callers", "callees", "impact"] {
+        let want = world.data(BINS[0], &[command, "crate::util::deep::sink"]);
+        for name in [
+            "resolve_fixture::util::deep::sink",
+            "resolve-fixture::util::deep::sink",
+        ] {
+            assert_eq!(
+                world.data(BINS[0], &[command, name]),
+                want,
+                "{command} {name}"
+            );
+        }
+    }
+    let path = world.data(
+        BINS[0],
+        &[
+            "path",
+            "resolve_fixture::util::helper",
+            "resolve_fixture::util::deep::sink",
+        ],
+    );
+    assert_eq!(path["found"], true, "{path}");
+}
+
+#[test]
+fn a_path_and_line_name_the_definition_only_while_the_index_is_fresh() {
+    let world = World::new();
+    let at = "src/util.rs:5";
+    for command in ["show", "callers", "callees", "impact"] {
+        let (code, env) = world.run(BINS[0], &[command, at]);
+        assert_eq!(code, Some(0), "{command}: {env}");
+        assert_eq!(symbol_name(&env), "crate::util::helper", "{env}");
+        assert_eq!(env["meta"]["stale"], false, "{env}");
+    }
+    let path = world.data(BINS[0], &["path", at, "crate::util::deep::sink"]);
+    assert_eq!(path["found"], true, "{path}");
+
+    let source = world.repo.path().join("src/util.rs");
+    let text = std::fs::read_to_string(&source).expect("source");
+    std::fs::write(&source, format!("\n{text}")).expect("edit");
+    let stale = json!({
+        "ok": false,
+        "data": null,
+        "error": {
+            "kind": "usage",
+            "message": "store: index is stale; run index before resolving path:line",
+            "exit": 1,
+        },
+        "schema": 1,
+    });
+    for args in [
+        &["show", at][..],
+        &["callers", at],
+        &["callees", at],
+        &["impact", at],
+        &["path", at, "crate::util::deep::sink"],
+        &["path", "crate::util::helper", at],
+    ] {
+        let (code, env) = world.run(BINS[0], args);
+        assert_eq!((code, &env), (Some(1), &stale), "{args:?}");
+    }
+    let over_mcp = mcp(
+        world.repo.path(),
+        world.data.path(),
+        &[("callers", json!({ "symbol": at }))],
+    );
+    let envelope: Value = serde_json::from_str(&over_mcp[0].1).expect("envelope");
+    assert_eq!((over_mcp[0].0, &envelope), (true, &stale));
+    // A name still answers from the stale index, and says it is stale.
+    let (code, env) = world.run(BINS[0], &["callers", "crate::util::helper"]);
+    assert_eq!(
+        (code, &env["meta"]["stale"]),
+        (Some(0), &json!(true)),
+        "{env}"
+    );
+
+    let (code, line) = world.line(BINS[0], &["index", "."]);
+    assert_eq!(code, Some(0), "{line}");
+    let data = world.data(BINS[0], &["callers", "src/util.rs:6"]);
+    assert_eq!(data["symbol"]["name"], "crate::util::helper", "{data}");
+}
+
+/// Only one symbol is named `sink`, and a miss still answers for none.
+#[test]
+fn a_miss_is_never_answered_for_the_one_suggestion() {
+    let world = World::new();
+    for command in ["show", "callers", "callees", "impact"] {
+        let (code, env) = world.run(BINS[0], &[command, "nowhere::sink"]);
+        assert_eq!((code, &env["ok"]), (Some(3), &json!(false)), "{env}");
+        assert_eq!(env["error"]["kind"], "not_found", "{env}");
+        assert!(env.get("meta").is_none(), "{env}");
+        let data = env["data"].as_object().expect("data");
+        let keys: Vec<&str> = data.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["did_you_mean", "retry"], "{env}");
+        assert_eq!(
+            names(&env["data"]["did_you_mean"]),
+            ["crate::util::deep::sink"]
+        );
+        let retry = env["data"]["retry"].as_str().expect("retry");
+        assert_eq!(
+            retry,
+            format!("phantom-fractal {command} -- src/util/deep.rs::sink")
+        );
+        let (code, again) = run_retry(&world, retry);
+        assert_eq!(code, Some(0), "{retry}: {again}");
+        assert_eq!(symbol_name(&again), "crate::util::deep::sink");
+    }
+}
+
+#[test]
+fn a_missed_end_of_a_path_is_retried_in_its_own_place() {
+    let world = World::new();
+    let good = "crate::util::deep::sink";
+    let from = "crate::util::helper";
+    for (args, retry) in [
+        (
+            ["path", "nowhere::sink", good],
+            format!("phantom-fractal path -- src/util/deep.rs::sink {good}"),
+        ),
+        (
+            ["path", from, "nowhere::sink"],
+            format!("phantom-fractal path -- {from} src/util/deep.rs::sink"),
+        ),
+    ] {
+        let (code, env) = world.run(BINS[0], &args);
+        assert_eq!(code, Some(3), "{env}");
+        assert_eq!(env["data"]["retry"], retry, "{env}");
+        let (code, again) = run_retry(&world, &retry);
+        assert_eq!(code, Some(0), "{retry}: {again}");
+    }
+}
+
+#[test]
+fn a_line_that_starts_nothing_suggests_the_nearest_first() {
+    let world = World::new();
+    let (code, env) = world.run(BINS[0], &["callers", "src/util.rs:6"]);
+    assert_eq!((code, &env["ok"]), (Some(3), &json!(false)), "{env}");
+    let suggested = names(&env["data"]["did_you_mean"]);
+    assert_eq!(suggested[0], "crate::util::helper", "{env}");
+    let retry = env["data"]["retry"].as_str().expect("retry");
+    assert_eq!(retry, "phantom-fractal callers -- src/util.rs::helper");
+    let (code, again) = run_retry(&world, retry);
+    assert_eq!(code, Some(0), "{again}");
+    // A file that is not indexed has nothing to suggest.
+    let (code, env) = world.run(BINS[0], &["callers", "src/nope.rs:6"]);
+    assert_eq!(
+        (code, &env["data"]),
+        (Some(3), &json!({ "did_you_mean": [] }))
+    );
+}
+
+#[test]
+fn a_miss_reads_the_same_over_mcp() {
+    let world = World::new();
+    let (_, line) = world.line(BINS[0], &["callers", "nowhere::sink"]);
+    let over_mcp = mcp(
+        world.repo.path(),
+        world.data.path(),
+        &[("callers", json!({ "symbol": "nowhere::sink" }))],
+    );
+    assert_eq!(over_mcp, [(true, line)]);
+}
+
+/// `args` with `--limit limit`: the envelope.
+fn limited(world: &World, args: &[&str], limit: &str) -> Value {
+    let mut with = args.to_vec();
+    with.extend(["--limit", limit]);
+    let (code, env) = world.run(BINS[0], &with);
+    assert_eq!(code, Some(0), "{with:?}: {env}");
+    env
+}
+
+#[test]
+fn a_limit_above_100_is_cut_to_100_and_the_reply_says_so() {
+    let world = World::new();
+    let noted = json!({ "asked": 200, "used": 100 });
+    let sink = ["impact", "crate::util::deep::sink"];
+    for args in [&sink[..], &["rank"], &["rank", "--files"]] {
+        let over = limited(&world, args, "200");
+        assert_eq!(over["meta"]["limit"], noted, "{over}");
+        assert_eq!(over["data"]["truncated"], true, "{over}");
+        let cap = limited(&world, args, "100");
+        assert!(cap["meta"].get("limit").is_none(), "{cap}");
+        // Apart from what says so, the reply is the one 100 gives.
+        let mut same = over["data"].clone();
+        same["truncated"] = cap["data"]["truncated"].clone();
+        if cap["data"].get("truncated").is_none() {
+            same.as_object_mut().expect("data").remove("truncated");
+        }
+        assert_eq!(same, cap["data"], "{args:?}");
+    }
+    let cap = limited(&world, &sink, "100");
+    assert!(cap["data"].get("truncated").is_none(), "{cap}");
+    assert!(world.data(BINS[0], &sink).get("truncated").is_none());
+    assert_eq!(
+        limited(&world, &["rank"], "100")["data"]["truncated"],
+        false
+    );
+
+    // A budget that drops entries keeps what says the limit was cut.
+    let fitted = limited(
+        &world,
+        &["impact", "crate::util::deep::sink", "--max-tokens", "250"],
+        "200",
+    );
+    assert_eq!(fitted["meta"]["limit"], noted, "{fitted}");
+    assert_eq!(fitted["data"]["truncated"], true, "{fitted}");
+    assert!(
+        fitted["data"]["tokens"]["used"].as_u64() <= Some(250),
+        "{fitted}"
+    );
+
+    for limit in ["0", "-1", "many", "2.5"] {
+        for args in [&sink[..], &["rank"]] {
+            let mut with = args.to_vec();
+            with.extend(["--limit", limit]);
+            let (code, line) = world.line(BINS[0], &with);
+            assert_eq!((code, line.as_str()), (Some(1), ""), "{with:?}");
+        }
+    }
+}
+
+#[test]
+fn a_cochange_limit_above_100_is_cut_in_both_modes_and_over_mcp() {
+    let repo = Repo::new("answers-limit", &history());
+    let data = TempDir::new("answers-limit-data");
+    let line = |args: &[&str]| {
+        let out = Command::new(BINS[0])
+            .args(args)
+            .env("PHANTOM_FRACTAL_DATA", data.path())
+            .current_dir(&repo.root)
+            .output()
+            .expect("run");
+        assert!(out.status.success(), "{args:?}");
+        String::from_utf8(out.stdout)
+            .expect("utf-8")
+            .trim_end()
+            .to_owned()
+    };
+    line(&["index", "."]);
+    let mut printed = Vec::new();
+    for args in [
+        &["cochange", "src/a.rs"][..],
+        &["cochange", "src/a.rs", "--count"],
+        &["impact", "a::fa"],
+        &["rank"],
+    ] {
+        let mut with = args.to_vec();
+        with.extend(["--limit", "200"]);
+        let text = line(&with);
+        let env: Value = serde_json::from_str(&text).expect("envelope");
+        assert_eq!(
+            env["meta"]["limit"],
+            json!({ "asked": 200, "used": 100 }),
+            "{text}"
+        );
+        assert_eq!(env["data"]["truncated"], true, "{text}");
+        printed.push((false, text));
+    }
+    let over_mcp = mcp(
+        &repo.root,
+        data.path(),
+        &[
+            ("cochange", json!({ "file": "src/a.rs", "limit": 200 })),
+            (
+                "cochange",
+                json!({ "file": "src/a.rs", "limit": 200, "mode": "count" }),
+            ),
+            ("impact", json!({ "symbol": "a::fa", "limit": 200 })),
+            ("top_ranked", json!({ "limit": 200 })),
+        ],
+    );
+    assert_eq!(over_mcp, printed);
 }

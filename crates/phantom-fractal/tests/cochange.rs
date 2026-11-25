@@ -412,7 +412,6 @@ fn cochange_exits_are_usage_no_index_and_not_found() {
     }
     for args in [
         &["cochange", "src/a.rs", "--limit", "0"][..],
-        &["cochange", "src/a.rs", "--limit", "101"][..],
         &["cochange", "src/a.rs", "--min-lift", "-1"][..],
         &["cochange", "src/a.rs", "--min-lift", "NaN"][..],
         &["cochange", "src/a.rs", "--min-lift", "inf"][..],

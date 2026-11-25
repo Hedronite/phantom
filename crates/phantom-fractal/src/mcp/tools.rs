@@ -24,9 +24,9 @@ use crate::ops::budget::{MAX_TOKENS_MAX, MAX_TOKENS_MIN};
 use crate::ops::cochange::{
     self as cochange, DEFAULT_MIN_LIFT, MIN_LIFT_MAX, min_lift_in_range, min_lift_usage,
 };
-use crate::ops::impact::{LIMIT_MAX as IMPACT_LIMIT_MAX, LIMIT_MIN as IMPACT_LIMIT_MIN};
+use crate::ops::limit::LIMIT_MIN;
 use crate::ops::map::{BUDGET_MAX, BUDGET_MIN};
-use crate::ops::rank::{DEFAULT_LIMIT, FOCUS_MAX, LIMIT_MAX, LIMIT_MIN, focus_cap};
+use crate::ops::rank::{DEFAULT_LIMIT, FOCUS_MAX, focus_cap};
 use crate::ops::{
     self, CallsRequest, CochangeRequest, CountRequest, DiffRequest, Failure, FindRequest,
     ImpactRequest, IndexRequest, MapRequest, PathRequest, RankKind, RankRequest, Reply,
@@ -47,8 +47,9 @@ const REPO: &str = "The indexed tree: one of the server's roots. Defaults to the
     the working directory.";
 
 const SYMBOL: &str = "A bare name such as `parse`; `Type::method` such as `App::watch_dir`; a \
-    module path such as `tui::app::App::watch_dir` or `config::parse`; or a method by its module \
-    and name, such as `app::watch_dir`.";
+    module path such as `tui::app::App::watch_dir` or `config::parse`, which may start with a \
+    workspace crate's name; a method by its module and name, such as `app::watch_dir`; or the \
+    `path:line` a definition starts at, such as `src/config.rs:12`, while the index is fresh.";
 
 const FOCUS: &str = "Indexed files, each relative to the repo, such as `src/lib.rs`.";
 
@@ -157,11 +158,11 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
                     },
                     "limit": {
                         "type": "integer",
-                        "minimum": IMPACT_LIMIT_MIN,
-                        "maximum": IMPACT_LIMIT_MAX,
+                        "minimum": LIMIT_MIN,
                         "description": "The most hits listed over all depths, shallowest first, \
-                            and the most tests. A cut group keeps its `total` and sets \
-                            `truncated`; `data.limit` counts what was left out.",
+                            and the most tests, 1 to 100. A cut group keeps its `total` and sets \
+                            `truncated`; `data.limit` counts what was left out. Above 100 it is \
+                            used as 100, and `meta.limit` and `data.truncated` say so.",
                     },
                     "max_tokens": max_tokens(),
                 }),
@@ -189,9 +190,9 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
                     "limit": {
                         "type": "integer",
                         "minimum": LIMIT_MIN,
-                        "maximum": LIMIT_MAX,
                         "default": DEFAULT_LIMIT,
-                        "description": "The most hits returned.",
+                        "description": "The most hits returned, 1 to 100. Above 100 it is used \
+                            as 100, and `meta.limit` says so.",
                     },
                     "repo": { "type": "string", "description": REPO },
                     "max_tokens": max_tokens(),
@@ -257,10 +258,10 @@ pub(crate) fn list(allow_index: bool) -> Vec<Value> {
                     },
                     "limit": {
                         "type": "integer",
-                        "minimum": cochange::LIMIT_MIN,
-                        "maximum": cochange::LIMIT_MAX,
+                        "minimum": LIMIT_MIN,
                         "default": cochange::DEFAULT_LIMIT,
-                        "description": "The most partners returned.",
+                        "description": "The most partners returned, 1 to 100. Above 100 it is \
+                            used as 100, and `meta.limit` says so.",
                     },
                     "repo": { "type": "string", "description": REPO },
                     "max_tokens": max_tokens(),
@@ -517,7 +518,7 @@ fn impact_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<Impac
     let symbol = args.read(args.required_string("symbol"));
     let repo = args.read(args.string("repo"));
     let summary = args.read(args.boolean("summary")).unwrap_or(false);
-    let limit = args.read(args.integer("limit", IMPACT_LIMIT_MIN, IMPACT_LIMIT_MAX));
+    let limit = args.read(args.limit());
     let max_tokens = args.read(args.max_tokens());
     args.checked()?;
     Ok(ImpactRequest {
@@ -536,9 +537,7 @@ fn rank_request(arguments: &Map<String, Value>, roots: &Roots) -> Result<RankReq
         .read(args.choice("kind", RankKind::parse, "kind must be symbols or files"))
         .unwrap_or(RankKind::Symbols);
     let focus = args.read(args.focus());
-    let limit = args
-        .read(args.integer("limit", LIMIT_MIN, LIMIT_MAX))
-        .unwrap_or(DEFAULT_LIMIT);
+    let limit = args.read(args.limit()).unwrap_or(DEFAULT_LIMIT);
     let repo = args.read(args.string("repo"));
     let max_tokens = args.read(args.max_tokens());
     args.checked()?;
@@ -612,9 +611,7 @@ fn cochange_request(
         args.read::<()>(Err(usage("min_lift is for mode decayed only")));
     }
     let min_lift = args.read(args.min_lift()).unwrap_or(DEFAULT_MIN_LIFT);
-    let limit = args
-        .read(args.integer("limit", cochange::LIMIT_MIN, cochange::LIMIT_MAX))
-        .unwrap_or(cochange::DEFAULT_LIMIT);
+    let limit = args.read(args.limit()).unwrap_or(cochange::DEFAULT_LIMIT);
     let repo = args.read(args.string("repo"));
     let max_tokens = args.read(args.max_tokens());
     args.checked()?;
@@ -898,6 +895,14 @@ impl<'a> Args<'a> {
                 "{name} must be an integer from {min} to {max}"
             ))),
         }
+    }
+
+    /// `limit`: an integer of at least 1, as the command line takes it. The
+    /// operation cuts one above the cap to the cap, so the message names
+    /// the range that is used as asked.
+    fn limit(&self) -> Result<Option<u64>, Failure> {
+        self.integer("limit", LIMIT_MIN, u64::MAX)
+            .map_err(|_| usage("limit must be an integer from 1 to 100"))
     }
 
     /// `focus`: an array of at most [`FOCUS_MAX`] strings, or empty when

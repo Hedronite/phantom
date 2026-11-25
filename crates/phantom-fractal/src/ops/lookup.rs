@@ -1,20 +1,24 @@
 //! Finding the one symbol a query names, and naming stored symbols.
 //!
 //! A query is a bare name such as `helper`, an in-file name such as
-//! `Counter::new` or `tests::check`, or a module-qualified name such as
-//! `util::helper` or `crate::util::helper`. The store's `symbols_matching`
-//! decides which symbols it names.
+//! `Counter::new` or `tests::check`, a module-qualified name such as
+//! `util::helper` or `crate::util::helper`, the same under a workspace
+//! crate's name, or the `path:line` a definition starts at. The store
+//! decides which symbols it names, and refuses `path:line` on a stale
+//! index. A miss is always a failure: it suggests symbols and the command
+//! that asks about the first, and never answers for one of them.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 
-use phantom_fractal_extract::EXTRACTOR_VERSION;
+use phantom_fractal_extract::{EXTRACTOR_VERSION, resolve_query};
 use phantom_fractal_lang::{Id, ResolveInput, Symbol, SymbolKind};
 use phantom_fractal_proto::ErrorKind;
-use phantom_fractal_store::{Store, SymbolMatch};
+use phantom_fractal_store::{Store, SymbolMatch, parse_path_line};
 use serde::Serialize;
 
-use super::{Failure, budget, open_index};
+use super::{Failure, budget, canonical_repo, open_index};
 
 /// Most candidates an `Ambiguous` failure lists.
 const CANDIDATE_CAP: usize = 10;
@@ -45,11 +49,60 @@ pub(crate) struct Candidates {
 }
 
 /// `data` of a lookup's `NotFound` failure: up to [`CANDIDATE_CAP`]
-/// symbols whose bare name is the query's last segment, each in the shape
-/// of an `Ambiguous` candidate. The list is empty when there are none.
+/// symbols whose bare name is the query's last segment, or, for a
+/// `path:line`, the file's symbols nearest the line, each in the shape of
+/// an `Ambiguous` candidate. The list is empty when there are none.
 #[derive(Serialize)]
 pub(crate) struct DidYouMean {
     did_you_mean: Vec<SymbolOut>,
+    /// The command line that asks again about the first suggestion.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry: Option<String>,
+}
+
+/// One name to look up in the index of the tree at `repo`.
+pub(crate) struct Query<'a> {
+    pub(crate) repo: &'a Path,
+    pub(crate) text: &'a str,
+    pub(crate) retry: Retry<'a>,
+}
+
+/// The command a miss can be retried with, once a suggestion takes the
+/// missed name's place.
+#[derive(Clone, Copy)]
+pub(crate) enum Retry<'a> {
+    /// A command that takes the one name.
+    Verb(&'static str),
+    /// `path`, whose FROM was missed; holds TO.
+    PathFrom(&'a str),
+    /// `path`, whose TO was missed; holds FROM.
+    PathTo(&'a str),
+}
+
+impl Retry<'_> {
+    /// The command line with `name` in the missed name's place. It has the
+    /// command and its names only: `--repo` and other flags are the
+    /// caller's to add.
+    fn line(self, name: &str) -> String {
+        let (verb, names) = match self {
+            Self::Verb(verb) => (verb, vec![name]),
+            Self::PathFrom(to) => ("path", vec![name, to]),
+            Self::PathTo(from) => ("path", vec![from, name]),
+        };
+        let words: Vec<Cow<str>> = names.into_iter().map(shell_word).collect();
+        format!("phantom-fractal {verb} -- {}", words.join(" "))
+    }
+}
+
+/// `word` as one POSIX shell word. Names come from the repository, so any
+/// character a shell reads is quoted.
+fn shell_word(word: &str) -> Cow<'_, str> {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "_./:-".contains(c);
+    if !word.is_empty() && word.chars().all(plain) {
+        Cow::Borrowed(word)
+    } else {
+        Cow::Owned(format!("'{}'", word.replace('\'', r"'\''")))
+    }
 }
 
 /// Qualified names for every stored symbol, built from the resolver input.
@@ -160,9 +213,9 @@ pub(crate) fn current_store(repo: &Path) -> Result<Store, Failure> {
 }
 
 /// The one stored symbol `query` names. None is `NotFound`, with up to
-/// [`CANDIDATE_CAP`] `did_you_mean` suggestions; more than one is
-/// `Ambiguous`, with up to [`CANDIDATE_CAP`] candidates.
-pub(crate) fn lookup(store: &Store, names: &Names, query: &str) -> Result<SymbolMatch, Failure> {
+/// [`CANDIDATE_CAP`] `did_you_mean` suggestions and a `retry`; more than
+/// one is `Ambiguous`, with up to [`CANDIDATE_CAP`] candidates.
+pub(crate) fn lookup(store: &Store, names: &Names, query: &Query) -> Result<SymbolMatch, Failure> {
     find_one(store, names, query, false)
 }
 
@@ -171,7 +224,7 @@ pub(crate) fn lookup(store: &Store, names: &Names, query: &str) -> Result<Symbol
 pub(crate) fn lookup_flagged(
     store: &Store,
     names: &Names,
-    query: &str,
+    query: &Query,
 ) -> Result<(SymbolMatch, Option<Reexport>), Failure> {
     let found = lookup(store, names, query)?;
     let reexport = Reexport::of(store, found.id)?;
@@ -182,7 +235,7 @@ pub(crate) fn lookup_flagged(
 pub(crate) fn lookup_keyed(
     store: &Store,
     names: &Names,
-    query: &str,
+    query: &Query,
 ) -> Result<SymbolMatch, Failure> {
     find_one(store, names, query, true)
 }
@@ -190,22 +243,47 @@ pub(crate) fn lookup_keyed(
 fn find_one(
     store: &Store,
     names: &Names,
-    query: &str,
+    query: &Query,
     keyed: bool,
 ) -> Result<SymbolMatch, Failure> {
-    let mut matches = store.symbols_matching(query)?;
-    matches.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
+    let mut matches = resolved(store, query)?;
     match matches.len() {
-        0 => {
-            let did_you_mean = listed(store, names, suggestions(store, query)?, keyed, false)?;
-            Err(Failure::not_found(
-                format!("no symbol named {query}"),
-                DidYouMean { did_you_mean },
-            ))
-        }
+        0 => missed(store, names, query, keyed),
         1 => Ok(matches.remove(0)),
-        _ => Err(ambiguous(store, names, query, matches, keyed)?),
+        _ => Err(ambiguous(store, names, query.text, matches, keyed)?),
     }
+}
+
+/// The symbols `query` names, by file and then line. A `path:line` is
+/// checked against the tree first, and refused when the index is stale.
+fn resolved(store: &Store, query: &Query) -> Result<Vec<SymbolMatch>, Failure> {
+    let root = canonical_repo(query.repo)?;
+    let mut matches = resolve_query(&root, store, query.text)?;
+    matches.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
+    Ok(matches)
+}
+
+/// The `NotFound` failure for `query`: its suggestions, and the retry that
+/// names the first of them. It is never a symbol.
+fn missed(
+    store: &Store,
+    names: &Names,
+    query: &Query,
+    keyed: bool,
+) -> Result<SymbolMatch, Failure> {
+    let found = suggestions(store, query.text)?;
+    let retry = found.first().map(|first| {
+        let name = names.display_of(first.id, &first.file, &first.qual_name);
+        query.retry.line(&name)
+    });
+    let did_you_mean = listed(store, names, found, keyed, false)?;
+    Err(Failure::not_found(
+        format!("no symbol named {}", query.text),
+        DidYouMean {
+            did_you_mean,
+            retry,
+        },
+    ))
 }
 
 /// The `Ambiguous` failure for the `matches` of `query`: the first
@@ -272,10 +350,13 @@ fn listed(
 }
 
 /// The store's suggestions for a missed `query`: symbols whose bare name
-/// is its last segment, by file and then line.
+/// is its last segment, by file and then line; for a `path:line`, the
+/// file's symbols as the store gives them, nearest the line first.
 fn suggestions(store: &Store, query: &str) -> Result<Vec<SymbolMatch>, Failure> {
     let mut found = store.did_you_mean(query)?;
-    found.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
+    if parse_path_line(query).is_none() {
+        found.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
+    }
     Ok(found)
 }
 
@@ -322,5 +403,40 @@ pub(crate) const fn kind_text(kind: SymbolKind) -> &'static str {
         SymbolKind::Trait => "trait",
         SymbolKind::Module => "module",
         SymbolKind::Method => "method",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Retry, shell_word};
+
+    #[test]
+    fn a_shell_word_is_quoted_unless_it_is_plain() {
+        for plain in ["parse", "src/a-b_c.rs::Type::new", "src/a.rs:12"] {
+            assert_eq!(shell_word(plain), plain);
+        }
+        for (word, quoted) in [
+            ("", "''"),
+            ("a b", "'a b'"),
+            ("src/$(id).rs::f", "'src/$(id).rs::f'"),
+            ("a;b", "'a;b'"),
+            ("it's", r"'it'\''s'"),
+        ] {
+            assert_eq!(shell_word(word), quoted);
+        }
+    }
+
+    #[test]
+    fn a_retry_puts_the_name_where_the_miss_was() {
+        for (retry, line) in [
+            (Retry::Verb("callers"), "phantom-fractal callers -- new"),
+            (
+                Retry::PathFrom("to x"),
+                "phantom-fractal path -- new 'to x'",
+            ),
+            (Retry::PathTo("from"), "phantom-fractal path -- from new"),
+        ] {
+            assert_eq!(retry.line("new"), line);
+        }
     }
 }

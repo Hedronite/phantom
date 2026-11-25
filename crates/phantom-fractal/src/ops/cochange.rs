@@ -16,12 +16,10 @@ use serde::{Deserialize, Serialize};
 
 use super::budget::{self, Shed, Tokens, drop_last};
 use super::index::WindowOut;
+use super::limit::Limit;
 use super::lookup::current_store;
-use super::{Failure, Reply, answer};
+use super::{Failure, Reply, answer_limited};
 
-/// The fewest and most partners one `cochange` returns.
-pub(crate) const LIMIT_MIN: u64 = 1;
-pub(crate) const LIMIT_MAX: u64 = 100;
 /// The partners `cochange` returns when no limit is given.
 pub(crate) const DEFAULT_LIMIT: u64 = 20;
 /// The lowest lift `cochange` and `show` list when none is given.
@@ -35,7 +33,7 @@ pub(crate) struct CochangeRequest {
     pub(crate) file: String,
     /// The lowest lift listed: a finite number, at least 0.
     pub(crate) min_lift: f64,
-    /// [`LIMIT_MIN`] to [`LIMIT_MAX`].
+    /// At least 1; above 100 it is used as 100.
     pub(crate) limit: u64,
     /// The indexed tree.
     pub(crate) repo: PathBuf,
@@ -149,63 +147,55 @@ pub(crate) struct PartnerOut {
 /// The partners of `request.file`, best lift first, then the most changes
 /// together, then path, fitted to `request.max_tokens`.
 pub(crate) fn cochange(request: &CochangeRequest) -> Result<Reply<CochangeResult>, Failure> {
-    checked(request)?;
+    let asked = checked(request)?;
+    let clamped = asked.note();
     let store = current_store(&request.repo)?;
     let file = indexed_file(&store, &request.file)?;
     let scan = scan(&store)?;
-    let (partners, truncated) = if scan.is_some() {
-        listed(&store, &file, request)?
-    } else {
-        (Vec::new(), false)
-    };
+    let limit = scan.as_ref().map(|_| asked);
+    let (partners, truncated) = listed(&store, &file, request, limit)?;
     let result = CochangeResult {
         file,
         scan,
         partners,
-        truncated,
+        truncated: asked.truncated(truncated),
         scope: Some(Scope::decayed()),
         tokens: None,
     };
-    answer(result, &store, &request.repo, request.max_tokens)
+    answer_limited(result, &store, &request.repo, request.max_tokens, clamped)
 }
 
-/// `Usage` unless the limit, `min_lift` and `max_tokens` are in range.
-fn checked(request: &CochangeRequest) -> Result<(), Failure> {
-    check_limit(request.limit)?;
+/// The limit, unless it is 0 or `min_lift` or `max_tokens` is out of
+/// range: those are `Usage`.
+fn checked(request: &CochangeRequest) -> Result<Limit, Failure> {
+    let limit = Limit::new(request.limit)?;
     if !min_lift_in_range(request.min_lift) {
         return Err(Failure::new(ErrorKind::Usage, min_lift_usage()));
     }
-    budget::check(request.max_tokens)
+    budget::check(request.max_tokens)?;
+    Ok(limit)
 }
 
-/// `file`'s first `request.limit` partners of at least `request.min_lift`,
-/// each with its weight as `together_decayed` too, and whether there were
-/// more.
+/// `file`'s first `limit` partners of at least `request.min_lift`, each
+/// with its weight as `together_decayed` too, and whether there were more.
+/// None without a limit, which is how a tree with no scan is passed.
 fn listed(
     store: &Store,
     file: &str,
     request: &CochangeRequest,
+    limit: Option<Limit>,
 ) -> Result<(Vec<PartnerOut>, bool), Failure> {
-    let limit = usize::try_from(request.limit).unwrap_or(usize::MAX);
-    let mut partners = partners(store, file, request.min_lift, request.limit + 1)?;
+    let Some(limit) = limit else {
+        return Ok((Vec::new(), false));
+    };
+    let mut partners = partners(store, file, request.min_lift, limit.used() + 1)?;
+    let limit = usize::try_from(limit.used()).unwrap_or(usize::MAX);
     let truncated = partners.len() > limit;
     partners.truncate(limit);
     for partner in &mut partners {
         partner.together_decayed = Some(partner.together);
     }
     Ok((partners, truncated))
-}
-
-/// `Usage` unless `limit` is [`LIMIT_MIN`] to [`LIMIT_MAX`].
-pub(crate) fn check_limit(limit: u64) -> Result<(), Failure> {
-    if (LIMIT_MIN..=LIMIT_MAX).contains(&limit) {
-        Ok(())
-    } else {
-        Err(Failure::new(
-            ErrorKind::Usage,
-            format!("limit must be {LIMIT_MIN} to {LIMIT_MAX}"),
-        ))
-    }
 }
 
 /// True for a finite `min_lift` from 0 to [`MIN_LIFT_MAX`].
@@ -314,17 +304,7 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use super::{CochangeRequest, Scope, check_limit, checked};
-
-    #[test]
-    fn a_limit_is_1_to_100() {
-        for limit in [0, 101, u64::MAX] {
-            assert!(check_limit(limit).is_err(), "{limit}");
-        }
-        for limit in [1, 20, 100] {
-            assert!(check_limit(limit).is_ok(), "{limit}");
-        }
-    }
+    use super::{CochangeRequest, Scope, checked};
 
     #[test]
     fn a_request_out_of_range_is_refused_before_any_read() {
@@ -337,6 +317,7 @@ mod tests {
         };
         assert!(checked(&request(20, 1.5, None)).is_ok());
         assert!(checked(&request(100, 0.0, Some(100_000))).is_ok());
+        assert!(checked(&request(u64::MAX, 1.5, None)).is_ok());
         for bad in [
             request(0, 1.5, None),
             request(20, -1.0, None),

@@ -54,8 +54,24 @@ Names: a bare name (`parse`), `Type::method` (`App::watch_dir`),
 `src/tui/app.rs:40 App::watch_dir`). Use `where NAME` first when a
 `Type::method` may exist in more than one crate, then pass its `display`.
 On `kind: ambiguous` the envelope carries `matches`; rerun with one of
-their `display`s. On `kind: not_found` it may carry `did_you_mean`, the
-symbols whose bare name is the last part of yours.
+their `display`s.
+
+Two more forms: the same name under a workspace crate's own name
+(`<crate>::item`, with `-` or `_`), and `path:line`
+(`src/tui/app.rs:40`), the line a definition starts at. `path:line` needs a
+fresh index: on a stale one it fails and says to run `index`.
+
+A miss is never guessed at. `kind: not_found` stays a failure and may carry
+`did_you_mean`, the symbols whose bare name is the last part of yours (for
+`path:line`, those nearest the line), and `retry`, the command that asks
+about the first of them. Run `retry` only if that symbol is the one you
+meant. `retry` says `phantomq`; without that shim put `nu phantom.nu` in
+its place.
+
+Limits: `--limit` is 1 to 100. A larger one is cut to 100, and the reply
+says so with `meta.limit: {asked, used}` and `data.truncated: true`, even
+when nothing was left out. Keep `--limit` and `--budget` small (20 and 1500
+are enough to start): some harnesses cut output near 10 KB.
 
 Trust, per kind of question:
 

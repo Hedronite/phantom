@@ -102,7 +102,8 @@ enum Command {
         #[arg(long, value_parser = max_tokens_range())]
         max_tokens: Option<u64>,
     },
-    /// List the resolved calls to one symbol, by bare or qualified name.
+    /// List the resolved calls to one symbol, by bare or qualified name,
+    /// or the `path:line` it starts at.
     Callers {
         symbol: String,
         /// Tree that was indexed. Defaults to the current directory.
@@ -168,10 +169,10 @@ enum Command {
         summary: bool,
         /// Most hits listed over all depths, shallowest first, and most
         /// tests, 1 to 100. A cut group keeps its `total` and sets
-        /// `truncated`, and `data.limit` counts what was left out. Not with
-        /// `--diff`.
-        #[arg(long, conflicts_with = "diff",
-              value_parser = clap::value_parser!(u64).range(ops::impact::LIMIT_MIN..=ops::impact::LIMIT_MAX))]
+        /// `truncated`, and `data.limit` counts what was left out. Above
+        /// 100 it is used as 100, and `meta.limit` and `data.truncated` say
+        /// so. Not with `--diff`.
+        #[arg(long, conflicts_with = "diff", value_parser = limit_range())]
         limit: Option<u64>,
         /// Most estimated tokens the reply may cost, 1 to 100000. List
         /// entries are dropped in a fixed order to fit, and `data.tokens`
@@ -213,9 +214,9 @@ enum Command {
         /// to. Repeatable, at most 100 times.
         #[arg(long = "focus", value_name = "PATH")]
         focus: Vec<String>,
-        /// Most hits returned, 1 to 100.
-        #[arg(long, default_value_t = ops::rank::DEFAULT_LIMIT,
-              value_parser = clap::value_parser!(u64).range(ops::rank::LIMIT_MIN..=ops::rank::LIMIT_MAX))]
+        /// Most hits returned, 1 to 100. Above 100 it is used as 100, and
+        /// `meta.limit` says so.
+        #[arg(long, default_value_t = ops::rank::DEFAULT_LIMIT, value_parser = limit_range())]
         limit: u64,
         /// Tree that was indexed. Defaults to the current directory.
         #[arg(long, default_value = ".")]
@@ -240,9 +241,9 @@ enum Command {
         /// Lowest lift listed, a number from 0 to 1000.
         #[arg(long, default_value_t = ops::cochange::DEFAULT_MIN_LIFT, value_parser = min_lift)]
         min_lift: f64,
-        /// Most partners returned, 1 to 100.
-        #[arg(long, default_value_t = ops::cochange::DEFAULT_LIMIT,
-              value_parser = clap::value_parser!(u64).range(ops::cochange::LIMIT_MIN..=ops::cochange::LIMIT_MAX))]
+        /// Most partners returned, 1 to 100. Above 100 it is used as 100,
+        /// and `meta.limit` says so.
+        #[arg(long, default_value_t = ops::cochange::DEFAULT_LIMIT, value_parser = limit_range())]
         limit: u64,
         /// Tree that was indexed. Defaults to the current directory.
         #[arg(long, default_value = ".")]
@@ -588,6 +589,12 @@ fn main() -> ExitCode {
         Command::Version => emit(ops::version(&VersionRequest)),
         Command::Mcp { allow_index, root } => mcp::serve(allow_index, &root),
     }
+}
+
+/// `--limit`: an integer of at least 1. The operation cuts one above the
+/// cap to the cap.
+fn limit_range() -> clap::builder::RangedU64ValueParser<u64> {
+    clap::value_parser!(u64).range(ops::limit::LIMIT_MIN..)
 }
 
 /// `--max-tokens`: an integer from 1 to 100000.

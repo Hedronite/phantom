@@ -3,11 +3,63 @@
 //! `scripts/sync-skills` rewrites. SKILL.md lists each command and
 //! `phantom.nu` defines it, and the script runs no program but
 //! `phantom-fractal`.
+//!
+//! SPEC-w16 G1b: SKILL.md and the README's repository pointer keep step
+//! with what `nu phantom.nu help` prints, within their size caps, and the
+//! skill's limit and `retry` replies are run. Those tests take Nushell
+//! from `PHANTOM_NU`, else `nu` on `PATH`, and pass with a note without it.
 
+mod support;
+
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
+
+use serde_json::{Value, json};
+use support::{TempDir, copy_fixture};
+
+const BIN: &str = env!("CARGO_BIN_EXE_phantom-fractal");
+
+/// The most characters the pointer and SKILL.md, and bytes the `help`
+/// line, may hold. A harness may cut a tool's output near 10 KB.
+const POINTER_CAP: usize = 1500;
+const SKILL_CAP: usize = 8192;
+const HELP_CAP: usize = 4096;
+
+/// The verbs the pointer must give.
+const POINTER_VERBS: &[&str] = &[
+    "where",
+    "show",
+    "callers",
+    "callees",
+    "impact",
+    "path",
+    "map",
+    "cochange",
+    "diff-impact",
+    "status",
+    "index",
+];
+
+/// What `help`, SKILL.md and the pointer all say: the name forms, the
+/// limit cap, what a miss carries, and the trust rule.
+const SHARED: &[&str] = &[
+    "Type::method",
+    "module::name",
+    "<crate>::item",
+    "path:line",
+    "fresh index",
+    "--limit",
+    "cut to 100",
+    "meta.limit",
+    "did_you_mean",
+    "retry",
+    "one grep",
+    "confirm_with_grep",
+    "Phantom's own data directory, never the repo",
+];
 
 const COPIES: &[&str] = &[".claude/skills", ".cursor/skills", ".grok/skills"];
 const ABSENT: &[&str] = &["skills", ".omp/skills", ".codex/skills"];
@@ -369,4 +421,301 @@ fn frontmatter_value(md: &str, key: &str) -> String {
         }
     }
     value
+}
+
+/// The README's block for a repository's `AGENTS.md`.
+fn pointer() -> String {
+    let readme = fs::read_to_string(root().join("README.md")).expect("README.md");
+    let (_, after) = readme
+        .split_once("**An indexed repository**")
+        .expect("pointer paragraph");
+    let (_, block) = after.split_once("```markdown\n").expect("pointer block");
+    block.split_once("\n```").expect("block end").0.to_owned()
+}
+
+/// `text` with each run of white space as one space.
+fn flat(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The `--flag`s written in `text`.
+fn flags(text: &str) -> BTreeSet<String> {
+    text.split(|c: char| !(c.is_ascii_lowercase() || c == '-'))
+        .filter(|word| word.starts_with("--") && word.len() > 2)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Each usage's flags by its command, `cochange --rust` apart from
+/// `cochange`.
+fn by_command<'a>(usages: impl Iterator<Item = &'a str>) -> BTreeMap<String, BTreeSet<String>> {
+    usages
+        .map(|usage| {
+            let mut words = usage.split_whitespace();
+            let verb = words.next().expect("a command");
+            let key = match words.next() {
+                Some("--rust") => format!("{verb} --rust"),
+                _ => verb.to_owned(),
+            };
+            (key, flags(usage))
+        })
+        .collect()
+}
+
+#[test]
+fn the_pointer_needs_nothing_read_first_and_is_within_its_cap() {
+    let (pointer, skill) = (pointer(), skill());
+    assert!(pointer.chars().count() <= POINTER_CAP, "{}", pointer.len());
+    assert!(skill.chars().count() <= SKILL_CAP, "{}", skill.len());
+    assert!(!pointer.contains("SKILL"), "{pointer}");
+    assert!(!pointer.to_lowercase().contains("read its"), "{pointer}");
+    assert!(pointer.contains("nothing else needs reading first"));
+    assert!(pointer.contains("10 KB") && skill.contains("10 KB"));
+}
+
+/// The Nushell to run, or None after printing why the test is skipped.
+fn nu() -> Option<PathBuf> {
+    if let Some(over) = std::env::var_os("PHANTOM_NU").filter(|v| !v.is_empty()) {
+        let path = PathBuf::from(over);
+        assert!(path.is_file(), "PHANTOM_NU does not name a file");
+        return Some(path);
+    }
+    let found = std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join("nu"))
+            .find(|nu| nu.is_file())
+    });
+    if found.is_none() {
+        eprintln!("skill_copies: skipped: no nu on PATH and no PHANTOM_NU");
+    }
+    found
+}
+
+/// `fixtures/resolve-dogfood`, indexed, in a directory whose name holds a
+/// space and a quote, and the skill run on it.
+struct Skill {
+    nu: PathBuf,
+    tmp: TempDir,
+    repo: PathBuf,
+}
+
+impl Skill {
+    fn new(nu: PathBuf) -> Self {
+        let tmp = TempDir::new("skill-w16");
+        let repo = tmp.path().join("it's a repo");
+        fs::create_dir_all(&repo).expect("repo dir");
+        copy_fixture("resolve-dogfood", &repo);
+        let skill = Self { nu, tmp, repo };
+        skill.index();
+        skill
+    }
+
+    fn data(&self) -> PathBuf {
+        self.tmp.path().join("data")
+    }
+
+    fn index(&self) {
+        let out = Command::new(BIN)
+            .args(["index", "."])
+            .current_dir(&self.repo)
+            .env("PHANTOM_FRACTAL_DATA", self.data())
+            .output()
+            .expect("index");
+        assert!(out.status.success(), "index");
+    }
+
+    fn envelope(&self, command: &mut Command) -> Value {
+        let out = command
+            .current_dir(&self.repo)
+            .env("PHANTOM_FRACTAL_BIN", BIN)
+            .env("PHANTOM_FRACTAL_DATA", self.data())
+            .output()
+            .expect("run");
+        let text = String::from_utf8(out.stdout).expect("utf-8");
+        serde_json::from_str(&text)
+            .unwrap_or_else(|err| panic!("{err}: {text}{}", String::from_utf8_lossy(&out.stderr)))
+    }
+
+    /// The envelope `phantom.nu ARGS` prints.
+    fn run(&self, args: &[&str]) -> Value {
+        let script = canon().join("phantom/phantom.nu");
+        self.envelope(
+            Command::new(&self.nu)
+                .arg("--no-config-file")
+                .arg(script)
+                .args(args),
+        )
+    }
+
+    /// The envelope a `retry` prints, pasted into a POSIX shell where
+    /// `phantomq` is the skill.
+    #[cfg(unix)]
+    fn paste(&self, retry: &str) -> Value {
+        let shim = "phantomq() { \"$NU\" --no-config-file \"$SCRIPT\" \"$@\"; }";
+        let mut shell = Command::new("/bin/sh");
+        shell
+            .arg("-c")
+            .arg(format!("{shim}\n{retry}"))
+            .env("NU", &self.nu)
+            .env("SCRIPT", canon().join("phantom/phantom.nu"));
+        self.envelope(&mut shell)
+    }
+}
+
+#[test]
+fn skill_md_and_the_pointer_keep_step_with_help() {
+    let Some(nu) = nu() else { return };
+    let out = Command::new(nu)
+        .arg("--no-config-file")
+        .arg(canon().join("phantom/phantom.nu"))
+        .arg("help")
+        .output()
+        .expect("help");
+    let line = String::from_utf8(out.stdout).expect("utf-8");
+    assert!(line.len() <= HELP_CAP, "{}", line.len());
+    let help = serde_json::from_str::<Value>(&line).expect("envelope")["data"].clone();
+    let usages: Vec<&str> = help["commands"]
+        .as_array()
+        .expect("commands")
+        .iter()
+        .map(|row| row["usage"].as_str().expect("usage"))
+        .collect();
+    let (skill, pointer) = (skill(), pointer());
+
+    // SKILL.md's command block has the same commands with the same flags.
+    let listed = skill
+        .lines()
+        .filter_map(|line| line.strip_prefix("nu phantom.nu "))
+        .map(|line| line.split('#').next().expect("usage"))
+        .filter(|usage| !usage.starts_with("help"));
+    assert_eq!(by_command(listed), by_command(usages.iter().copied()));
+
+    // The pointer's calls are commands `help` has, and its flags are real.
+    let verbs: BTreeSet<&str> = pointer
+        .split('`')
+        .filter_map(|span| span.strip_prefix("phantomq "))
+        .map(|call| call.split(' ').next().expect("a verb"))
+        .collect();
+    assert_eq!(verbs, POINTER_VERBS.iter().copied().collect());
+    for verb in &verbs {
+        let known = usages
+            .iter()
+            .any(|usage| usage.split(' ').next() == Some(verb));
+        assert!(known, "help has no {verb}");
+    }
+    let documented = flags(&line);
+    for flag in flags(&pointer) {
+        assert!(documented.contains(&flag), "help has no {flag}");
+    }
+
+    let said: Vec<&str> = help
+        .as_object()
+        .expect("help")
+        .values()
+        .filter_map(Value::as_str)
+        .collect();
+    let (said, skill, pointer) = (said.join(" "), flat(&skill), flat(&pointer));
+    for fact in SHARED {
+        for (text, place) in [(&said, "help"), (&skill, "SKILL.md"), (&pointer, "pointer")] {
+            assert!(text.contains(fact), "{place} lacks {fact:?}");
+        }
+    }
+    assert!(script().contains("const LIMIT_CAP = 100\n"));
+}
+
+#[test]
+fn a_limit_above_100_is_cut_and_noted_by_the_skill() {
+    let Some(nu) = nu() else { return };
+    let skill = Skill::new(nu);
+    let noted = json!({ "asked": 200, "used": 100 });
+    for args in [
+        &["callers", "fixture_data"][..],
+        &["callees", "entry"],
+        &["impact", "build"],
+        &["rank"],
+    ] {
+        let over = skill.run(&[args, &["--limit", "200"]].concat());
+        assert_eq!(
+            (&over["ok"], &over["meta"]["limit"]),
+            (&json!(true), &noted),
+            "{over}"
+        );
+        assert_eq!(over["data"]["truncated"], true, "{over}");
+        let cap = skill.run(&[args, &["--limit", "100"]].concat());
+        assert!(cap["meta"].get("limit").is_none(), "{cap}");
+        assert_ne!(cap["data"]["truncated"], true, "{cap}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_miss_stays_a_miss_and_its_retry_can_be_pasted() {
+    let Some(nu) = nu() else { return };
+    let skill = Skill::new(nu);
+    let repo = skill.repo.to_str().expect("utf-8").to_owned();
+    for (args, command) in [
+        (&["where", "nowhere::build"][..], "where"),
+        (&["show", "nowhere::build"], "show"),
+        (&["callers", "nowhere::build"], "callers"),
+        (&["callees", "nowhere::build"], "callees"),
+        (
+            &[
+                "--limit",
+                "2",
+                "impact",
+                "--depth",
+                "2",
+                "--no-tests",
+                "nowhere::build",
+            ],
+            "impact",
+        ),
+        (&["path", "nowhere::entry", "src/model.rs::build"], "path"),
+        (&["--repo", &repo, "callers", "nowhere::build"], "callers"),
+    ] {
+        let miss = skill.run(args);
+        assert_eq!(
+            (&miss["ok"], &miss["kind"]),
+            (&json!(false), &json!("not_found")),
+            "{miss}"
+        );
+        assert!(miss.get("data").is_none(), "no answer for a miss: {miss}");
+        assert!(miss["did_you_mean"][0]["name"].is_string(), "{miss}");
+        let retry = miss["retry"].as_str().expect("retry");
+        assert!(
+            retry.starts_with(&format!("phantomq {command} ")),
+            "{retry}"
+        );
+        for flag in flags(&args.join(" ")) {
+            assert!(retry.contains(&flag), "{retry} lacks {flag}");
+        }
+        let again = skill.paste(retry);
+        assert_eq!(again["ok"], true, "{retry}: {again}");
+        assert_eq!(again["command"], command, "{again}");
+    }
+}
+
+#[test]
+fn path_and_line_answers_only_while_the_index_is_fresh() {
+    let Some(nu) = nu() else { return };
+    let skill = Skill::new(nu);
+    let found = skill.run(&["callers", "src/model.rs:5"]);
+    assert_eq!(
+        found["data"]["symbol"]["name"], "crate::model::twin",
+        "{found}"
+    );
+    let source = skill.repo.join("src/model.rs");
+    let text = fs::read_to_string(&source).expect("source");
+    fs::write(&source, format!("\n{text}")).expect("edit");
+    for command in ["where", "show", "callers", "impact"] {
+        let stale = skill.run(&[command, "src/model.rs:5"]);
+        assert_eq!(
+            (&stale["ok"], &stale["kind"]),
+            (&json!(false), &json!("usage")),
+            "{stale}"
+        );
+        let error = stale["error"].as_str().expect("error");
+        assert!(error.contains("run index"), "{error}");
+        assert!(stale.get("meta").is_none(), "{stale}");
+    }
 }

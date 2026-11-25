@@ -9,7 +9,13 @@
 #   { ok: true, command, data, meta, exit: 0 }
 #   { ok: false, command, error, kind, stderr, exit }
 # A failure copies the CLI's `error.kind`, and its `matches` (the ambiguous
-# candidates) and `did_you_mean`, onto the envelope unchanged.
+# candidates) and `did_you_mean`, onto the envelope unchanged. A `retry` is
+# the CLI's, rewritten as this skill's command with the flags that were
+# given. Nothing here runs it: a miss stays a miss.
+#
+# `--limit` above 100 is cut to 100, and `meta.limit` and `data.truncated`
+# say so: the CLI does it for impact, cochange and rank, this script for
+# callers and callees, whose limit the CLI does not take.
 #
 # Flags go before `--`. After `--` every word is a name or a path, and a
 # known flag there is a usage error. String values travel as
@@ -45,6 +51,9 @@
 const COUNT_NOTE = "raw counts: for every tracked file, the non-merge commits it shares with FILE in the scanned window, no decay and no lift floor; commits over scope.bulk_skip files are skipped and counted in scan.skipped_bulk; history, not dependency"
 const RUST_NOTE = "--rust: indexed Rust files only, decay-weighted (90 days) and lift-filtered; together_decayed is a weight, not a commit count; for raw counts over every tracked file, drop --rust"
 
+# The most a `--limit` lists.
+const LIMIT_CAP = 100
+
 const HELP_FLAGS = ["--help" "-h"]
 const GLOBAL_FLAGS = ["--repo" "--limit" "--depth"]
 # Keys the CLI adds at the end of `callers` and `impact` only when it
@@ -71,7 +80,11 @@ const HELP = {
     { usage: "index [PATH]", answers: "builds or refreshes the index; Phantom's data directory only" }
   ]
   flags: "--repo R, --limit N and --depth N go before or after the command; a word after -- is never a flag"
-  names: "NAME: a bare name, Type::method, module::name, or a display from any reply; on kind ambiguous, rerun with one of matches[].display"
+  names: "NAME: a bare name, Type::method, module::name, <crate>::item, path:line of a definition (fresh index only), or a display from any reply; on kind ambiguous, rerun with one of matches[].display"
+  limit: "--limit 1 to 100; above 100 is cut to 100, and meta.limit {asked, used} and data.truncated say so. Keep --limit and --budget small: a harness may cut long output"
+  miss: "on kind not_found nothing is guessed: did_you_mean lists symbols, and retry is the command for the first"
+  trust: "where, show, path, cochange: answer from the reply. callers, callees, impact, diff-impact follow resolved calls: confirm with one grep of the bare name, search further only on confirm_with_grep"
+  index: "run index when there is none or status says stale; it writes only to Phantom's own data directory, never the repo"
   envelope: "one JSON line: ok, command, data, meta, exit; or ok false, command, error, kind, stderr, exit"
   read: "SKILL.md beside this script says when to trust each answer"
 }
@@ -163,7 +176,30 @@ def failure [command: string, code: int, stdout: string, stderr: string, doc: an
   if $total != null { $out = ($out | upsert total $total) }
   let dym = (first-set [($err | get-key "did_you_mean") ($data | get-key "did_you_mean")])
   if $dym != null { $out = ($out | upsert did_you_mean $dym) }
+  let retry = ($data | get-key "retry")
+  if $retry != null { $out = ($out | upsert retry $retry) }
   $out
+}
+
+# `word` as one POSIX shell word, quoted unless it is plain.
+def shell-word [word: string] {
+  if $word =~ '\A[A-Za-z0-9_./:-]+\z' { $word } else {
+    let inner = ($word | str replace --all "'" "'\\''")
+    $"'($inner)'"
+  }
+}
+
+# A failure's `retry`, from the CLI's own command line to `phantomq
+# COMMAND`, keeping the flags that were given. The names after `--` are
+# already quoted by the CLI. A flag and its value are two words: nu would
+# put quote marks into a `--flag=value` word that holds a space.
+def with-retry [e: record, command: string, p: record] {
+  if $e.retry? == null { return $e }
+  let names = ($e.retry | split row " -- " | skip 1 | str join " -- ")
+  let flags = ($p.values | columns | each {|flag|
+    $p.values | get $flag | each {|v| [$flag (shell-word $v)] }
+  } | flatten | flatten)
+  $e | upsert retry (["phantomq" $command] ++ $flags ++ $p.on ++ ["--" $names] | str join " ")
 }
 
 def is-record [v: any] {
@@ -412,6 +448,12 @@ def calls-data [data: record, key: string, limit: any] {
   $out | merge (copy-keys $data $FLAG_KEYS)
 }
 
+# A success whose `--limit` was cut to the cap, saying so.
+def cut-limit [e: record, asked: int] {
+  let meta = ($e.meta? | default {} | upsert limit { asked: $asked, used: $LIMIT_CAP })
+  $e | upsert meta $meta | upsert data.truncated true
+}
+
 # The CLI's `keys` that `data` holds, in that order, values unchanged.
 def copy-keys [data: record, keys: list<string>] {
   $keys | where {|k| $k in ($data | columns) } | reduce --fold {} {|k, acc| $acc | upsert $k ($data | get $k) }
@@ -443,7 +485,7 @@ def impact-data [data: record] {
     by_depth: $by_depth
     tests: ($tests | each {|h| reached $h })
     files: ($files ++ $test_files | where {|f| $f != null } | uniq | sort)
-  } | merge (copy-keys $data (["limit"] ++ $FLAG_KEYS))
+  } | merge (copy-keys $data (["truncated" "limit"] ++ $FLAG_KEYS))
 }
 
 def iso [t: any] {
@@ -522,7 +564,7 @@ def --wrapped "main where" [...args: string] {
     let found = (call "where" (["find"] ++ (repo-arg $p) ++ ["--" $name]))
     let hits = if $found.ok { $found.data | get-key "hits" | default [] | where {|h| is-record $h } } else { [] }
     if ($hits | is-empty) {
-      finish $shown
+      finish (with-retry $shown "where" $p)
     } else {
       finish ($found | upsert data { hits: ($hits | each {|h| where-hit $h }), total: ($hits | length) })
     }
@@ -540,8 +582,11 @@ def calls-command [command: string, args: list<string>, key: string] {
   let limit = (int-opt $p "--limit")
   if $limit.error != "" { finish (usage $command $"($limit.error). Usage: ($line)") }
   let e = (call $command ([$command] ++ (repo-arg $p) ++ ["--" (symbol-name ($p.pos | first))]))
-  if not $e.ok { finish $e }
-  finish ($e | upsert data (calls-data $e.data $key $limit.value))
+  if not $e.ok { finish (with-retry $e $command $p) }
+  let asked = $limit.value
+  let over = $asked != null and $asked > $LIMIT_CAP
+  let out = ($e | upsert data (calls-data $e.data $key (if $over { $LIMIT_CAP } else { $asked })))
+  finish (if $over { cut-limit $out $asked } else { $out })
 }
 
 def --wrapped "main callers" [...args: string] { calls-command "callers" $args "callers" }
@@ -564,7 +609,7 @@ def --wrapped "main impact" [...args: string] {
   let ints = (check-ints "impact" $line $p ["--depth" "--limit"])
   if $ints != null { finish $ints }
   let e = (call "impact" (["impact"] ++ (impact-args $p) ++ (pass $p "--limit") ++ ["--" (symbol-name ($p.pos | first))]))
-  if not $e.ok { finish $e }
+  if not $e.ok { finish (with-retry $e "impact" $p) }
   let d = $e.data
   finish ($e | upsert data ({ symbol: (symbol-row ($d.symbol? | default null)) } | merge (impact-data $d)))
 }
@@ -598,7 +643,7 @@ def --wrapped "main path" [...args: string] {
   let ints = (check-ints "path" $line $p ["--max-depth"])
   if $ints != null { finish $ints }
   let e = (call "path" (["path"] ++ (pass $p "--max-depth") ++ (repo-arg $p) ++ ["--"] ++ ($p.pos | each {|n| symbol-name $n })))
-  if not $e.ok { finish $e }
+  if not $e.ok { finish (with-retry $e "path" $p) }
   let d = $e.data
   let hops = ($d.hops? | default [] | each {|h|
     { display: (node $h), edge_kind: ($h.edge_kind? | default null), confidence: ($h.confidence? | default null) }
@@ -692,7 +737,7 @@ def --wrapped "main show" [...args: string] {
   let bad = (one-name "show" $line $p)
   if $bad != null { finish $bad }
   let e = (call "show" (["show"] ++ (switch $p "--source") ++ (repo-arg $p) ++ ["--" (symbol-name ($p.pos | first))]))
-  if not $e.ok { finish $e }
+  if not $e.ok { finish (with-retry $e "show" $p) }
   let d = $e.data
   let callers = ($d.callers? | default {})
   let callees = ($d.callees? | default {})

@@ -215,7 +215,6 @@ fn impact_limit_out_of_range_or_with_diff_is_usage() {
     for bin in BINS {
         for args in [
             &["impact", "root_fn", "--limit", "0"][..],
-            &["impact", "root_fn", "--limit", "101"],
             &["impact", "root_fn", "--limit", "x"],
             &["impact", "--diff", "--limit", "3"],
         ] {

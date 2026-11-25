@@ -19,6 +19,7 @@ pub(crate) mod find;
 pub(crate) mod fresh;
 pub(crate) mod impact;
 pub(crate) mod index;
+pub(crate) mod limit;
 pub(crate) mod lookup;
 pub(crate) mod map;
 pub(crate) mod path;
@@ -32,7 +33,7 @@ pub(crate) mod version;
 use std::path::Path;
 
 use phantom_fractal_extract::IndexError;
-use phantom_fractal_proto::{Envelope, ErrorKind, Meta};
+use phantom_fractal_proto::{Envelope, ErrorKind, LimitNote, Meta};
 use phantom_fractal_store::{Store, StoreError, index_database_path};
 use serde::Serialize;
 
@@ -84,7 +85,22 @@ pub(crate) fn answer<T: Shed>(
     repo: &Path,
     max_tokens: Option<u64>,
 ) -> Result<Reply<T>, Failure> {
-    let meta = fresh::meta(&canonical_repo(repo)?, store)?;
+    answer_limited(data, store, repo, max_tokens, None)
+}
+
+/// [`answer`], with `limit` as `meta.limit` when the command was given one
+/// above the cap.
+pub(crate) fn answer_limited<T: Shed>(
+    data: T,
+    store: &Store,
+    repo: &Path,
+    max_tokens: Option<u64>,
+    limit: Option<LimitNote>,
+) -> Result<Reply<T>, Failure> {
+    let meta = Meta {
+        limit,
+        ..fresh::meta(&canonical_repo(repo)?, store)?
+    };
     let data = budget::fit(data, max_tokens, &meta)?;
     Ok(Reply::with_meta(data, meta))
 }

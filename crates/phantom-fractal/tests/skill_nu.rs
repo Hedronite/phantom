@@ -821,11 +821,10 @@ fn impact_limit_passes_through_and_counts_what_it_cut() {
     ] {
         fx.fails(&nowhere, args, "usage", 1);
     }
-    fx.fails(
-        &Bin::OnPath,
-        &["impact", "--limit", "101", "root_fn"],
-        "usage",
-        1,
+    let over = fx.ok(&["impact", "--limit", "200", "root_fn"]);
+    assert_eq!(
+        (&over["truncated"], &over["limit"]["max"]),
+        (&json!(true), &json!(100))
     );
 }
 
