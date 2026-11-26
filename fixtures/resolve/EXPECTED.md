@@ -54,6 +54,8 @@ same module has the same owner and name. The targets are `lib` (`src/lib.rs`), `
 - `main:crate::cli::run -> main:crate::cli::banner local`
 - `tool:crate::main -> tool:crate::helper local`
 - `lib:crate::tricky::Guest::greet -> lib:crate::tricky::other local`
+- `lib:crate::tricky::outer -> lib:crate::tricky::outer::inner local`
+- `lib:crate::tricky::outer::inner -> lib:crate::tricky::target local`
 - `lib:crate::tricky::inner -> lib:crate::tricky::other local`
 - `lib:crate::tricky::twin@30 -> lib:crate::tricky::target local`
 - `lib:crate::tricky::twin@35 -> lib:crate::tricky::other local`
@@ -65,9 +67,11 @@ has two `new`s, the inherent one at line 47 and `impl Make`'s at line 59;
 
 `src/tricky.rs` holds three shapes where a name and owner alone would
 credit a call to the wrong function. Each call is credited to the
-function it sits in. The trait default `greet` and the nested `inner`
-have no symbol row, so their calls have no source; they never become
-edges from `Guest::greet` or the module-level `inner`. The two `#[cfg]`
+function it sits in. The trait default `greet` has no symbol row, so its call has no source
+and never becomes an edge from `Guest::greet`. Under SPEC-w16 G2 the nested
+`outer::inner` is indexed as its own symbol: `outer -> outer::inner` and
+`outer::inner -> target` both resolve cleanly without touching module-level
+`inner -> other`. The two `#[cfg]`
 `twin`s are told apart by their start lines, 30 and 35.
 
 ## Cases
@@ -88,8 +92,7 @@ edges from `Guest::greet` or the module-level `inner`. The two `#[cfg]`
 | `outside_crate::entry()` | `main` | A crate outside the workspace: external. |
 | `found()` | `src/orphan.rs` | No target reaches the file. |
 | `target()` | trait default `Greet::greet` | No source: a trait default body has no symbol. |
-| `target()` | nested `outer::inner` | No source: a nested fn has no symbol. |
-| `inner()` | `tricky::outer` | Shadowed by the nested `fn inner`. |
+
 
 ## Change for SPEC-w13 G2a
 
@@ -107,12 +110,20 @@ package's lib, so that call would now get a `crate-path` edge. The line now call
 `outside_crate::entry()`, a crate outside the workspace, so the W3 edges and
 counts above are unchanged.
 
+## Change for SPEC-w16 G2
+
+Nested inner `fn` extraction and resolution adds the two documented edges in `src/tricky.rs`:
+- `tricky::outer` -> `tricky::outer::inner` (`local`);
+- `tricky::outer::inner` -> `tricky::target` (`local`).
+
+So `edges` goes from 25 to 27, `unresolved` from 6 to 5, and `no_source` from 3 to 2.
+
 ## Counts
 
-- edges: 25
-- unresolved: 6
+- edges: 27
+- unresolved: 5
 - external: 2
-- no_source: 3
+- no_source: 2
 - method_calls: 0
 - macros: 1
 - modules: 11

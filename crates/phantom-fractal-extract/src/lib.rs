@@ -47,7 +47,7 @@ pub use walk::{Candidate, MAX_FILE_BYTES, SkipReason, Skipped, Walk, is_secret, 
 /// same-file field hints; version 12 adds the `use-glob` edges and the
 /// parse budget; version 13 stores the visibility of each `use` row, so a
 /// `pub use` re-export reads differently from a private import.
-pub const EXTRACTOR_VERSION: u32 = 13;
+pub const EXTRACTOR_VERSION: u32 = 14;
 
 /// What one [`index`] pass did, by repo-relative path, in walk order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -276,7 +276,10 @@ fn callers_and_callees_return_the_expected_sets() {
         (
             "tricky::target",
             "crate::tricky::target",
-            &[("crate::tricky::twin", "local")],
+            &[
+                ("crate::tricky::outer::inner", "local"),
+                ("crate::tricky::twin", "local"),
+            ],
         ),
         (
             "crate::helper",

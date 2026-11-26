@@ -142,9 +142,9 @@ fn record(found: Found<'_>, src: &[u8], out: &mut Extract) {
     let Some((record, node)) = found.record else {
         return;
     };
-    if !at_module_scope(node) {
+    let Some(owner) = item_owner(&record, node, src) else {
         return;
-    }
+    };
     let visibility = found
         .visibility
         .map_or(Visibility::Private, |node| visibility(node, src));
@@ -163,6 +163,7 @@ fn record(found: Found<'_>, src: &[u8], out: &mut Extract) {
                 is_test: attrs::is_test(node, src),
             });
             out.item_scopes.push(scope_of(node, src));
+            out.item_owners.push(owner);
         }
         (Record::Use, _, Some(argument)) => {
             imports::flatten(argument, src, &visibility, start_line, &mut out.imports);
@@ -171,6 +172,73 @@ fn record(found: Found<'_>, src: &[u8], out: &mut Extract) {
         }
         _ => {}
     }
+}
+
+/// Returns `Some(None)` at module scope, `Some(Some(enclosing))` for a nested `fn`, or `None` to skip.
+fn item_owner(record: &Record, node: Node<'_>, src: &[u8]) -> Option<Option<String>> {
+    if at_module_scope(node) {
+        return Some(None);
+    }
+    match record {
+        Record::Item(ItemKind::Function) => nested_owner(node, src).map(Some),
+        _ => None,
+    }
+}
+
+const ABORT_KINDS: [&str; 3] = ["trait_item", "macro_definition", "token_tree"];
+const STOP_KINDS: [&str; 2] = ["mod_item", "source_file"];
+
+/// The enclosing function/method path for a nested `fn` inside a body, outermost first.
+fn nested_owner(node: Node<'_>, src: &[u8]) -> Option<String> {
+    let parent = skip_errors(node.parent()).filter(|p| p.kind() != "declaration_list")?;
+    let mut names = collect_enclosing_names(Some(parent), src)?;
+    names.reverse();
+    Some(names.join("::"))
+}
+
+fn collect_enclosing_names(mut cursor: Option<Node<'_>>, src: &[u8]) -> Option<Vec<String>> {
+    let mut names = Vec::new();
+    while let Some(ancestor) = cursor {
+        if !step_enclosing(ancestor, src, &mut names)? {
+            break;
+        }
+        cursor = ancestor.parent();
+    }
+    (!names.is_empty()).then_some(names)
+}
+
+fn step_enclosing(ancestor: Node<'_>, src: &[u8], names: &mut Vec<String>) -> Option<bool> {
+    let kind = ancestor.kind();
+    if ABORT_KINDS.contains(&kind) {
+        return None;
+    }
+    if STOP_KINDS.contains(&kind) {
+        return Some(false);
+    }
+    push_owner_node(ancestor, kind, src, names)
+}
+
+fn push_owner_node(
+    ancestor: Node<'_>,
+    kind: &str,
+    src: &[u8],
+    names: &mut Vec<String>,
+) -> Option<bool> {
+    if kind == "function_item" {
+        names.push(compact(ancestor.child_by_field_name("name")?, src));
+    } else if kind == "impl_item" {
+        names.push(impl_owner_name(ancestor, src, names)?);
+        return Some(false);
+    }
+    Some(true)
+}
+
+fn impl_owner_name(ancestor: Node<'_>, src: &[u8], names: &[String]) -> Option<String> {
+    if names.is_empty() || !at_module_scope(ancestor) {
+        return None;
+    }
+    let ty = ancestor.child_by_field_name("type")?;
+    Some(scan::owner_name(ty, src))
 }
 
 /// The inline-module path around `node`, outermost first, joined with `::`.
@@ -189,14 +257,17 @@ fn scope_of(node: Node<'_>, src: &[u8]) -> String {
     names.join("::")
 }
 
-/// True for a declaration in the file body or an inline `mod` body.
-/// `ERROR` wrappers from parser recovery do not change the scope.
-fn at_module_scope(node: Node<'_>) -> bool {
-    let mut parent = node.parent();
+fn skip_errors(mut parent: Option<Node<'_>>) -> Option<Node<'_>> {
     while let Some(error) = parent.filter(Node::is_error) {
         parent = error.parent();
     }
-    match parent {
+    parent
+}
+
+/// True for a declaration in the file body or an inline `mod` body.
+/// `ERROR` wrappers from parser recovery do not change the scope.
+fn at_module_scope(node: Node<'_>) -> bool {
+    match skip_errors(node.parent()) {
         Some(parent) if parent.kind() == "source_file" => true,
         Some(parent) if parent.kind() == "declaration_list" => parent
             .parent()

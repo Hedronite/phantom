@@ -126,8 +126,10 @@ pub(crate) struct Index<'a> {
     roots: HashMap<Id, Id>,
     /// `(parent, name)` to child modules.
     children: HashMap<(Id, &'a str), Vec<Id>>,
-    /// `(module, name)` to the non-method symbols declared there.
+    /// `(module, name)` to the module-scope non-method symbols declared there.
     items: HashMap<(Id, &'a str), Vec<Id>>,
+    /// `(module, enclosing_owner, name)` to nested inner functions in that scope.
+    nested: HashMap<(Id, &'a str, &'a str), Vec<Id>>,
     /// Module to the `use` bindings declared in it.
     uses: HashMap<Id, Vec<&'a UseBinding>>,
     /// Method name to `(method, owner type)` for every inherent method
@@ -157,6 +159,7 @@ impl<'a> Index<'a> {
             roots: HashMap::new(),
             children: HashMap::new(),
             items: HashMap::new(),
+            nested: HashMap::new(),
             uses: HashMap::new(),
             inherent: HashMap::new(),
             by_type: HashMap::new(),
@@ -181,21 +184,7 @@ impl<'a> Index<'a> {
             }
         }
         for symbol in &input.symbols {
-            if symbol.kind == SymbolKind::Method {
-                index
-                    .by_name
-                    .entry(symbol.name.as_str())
-                    .or_default()
-                    .push(symbol.id);
-                continue;
-            }
-            if let Some(module) = index.place_of(&symbol.file, &symbol.scope) {
-                index
-                    .items
-                    .entry((module, symbol.name.as_str()))
-                    .or_default()
-                    .push(symbol.id);
-            }
+            index.register_symbol(symbol);
         }
         for binding in &input.uses {
             if let Some(module) = index.place_of(&binding.file, &binding.scope) {
@@ -279,10 +268,8 @@ impl<'a> Index<'a> {
         let Some(segs) = segments(&call.text) else {
             return Placed::Unresolved;
         };
-        if let [first, name] = &segs[..]
-            && first == "Self"
-        {
-            return self.place_self(source, name, Reason::SelfAssoc);
+        if let Some(placed) = self.place_scoped(module, source, &segs) {
+            return placed;
         }
         let walked = match self.walk(module, &segs, 0, true) {
             Ok(walked) => walked,
@@ -306,6 +293,65 @@ impl<'a> Index<'a> {
             _ => walked.path_tier().reason(),
         };
         Placed::Edge(target, reason)
+    }
+
+    fn register_symbol(&mut self, symbol: &'a Symbol) {
+        if symbol.kind == SymbolKind::Method {
+            self.by_name
+                .entry(symbol.name.as_str())
+                .or_default()
+                .push(symbol.id);
+            return;
+        }
+        if let Some(module) = self.place_of(&symbol.file, &symbol.scope) {
+            self.register_non_method(module, symbol);
+        }
+    }
+
+    fn register_non_method(&mut self, module: Id, symbol: &'a Symbol) {
+        match symbol.owner.as_deref() {
+            Some(owner) => self
+                .nested
+                .entry((module, owner, symbol.name.as_str()))
+                .or_default()
+                .push(symbol.id),
+            None => self
+                .items
+                .entry((module, symbol.name.as_str()))
+                .or_default()
+                .push(symbol.id),
+        }
+    }
+
+    fn place_scoped(&self, module: Id, source: Id, segs: &[String]) -> Option<Placed> {
+        match segs {
+            [first, name] if first == "Self" => {
+                Some(self.place_self(source, name, Reason::SelfAssoc))
+            }
+            [single] => self.place_nested(module, source, single),
+            _ => None,
+        }
+    }
+
+    /// Resolves a single-segment call `name` to a nested inner `fn` visible
+    /// from `source` within `module`, from innermost body scope outward.
+    fn place_nested(&self, module: Id, source: Id, name: &str) -> Option<Placed> {
+        let mut scope = body_scope(self.symbols.get(&source)?);
+        loop {
+            if let Some(placed) = self.nested_in_scope(module, &scope, name) {
+                return Some(placed);
+            }
+            let (parent, _) = scope.rsplit_once("::")?;
+            scope = parent.to_owned();
+        }
+    }
+
+    fn nested_in_scope(&self, module: Id, owner: &str, name: &str) -> Option<Placed> {
+        let ids = self.nested.get(&(module, owner, name))?;
+        match ids[..] {
+            [target] => Some(Placed::Edge(target, Reason::Local)),
+            _ => Some(Placed::Unresolved),
+        }
     }
 
     /// What a non-glob `use` leaf imports (SPEC-w7 G0a): the module it sits
@@ -825,6 +871,13 @@ impl<'a> Index<'a> {
             }
             _ => None,
         }
+    }
+}
+
+fn body_scope(symbol: &Symbol) -> String {
+    match symbol.owner.as_deref() {
+        Some(owner) => format!("{owner}::{}", symbol.name),
+        None => symbol.name.clone(),
     }
 }
 

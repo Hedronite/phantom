@@ -345,7 +345,7 @@ fn method(function: Node<'_>, src: &[u8], scope: &str) -> Option<Method> {
 
 /// A self type's last path segment without generics: `a::Ledger<T>` and
 /// `&Ledger` give `Ledger`. Other type shapes come back as written.
-fn owner_name(self_type: Node<'_>, src: &[u8]) -> String {
+pub(crate) fn owner_name(self_type: Node<'_>, src: &[u8]) -> String {
     let mut node = self_type;
     loop {
         let next = match node.kind() {

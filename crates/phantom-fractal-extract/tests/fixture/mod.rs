@@ -124,7 +124,9 @@ pub fn labels(store: &Store, input: &ResolveInput) -> HashMap<Id, String> {
                 None => format!("orphan:{}", symbol.file),
             };
             let mut name = match (&symbol.kind, &symbol.owner) {
-                (SymbolKind::Method, Some(owner)) => format!("{owner}::{}", symbol.name),
+                (SymbolKind::Method | SymbolKind::Function, Some(owner)) => {
+                    format!("{owner}::{}", symbol.name)
+                }
                 _ => symbol.name.clone(),
             };
             let twins = input.symbols.iter().filter(|other| {

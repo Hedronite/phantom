@@ -66,6 +66,7 @@ fn items_fixture_gives_kind_name_visibility_and_line() {
     use Visibility::{Crate, Private, Public};
     let expected = vec![
         item(Function, "open_ledger", Public, 4),
+        item(Function, "count_only", Private, 5),
         item(Function, "settle", Crate, 11),
         item(Function, "quiet", Private, 13),
         item(Struct, "Ledger", Public, 19),

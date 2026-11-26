@@ -347,7 +347,7 @@ fn index_reports_the_edges_by_reason_of_each_fixture() {
 /// database bytes as they were.
 #[test]
 fn index_reports_the_graph_counts_on_every_pass() {
-    let expected = [25, 6, 2, 3, 0, 1, 11, 1];
+    let expected = [27, 5, 2, 2, 0, 1, 11, 1];
     let fixture = Fixture::of(RESOLVE_FIXTURE);
     let (code, first) = fixture.index(BINS[1]);
     assert_eq!(code, Some(0), "{first}");

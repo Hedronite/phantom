@@ -382,6 +382,7 @@ fn one_file_crate(extract: &Extract) -> ResolveInput {
     let mut callers: HashMap<(Option<String>, String, u32), Id> = HashMap::new();
     for (position, item) in extract.items.iter().enumerate() {
         let scope = extract.item_scopes[position].clone();
+        let owner = extract.item_owners.get(position).and_then(|o| o.clone());
         callers
             .entry((None, item.name.clone(), item.start_line))
             .or_insert(next);
@@ -389,7 +390,7 @@ fn one_file_crate(extract: &Extract) -> ResolveInput {
             id: next,
             kind: SymbolKind::from(item.kind),
             name: item.name.clone(),
-            owner: None,
+            owner,
             owner_path: None,
             trait_name: None,
             module: scopes.get(&scope).copied(),
