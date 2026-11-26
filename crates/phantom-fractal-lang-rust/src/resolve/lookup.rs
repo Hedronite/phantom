@@ -9,7 +9,7 @@
 //! paths resolve by the same walk (SPEC-w7 G0a).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use phantom_fractal_lang::{
     CallRef, Id, LinkReason, Module, Node, Reason, ResolveInput, Symbol, SymbolKind, TargetKind,
@@ -130,6 +130,8 @@ pub(crate) struct Index<'a> {
     items: HashMap<(Id, &'a str), Vec<Id>>,
     /// `(module, enclosing_owner, name)` to nested inner functions in that scope.
     nested: HashMap<(Id, &'a str, &'a str), Vec<Id>>,
+    /// `(module, Type::method)` scopes where a method body climb must stop.
+    method_scopes: HashSet<(Id, String)>,
     /// Module to the `use` bindings declared in it.
     uses: HashMap<Id, Vec<&'a UseBinding>>,
     /// Method name to `(method, owner type)` for every inherent method
@@ -160,6 +162,7 @@ impl<'a> Index<'a> {
             children: HashMap::new(),
             items: HashMap::new(),
             nested: HashMap::new(),
+            method_scopes: HashSet::new(),
             uses: HashMap::new(),
             inherent: HashMap::new(),
             by_type: HashMap::new(),
@@ -297,14 +300,25 @@ impl<'a> Index<'a> {
 
     fn register_symbol(&mut self, symbol: &'a Symbol) {
         if symbol.kind == SymbolKind::Method {
-            self.by_name
-                .entry(symbol.name.as_str())
-                .or_default()
-                .push(symbol.id);
+            self.register_method(symbol);
             return;
         }
         if let Some(module) = self.place_of(&symbol.file, &symbol.scope) {
             self.register_non_method(module, symbol);
+        }
+    }
+
+    fn register_method(&mut self, symbol: &'a Symbol) {
+        self.by_name
+            .entry(symbol.name.as_str())
+            .or_default()
+            .push(symbol.id);
+        if let (Some(module), Some(owner)) = (
+            self.place_of(&symbol.file, &symbol.scope),
+            symbol.owner.as_deref(),
+        ) {
+            self.method_scopes
+                .insert((module, format!("{owner}::{}", symbol.name)));
         }
     }
 
@@ -340,6 +354,9 @@ impl<'a> Index<'a> {
         loop {
             if let Some(placed) = self.nested_in_scope(module, &scope, name) {
                 return Some(placed);
+            }
+            if self.method_scopes.contains(&(module, scope.clone())) {
+                return None;
             }
             let (parent, _) = scope.rsplit_once("::")?;
             scope = parent.to_owned();

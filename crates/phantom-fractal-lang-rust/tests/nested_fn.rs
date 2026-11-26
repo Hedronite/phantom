@@ -4,7 +4,7 @@ use phantom_fractal_lang::{
     CallRef, Extract, Id, Language, Module, Reason, ResolveInput, Symbol, SymbolKind, Target,
     TargetKind,
 };
-use phantom_fractal_lang_rust::{RustLanguage, resolve};
+use phantom_fractal_lang_rust::{MAX_NESTED_FN_DEPTH, RustLanguage, resolve};
 
 fn extract(source: &str) -> Extract {
     RustLanguage::new()
@@ -287,7 +287,83 @@ pub fn dup(c: bool) {
     assert!(!ext.items.iter().any(|i| i.name == "inside_macro"));
     let broken = extract("fn () { fn inner_broken() {} }");
     assert!(!broken.items.iter().any(|i| i.name == "inner_broken"));
+    let in_const =
+        extract("const _: () = { fn inside_const() {} struct InsideConst; mod hidden {} };");
+    assert!(!in_const.items.iter().any(|i| i.name == "inside_const"));
+    assert!(!in_const.items.iter().any(|i| i.name == "InsideConst"));
+    assert!(!in_const.items.iter().any(|i| i.name == "hidden"));
+    assert!(in_const.mod_decls.is_empty());
 
     let edges = edge_names(src);
     assert!(!edges.iter().any(|(f, _, _)| f == "dup"), "{edges:?}");
+}
+
+#[test]
+fn method_body_does_not_climb_to_free_fn_named_after_impl_type() {
+    let src = r#"
+pub struct App {}
+#[allow(non_snake_case)]
+pub fn App() {
+    fn run() {}
+    run();
+}
+pub fn run() {}
+impl App {
+    pub fn go(&self) {
+        run();
+    }
+    pub fn with_inner(&self) {
+        fn step() {
+            run();
+        }
+        step();
+    }
+}
+"#;
+    let edges = edge_names(src);
+    assert!(
+        edges
+            .iter()
+            .any(|(f, t, r)| f == "App::go" && t == "run" && *r == Reason::Local),
+        "{edges:?}"
+    );
+    assert!(
+        !edges
+            .iter()
+            .any(|(f, t, _)| f == "App::go" && t == "App::run"),
+        "{edges:?}"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|(f, t, _)| f == "App::with_inner::step" && t == "run"),
+        "{edges:?}"
+    );
+}
+
+#[test]
+fn deep_nesting_is_capped_and_extracts_fast() {
+    let depth = 1_000usize;
+    let mut src = String::new();
+    for i in 0..depth {
+        src.push_str(&format!(
+            "fn f{i}() {{
+"
+        ));
+    }
+    for i in (0..depth).rev() {
+        src.push_str(&format!(
+            "f{i}();
+}}
+"
+        ));
+    }
+    let started = std::time::Instant::now();
+    let got = extract(&src);
+    let elapsed = started.elapsed();
+    assert_eq!(got.items.len(), 1 + MAX_NESTED_FN_DEPTH);
+    assert!(
+        elapsed < std::time::Duration::from_millis(250),
+        "depth-{depth} extraction took {elapsed:?}"
+    );
 }

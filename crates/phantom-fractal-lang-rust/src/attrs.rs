@@ -28,13 +28,13 @@ pub(crate) fn cfg_test(item: Node<'_>, src: &[u8]) -> bool {
 }
 
 /// [`Item::is_test`](phantom_fractal_lang::Item::is_test) for an item or
-/// method node: a test attribute, `#[cfg(test)]` on the item, or an
-/// enclosing inline `mod` with `#[cfg(test)]`.
-pub(crate) fn is_test(item: Node<'_>, src: &[u8]) -> bool {
-    outer(item)
-        .into_iter()
-        .any(|attribute| is_test_attribute(attribute, src) || is_cfg_test(attribute, src))
-        || in_cfg_test_module(item, src)
+/// method node: a test attribute, `#[cfg(test)]` on the item, or inside an
+/// enclosing `#[cfg(test)]` inline `mod`.
+pub(crate) fn is_test(item: Node<'_>, src: &[u8], in_cfg_test: bool) -> bool {
+    in_cfg_test
+        || outer(item)
+            .into_iter()
+            .any(|attribute| is_test_attribute(attribute, src) || is_cfg_test(attribute, src))
 }
 
 fn is_cfg_test(attribute: Node<'_>, src: &[u8]) -> bool {
@@ -53,15 +53,4 @@ fn is_test_attribute(attribute: Node<'_>, src: &[u8]) -> bool {
         _ => None,
     };
     last.is_some_and(|name| compact(name, src) == "test")
-}
-
-fn in_cfg_test_module(node: Node<'_>, src: &[u8]) -> bool {
-    let mut parent = node.parent();
-    while let Some(ancestor) = parent {
-        if ancestor.kind() == "mod_item" && cfg_test(ancestor, src) {
-            return true;
-        }
-        parent = ancestor.parent();
-    }
-    false
 }

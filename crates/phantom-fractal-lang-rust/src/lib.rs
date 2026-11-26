@@ -22,8 +22,13 @@ mod resolve;
 mod scan;
 mod std_methods;
 
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use phantom_fractal_lang::{Extract, ExtractError, Item, ItemKind, Language, Visibility};
 
+/// Maximum nested inner `fn` depth indexed under an enclosing function or method.
+pub const MAX_NESTED_FN_DEPTH: usize = 16;
 pub use receivers::MAX_HINT_VISITS;
 pub use resolve::{confidence, links, method_owners, resolve, resolve_graph};
 pub use std_methods::STD_METHOD_NAMES;
@@ -115,10 +120,11 @@ impl Language for RustLanguage {
         let tree = parser.parse(source, None).ok_or(ExtractError::Parse)?;
         let src = source.as_bytes();
         let mut out = Extract::default();
+        let contexts = node_contexts(tree.root_node(), src);
         let mut cursor = QueryCursor::new();
         let mut matches = cursor.matches(&self.query, tree.root_node(), src);
         while let Some(found) = matches.next() {
-            record(self.found(found), src, &mut out);
+            record(self.found(found), src, &contexts, &mut out);
         }
         scan::scan(tree.root_node(), src, &mut out);
         Ok(out)
@@ -138,11 +144,208 @@ fn record_kind(capture: &str) -> Option<Record> {
     Some(Record::Item(kind))
 }
 
-fn record(found: Found<'_>, src: &[u8], out: &mut Extract) {
+struct NodeContext {
+    scope: Rc<String>,
+    in_cfg_test: bool,
+    owner: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Placement {
+    Module,
+    ModHeader,
+    TypeDeclList,
+    Body,
+}
+
+struct ScopeFrame {
+    scope: Rc<String>,
+    in_cfg_test: bool,
+    placement: Placement,
+    owner: Option<String>,
+    fn_depth: usize,
+}
+
+impl ScopeFrame {
+    fn with_placement(&self, placement: Placement) -> Rc<Self> {
+        Rc::new(Self {
+            scope: Rc::clone(&self.scope),
+            in_cfg_test: self.in_cfg_test,
+            placement,
+            owner: self.owner.clone(),
+            fn_depth: self.fn_depth,
+        })
+    }
+}
+
+fn node_contexts(root: Node<'_>, src: &[u8]) -> HashMap<usize, NodeContext> {
+    let mut out = HashMap::new();
+    let top = Rc::new(ScopeFrame {
+        scope: Rc::new(String::new()),
+        in_cfg_test: false,
+        placement: Placement::Module,
+        owner: None,
+        fn_depth: 0,
+    });
+    let mut stack = vec![(root, top)];
+    while let Some((node, frame)) = stack.pop() {
+        record_node_context(node, &frame, &mut out);
+        if let Some(child_frame) = step_scope_frame(node, &frame, src) {
+            push_named_children(node, &child_frame, &mut stack);
+        }
+    }
+    out
+}
+
+fn push_named_children<'t, T>(node: Node<'t>, state: &Rc<T>, stack: &mut Vec<(Node<'t>, Rc<T>)>) {
+    let mut cursor = node.walk();
+    let children: Vec<Node<'t>> = node.named_children(&mut cursor).collect();
+    for child in children.into_iter().rev() {
+        stack.push((child, Rc::clone(state)));
+    }
+}
+
+fn record_node_context(node: Node<'_>, frame: &ScopeFrame, out: &mut HashMap<usize, NodeContext>) {
+    let Some(owner) = eligible_owner(node.kind(), frame) else {
+        return;
+    };
+    out.insert(
+        node.id(),
+        NodeContext {
+            scope: Rc::clone(&frame.scope),
+            in_cfg_test: frame.in_cfg_test,
+            owner,
+        },
+    );
+}
+
+fn eligible_owner(kind: &str, frame: &ScopeFrame) -> Option<Option<String>> {
+    if frame.placement == Placement::Module {
+        return Some(None);
+    }
+    if kind == "function_item"
+        && frame.placement == Placement::Body
+        && (1..=MAX_NESTED_FN_DEPTH).contains(&frame.fn_depth)
+    {
+        return Some(frame.owner.clone());
+    }
+    None
+}
+
+const SKIP_SCOPE_DESCENDANTS: [&str; 6] = [
+    "trait_item",
+    "macro_definition",
+    "token_tree",
+    "struct_item",
+    "enum_item",
+    "use_declaration",
+];
+
+fn step_scope_frame(node: Node<'_>, frame: &Rc<ScopeFrame>, src: &[u8]) -> Option<Rc<ScopeFrame>> {
+    let kind = node.kind();
+    if SKIP_SCOPE_DESCENDANTS.contains(&kind) {
+        return None;
+    }
+    if matches!(kind, "source_file" | "ERROR") {
+        return Some(Rc::clone(frame));
+    }
+    step_non_leaf_frame(node, kind, frame, src)
+}
+
+fn step_non_leaf_frame(
+    node: Node<'_>,
+    kind: &str,
+    frame: &Rc<ScopeFrame>,
+    src: &[u8],
+) -> Option<Rc<ScopeFrame>> {
+    match kind {
+        "mod_item" => step_mod_frame(node, frame, src),
+        "impl_item" => step_impl_frame(node, frame, src),
+        "declaration_list" => Some(frame.with_placement(decl_placement(frame.placement))),
+        "function_item" => step_fn_frame(node, frame, src),
+        _ => Some(clear_direct_scope(frame)),
+    }
+}
+
+fn decl_placement(parent: Placement) -> Placement {
+    if parent == Placement::ModHeader {
+        Placement::Module
+    } else {
+        Placement::TypeDeclList
+    }
+}
+
+fn clear_direct_scope(frame: &Rc<ScopeFrame>) -> Rc<ScopeFrame> {
+    if frame.placement == Placement::Body {
+        Rc::clone(frame)
+    } else {
+        frame.with_placement(Placement::Body)
+    }
+}
+
+fn step_mod_frame(node: Node<'_>, frame: &ScopeFrame, src: &[u8]) -> Option<Rc<ScopeFrame>> {
+    if frame.placement != Placement::Module {
+        return None;
+    }
+    let name = compact(node.child_by_field_name("name")?, src);
+    Some(Rc::new(ScopeFrame {
+        scope: Rc::new(join_scope(&frame.scope, &name)),
+        in_cfg_test: frame.in_cfg_test || attrs::cfg_test(node, src),
+        placement: Placement::ModHeader,
+        owner: None,
+        fn_depth: 0,
+    }))
+}
+
+fn step_impl_frame(node: Node<'_>, frame: &ScopeFrame, src: &[u8]) -> Option<Rc<ScopeFrame>> {
+    if frame.placement != Placement::Module {
+        return None;
+    }
+    let ty = node.child_by_field_name("type")?;
+    Some(Rc::new(ScopeFrame {
+        scope: Rc::clone(&frame.scope),
+        in_cfg_test: frame.in_cfg_test,
+        placement: Placement::Body,
+        owner: Some(scan::owner_name(ty, src)),
+        fn_depth: 0,
+    }))
+}
+
+fn step_fn_frame(node: Node<'_>, frame: &ScopeFrame, src: &[u8]) -> Option<Rc<ScopeFrame>> {
+    let next_depth = frame.fn_depth + 1;
+    if next_depth > MAX_NESTED_FN_DEPTH {
+        return None;
+    }
+    let name = compact(node.child_by_field_name("name")?, src);
+    Some(Rc::new(ScopeFrame {
+        scope: Rc::clone(&frame.scope),
+        in_cfg_test: frame.in_cfg_test,
+        placement: Placement::Body,
+        owner: Some(join_owner(frame.owner.as_deref(), &name)),
+        fn_depth: next_depth,
+    }))
+}
+
+pub(crate) fn join_scope(scope: &str, name: &str) -> String {
+    if scope.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{scope}::{name}")
+    }
+}
+
+fn join_owner(owner: Option<&str>, name: &str) -> String {
+    match owner {
+        Some(prev) => format!("{prev}::{name}"),
+        None => name.to_owned(),
+    }
+}
+
+fn record(found: Found<'_>, src: &[u8], contexts: &HashMap<usize, NodeContext>, out: &mut Extract) {
     let Some((record, node)) = found.record else {
         return;
     };
-    let Some(owner) = item_owner(&record, node, src) else {
+    let Some(ctx) = contexts.get(&node.id()) else {
         return;
     };
     let visibility = found
@@ -160,119 +363,17 @@ fn record(found: Found<'_>, src: &[u8], out: &mut Extract) {
                 end_line: detail.end_line,
                 signature: detail.signature,
                 doc_summary: detail.doc_summary,
-                is_test: attrs::is_test(node, src),
+                is_test: attrs::is_test(node, src, ctx.in_cfg_test),
             });
-            out.item_scopes.push(scope_of(node, src));
-            out.item_owners.push(owner);
+            out.item_scopes.push((*ctx.scope).clone());
+            out.item_owners.push(ctx.owner.clone());
         }
         (Record::Use, _, Some(argument)) => {
             imports::flatten(argument, src, &visibility, start_line, &mut out.imports);
-            let scope = scope_of(node, src);
-            out.import_scopes.resize(out.imports.len(), scope);
+            out.import_scopes
+                .resize(out.imports.len(), (*ctx.scope).clone());
         }
         _ => {}
-    }
-}
-
-/// Returns `Some(None)` at module scope, `Some(Some(enclosing))` for a nested `fn`, or `None` to skip.
-fn item_owner(record: &Record, node: Node<'_>, src: &[u8]) -> Option<Option<String>> {
-    if at_module_scope(node) {
-        return Some(None);
-    }
-    match record {
-        Record::Item(ItemKind::Function) => nested_owner(node, src).map(Some),
-        _ => None,
-    }
-}
-
-const ABORT_KINDS: [&str; 3] = ["trait_item", "macro_definition", "token_tree"];
-const STOP_KINDS: [&str; 2] = ["mod_item", "source_file"];
-
-/// The enclosing function/method path for a nested `fn` inside a body, outermost first.
-fn nested_owner(node: Node<'_>, src: &[u8]) -> Option<String> {
-    let parent = skip_errors(node.parent()).filter(|p| p.kind() != "declaration_list")?;
-    let mut names = collect_enclosing_names(Some(parent), src)?;
-    names.reverse();
-    Some(names.join("::"))
-}
-
-fn collect_enclosing_names(mut cursor: Option<Node<'_>>, src: &[u8]) -> Option<Vec<String>> {
-    let mut names = Vec::new();
-    while let Some(ancestor) = cursor {
-        if !step_enclosing(ancestor, src, &mut names)? {
-            break;
-        }
-        cursor = ancestor.parent();
-    }
-    (!names.is_empty()).then_some(names)
-}
-
-fn step_enclosing(ancestor: Node<'_>, src: &[u8], names: &mut Vec<String>) -> Option<bool> {
-    let kind = ancestor.kind();
-    if ABORT_KINDS.contains(&kind) {
-        return None;
-    }
-    if STOP_KINDS.contains(&kind) {
-        return Some(false);
-    }
-    push_owner_node(ancestor, kind, src, names)
-}
-
-fn push_owner_node(
-    ancestor: Node<'_>,
-    kind: &str,
-    src: &[u8],
-    names: &mut Vec<String>,
-) -> Option<bool> {
-    if kind == "function_item" {
-        names.push(compact(ancestor.child_by_field_name("name")?, src));
-    } else if kind == "impl_item" {
-        names.push(impl_owner_name(ancestor, src, names)?);
-        return Some(false);
-    }
-    Some(true)
-}
-
-fn impl_owner_name(ancestor: Node<'_>, src: &[u8], names: &[String]) -> Option<String> {
-    if names.is_empty() || !at_module_scope(ancestor) {
-        return None;
-    }
-    let ty = ancestor.child_by_field_name("type")?;
-    Some(scan::owner_name(ty, src))
-}
-
-/// The inline-module path around `node`, outermost first, joined with `::`.
-fn scope_of(node: Node<'_>, src: &[u8]) -> String {
-    let mut names = Vec::new();
-    let mut parent = node.parent();
-    while let Some(ancestor) = parent {
-        if ancestor.kind() == "mod_item"
-            && let Some(name) = ancestor.child_by_field_name("name")
-        {
-            names.push(compact(name, src));
-        }
-        parent = ancestor.parent();
-    }
-    names.reverse();
-    names.join("::")
-}
-
-fn skip_errors(mut parent: Option<Node<'_>>) -> Option<Node<'_>> {
-    while let Some(error) = parent.filter(Node::is_error) {
-        parent = error.parent();
-    }
-    parent
-}
-
-/// True for a declaration in the file body or an inline `mod` body.
-/// `ERROR` wrappers from parser recovery do not change the scope.
-fn at_module_scope(node: Node<'_>) -> bool {
-    match skip_errors(node.parent()) {
-        Some(parent) if parent.kind() == "source_file" => true,
-        Some(parent) if parent.kind() == "declaration_list" => parent
-            .parent()
-            .is_some_and(|owner| owner.kind() == "mod_item"),
-        _ => false,
     }
 }
 
