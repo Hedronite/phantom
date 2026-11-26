@@ -50,6 +50,8 @@ pub struct Extract {
     pub imports: Vec<Import>,
     /// The scope of each item, parallel to `items`.
     pub item_scopes: Vec<String>,
+    /// The enclosing function path of each nested `fn` item, parallel to `items` (`None` at module scope).
+    pub item_owners: Vec<Option<String>>,
     /// The scope of each import, parallel to `imports`.
     pub import_scopes: Vec<String>,
     /// Calls, method calls, macro invocations, and the call-shaped names

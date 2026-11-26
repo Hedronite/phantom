@@ -65,6 +65,28 @@ fn a_ret_hint_needs_one_workspace_fn() {
 }
 
 #[test]
+fn a_ctor_with_zero_or_multiple_inherent_candidates_places_nothing() {
+    let mut i = Input::new();
+    let (_, book) = two_types(&mut i);
+    // `open` is an inherent method on `Book`, not `Ledger`: hits 0 matches for `Ledger::open`.
+    let book_open = i.method("Book", None, "open");
+    i.signature(book_open, "pub fn open() -> Self");
+    // Two inherent `#[cfg]` methods named `fresh` on `Ledger`: hits 2 matches for `Ledger::fresh`.
+    let fresh_a = i.method("Ledger", None, "fresh");
+    let fresh_b = i.method("Ledger", None, "fresh");
+    i.signature(fresh_a, "pub fn fresh() -> Self");
+    i.signature(fresh_b, "pub fn fresh() -> Self");
+    let caller = i.function("caller");
+    hinted(&mut i, caller, "x", "label", "ctor:Ledger::open");
+    hinted(&mut i, caller, "y", "label", "ctor:Ledger::fresh");
+    let call = hinted(&mut i, caller, "z", "label", "ctor:Book::open");
+    assert_eq!(
+        only_edge(&i),
+        Some(edge(call, caller, book, Reason::TypedMethod))
+    );
+}
+
+#[test]
 fn a_ctor_places_another_returned_type() {
     let mut i = Input::new();
     let (ledger, book) = two_types(&mut i);

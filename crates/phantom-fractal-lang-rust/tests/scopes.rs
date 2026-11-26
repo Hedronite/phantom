@@ -68,6 +68,7 @@ fn scopes_are_parallel_to_items_and_imports_in_every_fixture() {
     for source in FIXTURES {
         let got = extract(source);
         assert_eq!(got.item_scopes.len(), got.items.len());
+        assert_eq!(got.item_owners.len(), got.items.len());
         assert_eq!(got.import_scopes.len(), got.imports.len());
     }
     let grouped = extract("mod m { use a::{b, c::{d, e as f}, g::*}; }");

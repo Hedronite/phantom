@@ -231,12 +231,22 @@ fn changed(path: &str, key: &str, name: &str, change: FileChange) -> ChangedSymb
 /// name.
 pub fn symbol_keys(path: &str, extract: &Extract) -> Vec<(String, String, u32, u32)> {
     let items = extract.items.iter().enumerate().map(|(position, item)| {
+        let owner = extract.item_owners.get(position).and_then(Option::as_deref);
         let ordinal = extract.items[..position]
             .iter()
-            .filter(|prior| prior.name == item.name && prior.kind == item.kind)
+            .enumerate()
+            .filter(|(idx, prior)| {
+                prior.name == item.name
+                    && prior.kind == item.kind
+                    && extract.item_owners.get(*idx).and_then(Option::as_deref) == owner
+            })
             .count();
+        let leaf = match owner {
+            Some(owner) => format!("{owner}::{}", item.name),
+            None => item.name.clone(),
+        };
         (
-            format!("{path}#{}#{}#{ordinal}", item.name, item.kind.as_str()),
+            format!("{path}#{leaf}#{}#{ordinal}", item.kind.as_str()),
             item.name.clone(),
             item.start_line,
             item.end_line,

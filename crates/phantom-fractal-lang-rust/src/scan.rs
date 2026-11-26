@@ -15,14 +15,32 @@ use tree_sitter::Node;
 
 use crate::macro_args::{CallShape, Receiver, call_shapes};
 use crate::receivers::Blocks;
-use crate::{at_module_scope, attrs, bindings, compact, detail, receivers, start_line, visibility};
+use crate::{
+    Placement, attrs, bindings, compact, detail, join_scope, receivers, start_line, visibility,
+};
 
 /// What a node inherits from its ancestors.
 struct Context {
     /// The inline-module path.
-    scope: String,
+    scope: Rc<String>,
+    /// True inside a `#[cfg(test)]` inline module.
+    in_cfg_test: bool,
+    /// Current declaration placement within module/type/body hierarchy.
+    placement: Placement,
+    /// Direct enclosing `impl` or `trait` when inside its `declaration_list`.
+    container: Option<Container>,
     /// The innermost enclosing function.
-    function: Option<Function>,
+    function: Option<Rc<Function>>,
+}
+
+#[derive(Clone)]
+enum Container {
+    Impl {
+        owner: String,
+        owner_path: String,
+        trait_name: Option<String>,
+    },
+    Trait(String),
 }
 
 struct Function {
@@ -34,7 +52,10 @@ struct Function {
 pub(crate) fn scan(root: Node<'_>, src: &[u8], out: &mut Extract) {
     let mut blocks = Blocks::default();
     let top = Rc::new(Context {
-        scope: String::new(),
+        scope: Rc::new(String::new()),
+        in_cfg_test: false,
+        placement: Placement::Module,
+        container: None,
         function: None,
     });
     let mut stack = vec![(root, top)];
@@ -62,65 +83,158 @@ fn visit<'tree>(
     out: &mut Extract,
 ) -> Rc<Context> {
     match node.kind() {
-        "mod_item" => {
-            let name = node
-                .child_by_field_name("name")
-                .map(|name| compact(name, src))
-                .unwrap_or_default();
-            let body = node.child_by_field_name("body");
-            if at_module_scope(node) {
-                out.mod_decls.push(ModDecl {
-                    name: name.clone(),
-                    scope: context.scope.clone(),
-                    inline: body.is_some(),
-                    path: path_attribute(node, src),
-                    line: start_line(node),
-                    cfg_test: attrs::cfg_test(node, src),
-                });
-            }
-            if body.is_none() {
-                return context;
-            }
-            let scope = if context.scope.is_empty() {
-                name
-            } else {
-                format!("{}::{name}", context.scope)
-            };
-            Rc::new(Context {
-                scope,
-                function: None,
-            })
-        }
-        "function_item" => {
-            if let Some(method) = method(node, src, &context.scope) {
-                out.methods.push(method);
-            }
-            Rc::new(Context {
-                scope: context.scope.clone(),
-                function: Some(Function {
-                    caller: caller(node, src),
-                    bindings: bindings::collect(node, src),
-                }),
-            })
-        }
-        "call_expression" => {
-            if let Some(reference) = call(node, src, &context, blocks) {
-                out.refs.push(reference);
-            }
-            context
-        }
-        "macro_invocation" => {
-            if let Some(reference) = macro_call(node, src, &context) {
-                out.refs.push(reference);
-            }
-            for shape in call_shapes(node, src) {
-                let reference = macro_arg(shape, src, &context, blocks);
-                out.refs.push(reference);
-            }
-            context
-        }
-        _ => context,
+        "source_file" | "ERROR" => context,
+        "mod_item" => visit_mod(node, src, context, out),
+        "impl_item" => visit_impl(node, src, &context),
+        "trait_item" => visit_trait(node, src, &context),
+        "declaration_list" => visit_decl_list(&context),
+        "function_item" => visit_fn(node, src, &context, out),
+        "call_expression" => visit_call(node, src, context, blocks, out),
+        "macro_invocation" => visit_macro(node, src, context, blocks, out),
+        _ => clear_direct(context),
     }
+}
+
+fn clear_direct(context: Rc<Context>) -> Rc<Context> {
+    if context.placement == Placement::Body {
+        return context;
+    }
+    Rc::new(Context {
+        scope: Rc::clone(&context.scope),
+        in_cfg_test: context.in_cfg_test,
+        placement: Placement::Body,
+        container: None,
+        function: context.function.clone(),
+    })
+}
+
+fn visit_mod(node: Node<'_>, src: &[u8], context: Rc<Context>, out: &mut Extract) -> Rc<Context> {
+    let name = node
+        .child_by_field_name("name")
+        .map(|name| compact(name, src))
+        .unwrap_or_default();
+    let body = node.child_by_field_name("body");
+    let mod_cfg_test = attrs::cfg_test(node, src);
+    let at_module = context.placement == Placement::Module;
+    if at_module {
+        out.mod_decls.push(ModDecl {
+            name: name.clone(),
+            scope: (*context.scope).clone(),
+            inline: body.is_some(),
+            path: path_attribute(node, src),
+            line: start_line(node),
+            cfg_test: mod_cfg_test,
+        });
+    }
+    if body.is_none() {
+        return clear_direct(context);
+    }
+    Rc::new(Context {
+        scope: Rc::new(join_scope(&context.scope, &name)),
+        in_cfg_test: context.in_cfg_test || mod_cfg_test,
+        placement: if at_module {
+            Placement::ModHeader
+        } else {
+            Placement::Body
+        },
+        container: None,
+        function: None,
+    })
+}
+
+fn visit_impl(node: Node<'_>, src: &[u8], context: &Context) -> Rc<Context> {
+    let container = if context.placement == Placement::Module {
+        node.child_by_field_name("type").map(|ty| Container::Impl {
+            owner: owner_name(ty, src),
+            owner_path: compact(ty, src),
+            trait_name: node
+                .child_by_field_name("trait")
+                .map(|name| compact(name, src)),
+        })
+    } else {
+        None
+    };
+    Rc::new(Context {
+        scope: Rc::clone(&context.scope),
+        in_cfg_test: context.in_cfg_test,
+        placement: Placement::Body,
+        container,
+        function: None,
+    })
+}
+
+fn visit_trait(node: Node<'_>, src: &[u8], context: &Context) -> Rc<Context> {
+    let container = node
+        .child_by_field_name("name")
+        .map(|name| Container::Trait(compact(name, src)));
+    Rc::new(Context {
+        scope: Rc::clone(&context.scope),
+        in_cfg_test: context.in_cfg_test,
+        placement: Placement::Body,
+        container,
+        function: None,
+    })
+}
+
+fn visit_decl_list(context: &Context) -> Rc<Context> {
+    let placement = if context.placement == Placement::ModHeader {
+        Placement::Module
+    } else {
+        Placement::TypeDeclList
+    };
+    Rc::new(Context {
+        scope: Rc::clone(&context.scope),
+        in_cfg_test: context.in_cfg_test,
+        placement,
+        container: context.container.clone(),
+        function: None,
+    })
+}
+
+fn visit_fn(node: Node<'_>, src: &[u8], context: &Context, out: &mut Extract) -> Rc<Context> {
+    if let Some(method) = method(node, src, context) {
+        out.methods.push(method);
+    }
+    Rc::new(Context {
+        scope: Rc::clone(&context.scope),
+        in_cfg_test: context.in_cfg_test,
+        placement: Placement::Body,
+        container: None,
+        function: Some(Rc::new(Function {
+            caller: caller(node, src, context),
+            bindings: bindings::collect(node, src),
+        })),
+    })
+}
+
+fn visit_call<'tree>(
+    node: Node<'tree>,
+    src: &[u8],
+    context: Rc<Context>,
+    blocks: &mut Blocks<'tree>,
+    out: &mut Extract,
+) -> Rc<Context> {
+    if let Some(reference) = call(node, src, &context, blocks) {
+        out.refs.push(reference);
+    }
+    clear_direct(context)
+}
+
+fn visit_macro<'tree>(
+    node: Node<'tree>,
+    src: &[u8],
+    context: Rc<Context>,
+    blocks: &mut Blocks<'tree>,
+    out: &mut Extract,
+) -> Rc<Context> {
+    if let Some(reference) = macro_call(node, src, &context) {
+        out.refs.push(reference);
+    }
+    for shape in call_shapes(node, src) {
+        let reference = macro_arg(shape, src, &context, blocks);
+        out.refs.push(reference);
+    }
+    clear_direct(context)
 }
 
 /// The callee shapes a call reference is built from.
@@ -268,7 +382,7 @@ fn reference(callee: Callee<'_>, shadowed: bool, context: &Context) -> Reference
         last_segment: callee.last_segment,
         line: one_based(position.row),
         col: one_based(position.column),
-        scope: context.scope.clone(),
+        scope: (*context.scope).clone(),
         from: context
             .function
             .as_ref()
@@ -284,20 +398,15 @@ fn one_based(index: usize) -> u32 {
 }
 
 /// The function's name, with the `impl` self type or trait it sits in.
-fn caller(function: Node<'_>, src: &[u8]) -> Caller {
+fn caller(function: Node<'_>, src: &[u8], context: &Context) -> Caller {
     let name = function
         .child_by_field_name("name")
         .map(|name| compact(name, src))
         .unwrap_or_default();
-    let owner = container(function).and_then(|owner| match owner.kind() {
-        "impl_item" => owner
-            .child_by_field_name("type")
-            .map(|ty| owner_name(ty, src)),
-        "trait_item" => owner
-            .child_by_field_name("name")
-            .map(|name| compact(name, src)),
-        _ => None,
-    });
+    let owner = match &context.container {
+        Some(Container::Impl { owner, .. }) | Some(Container::Trait(owner)) => Some(owner.clone()),
+        None => None,
+    };
     Caller {
         name,
         owner,
@@ -305,21 +414,16 @@ fn caller(function: Node<'_>, src: &[u8]) -> Caller {
     }
 }
 
-/// The item whose body directly holds `function`, if any.
-fn container(function: Node<'_>) -> Option<Node<'_>> {
-    function
-        .parent()
-        .filter(|parent| parent.kind() == "declaration_list")?
-        .parent()
-}
-
 /// A method record for a `fn` directly inside an `impl` at module scope.
-fn method(function: Node<'_>, src: &[u8], scope: &str) -> Option<Method> {
-    let owner = container(function).filter(|owner| owner.kind() == "impl_item")?;
-    if !at_module_scope(owner) {
+fn method(function: Node<'_>, src: &[u8], context: &Context) -> Option<Method> {
+    let Some(Container::Impl {
+        owner,
+        owner_path,
+        trait_name,
+    }) = &context.container
+    else {
         return None;
-    }
-    let self_type = owner.child_by_field_name("type")?;
+    };
     let mut cursor = function.walk();
     let visibility = function
         .children(&mut cursor)
@@ -327,25 +431,23 @@ fn method(function: Node<'_>, src: &[u8], scope: &str) -> Option<Method> {
         .map_or(Visibility::Private, |modifier| visibility(modifier, src));
     let detail = detail::detail(function, src);
     Some(Method {
-        owner: owner_name(self_type, src),
-        owner_path: compact(self_type, src),
-        trait_name: owner
-            .child_by_field_name("trait")
-            .map(|name| compact(name, src)),
+        owner: owner.clone(),
+        owner_path: owner_path.clone(),
+        trait_name: trait_name.clone(),
         name: compact(function.child_by_field_name("name")?, src),
         visibility,
-        scope: scope.to_owned(),
+        scope: (*context.scope).clone(),
         start_line: start_line(function),
         end_line: detail.end_line,
         signature: detail.signature,
         doc_summary: detail.doc_summary,
-        is_test: attrs::is_test(function, src),
+        is_test: attrs::is_test(function, src, context.in_cfg_test),
     })
 }
 
 /// A self type's last path segment without generics: `a::Ledger<T>` and
 /// `&Ledger` give `Ledger`. Other type shapes come back as written.
-fn owner_name(self_type: Node<'_>, src: &[u8]) -> String {
+pub(crate) fn owner_name(self_type: Node<'_>, src: &[u8]) -> String {
     let mut node = self_type;
     loop {
         let next = match node.kind() {

@@ -137,44 +137,7 @@ pub(crate) fn insert_symbols(
     let mut index = SymbolIndex {
         entries: Vec::with_capacity(extract.items.len() + extract.methods.len()),
     };
-    let mut item_statement = conn.prepare(
-        "INSERT INTO symbols(
-            file_id, kind, name, qual_name, stable_key, visibility, start_line, end_line,
-            signature, doc_summary, scope, is_test
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-    )?;
-    for (position, item) in extract.items.iter().enumerate() {
-        let ordinal = extract.items[..position]
-            .iter()
-            .filter(|prior| prior.name == item.name && prior.kind == item.kind)
-            .count();
-        let scope = extract
-            .item_scopes
-            .get(position)
-            .ok_or(StoreError::UnreadableStamp)?;
-        let qual = qualify(scope, &item.name);
-        let stable_key = format!("{path}#{}#{}#{ordinal}", item.name, symbol_text(item.kind));
-        item_statement.execute((
-            file_id,
-            symbol_text(item.kind),
-            &item.name,
-            qual.clone(),
-            stable_key,
-            visibility_to_text(&item.visibility),
-            i64::from(item.start_line),
-            i64::from(item.end_line),
-            &item.signature,
-            &item.doc_summary,
-            scope.clone(),
-            i64::from(item.is_test),
-        ))?;
-        index.entries.push((
-            None,
-            item.name.clone(),
-            i64::from(item.start_line),
-            conn.last_insert_rowid(),
-        ));
-    }
+    insert_items(conn, file_id, path, extract, &mut index)?;
     let mut method_statement = conn.prepare(
         "INSERT INTO symbols(
             file_id, kind, name, qual_name, stable_key, visibility, start_line, end_line,
@@ -285,6 +248,80 @@ pub(crate) fn last_segment(path: &str) -> &str {
         .next()
         .filter(|segment| !segment.is_empty())
         .unwrap_or(path)
+}
+
+fn insert_items(
+    conn: &Connection,
+    file_id: i64,
+    path: &str,
+    extract: &Extract,
+    index: &mut SymbolIndex,
+) -> Result<(), StoreError> {
+    let mut statement = conn.prepare(
+        "INSERT INTO symbols(
+            file_id, kind, name, qual_name, stable_key, visibility, start_line, end_line,
+            signature, doc_summary, scope, owner, is_test
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+    )?;
+    for (position, item) in extract.items.iter().enumerate() {
+        let owner = extract.item_owners.get(position).and_then(Option::as_deref);
+        let scope = extract
+            .item_scopes
+            .get(position)
+            .ok_or(StoreError::UnreadableStamp)?;
+        let leaf = qualified_leaf(owner, &item.name);
+        let stable_key = format!(
+            "{path}#{leaf}#{}#{}",
+            symbol_text(item.kind),
+            item_ordinal(extract, position, item, owner)
+        );
+        statement.execute((
+            file_id,
+            symbol_text(item.kind),
+            &item.name,
+            qualify(scope, &leaf),
+            stable_key,
+            visibility_to_text(&item.visibility),
+            i64::from(item.start_line),
+            i64::from(item.end_line),
+            &item.signature,
+            &item.doc_summary,
+            scope.clone(),
+            owner,
+            i64::from(item.is_test),
+        ))?;
+        index.entries.push((
+            None,
+            item.name.clone(),
+            i64::from(item.start_line),
+            conn.last_insert_rowid(),
+        ));
+    }
+    Ok(())
+}
+
+fn item_ordinal(
+    extract: &Extract,
+    position: usize,
+    item: &phantom_fractal_lang::Item,
+    owner: Option<&str>,
+) -> usize {
+    extract.items[..position]
+        .iter()
+        .enumerate()
+        .filter(|(idx, prior)| {
+            prior.name == item.name
+                && prior.kind == item.kind
+                && extract.item_owners.get(*idx).and_then(Option::as_deref) == owner
+        })
+        .count()
+}
+
+fn qualified_leaf(owner: Option<&str>, name: &str) -> String {
+    match owner {
+        Some(owner) => format!("{owner}::{name}"),
+        None => name.to_owned(),
+    }
 }
 
 /// An in-file qualified name: `scope::name`, or `name` without a scope.

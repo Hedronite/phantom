@@ -94,11 +94,11 @@ fn a_deleted_file_loses_its_rows_and_edges() {
     let edges = stored_edges(&s.store);
     assert!(!edges.iter().any(|edge| edge.contains("sink")), "{edges:?}");
     let graph = graph(&report);
-    // The two `use-glob` edges of SPEC-w13 G2a stay: neither is in the file.
-    assert_eq!(graph.counts.edges, 23);
+    // The two `use-glob` edges of SPEC-w13 G2a and nested-fn edges of SPEC-w16 G2 stay: neither is in the file.
+    assert_eq!(graph.counts.edges, 25);
     assert_eq!(graph.modules, 10);
     // `deep::sink()` in `util::helper` now names a module with no file.
-    assert_eq!(graph.counts.unresolved, 7);
+    assert_eq!(graph.counts.unresolved, 6);
 }
 
 #[test]

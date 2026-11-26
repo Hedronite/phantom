@@ -174,7 +174,8 @@ fn every_binding_form_shadows_a_single_segment_call() {
         ("struct field", "fn f(s: S) { let S { a: g } = s; g(); }"),
         ("local use", "fn f() { use a::b as g; g(); }"),
         ("local use leaf", "fn f() { use a::{b, g}; g(); }"),
-        ("local fn", "fn f() { fn g() {} g(); }"),
+        ("local const", "fn f() { const g: fn() = || {}; g(); }"),
+        ("local struct", "fn f() { struct g(); g(); }"),
         ("let after the call", "fn f() { g(); let g = 1; }"),
         (
             "let in a closure",
@@ -202,6 +203,7 @@ fn unbound_paths_methods_and_other_functions_are_not_shadowed() {
             "guard",
             "fn f(x: Option<u8>) { match x { Some(y) if g(y) => {}, _ => {} } }",
         ),
+        ("nested fn", "fn f() { fn g() {} g(); }"),
         (
             "nested fn binding",
             "fn f() { fn inner() { let g = 1; } g(); }",

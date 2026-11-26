@@ -368,7 +368,7 @@ fn trait_default_body_call_gets_no_from_symbol() {
 }
 
 #[test]
-fn nested_inner_fn_call_gets_no_from_symbol() {
+fn nested_inner_fn_call_gets_its_own_from_symbol() {
     let db = TempDb::new("nested");
     assert_outside_workspace(db.path());
     let mut store = Store::open(db.path()).expect("open");
@@ -379,18 +379,67 @@ fn nested_inner_fn_call_gets_no_from_symbol() {
         .expect("put");
     let input = store.resolve_input().expect("input");
     let outer_id = row_id(&input, "outer");
+    let nested_inner = input
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "inner" && symbol.owner.as_deref() == Some("outer"))
+        .expect("nested inner symbol");
     let calls: Vec<_> = input
         .refs
         .iter()
         .filter(|reference| reference.text == "helper")
         .collect();
-    assert_eq!(calls.len(), 2, "one call per inner fn");
-    let outer_starts_nested = calls
-        .iter()
-        .any(|reference| reference.from == Some(outer_id));
-    assert!(outer_starts_nested);
-    // The nested inner has no symbol row of its own.
-    assert!(calls.iter().any(|reference| reference.from.is_none()));
+    assert_eq!(calls.len(), 2, "one call per fn");
+    assert!(
+        calls
+            .iter()
+            .any(|reference| reference.from == Some(outer_id))
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|reference| reference.from == Some(nested_inner.id))
+    );
+    let detail = store
+        .symbol_detail(nested_inner.id)
+        .expect("detail")
+        .expect("row");
+    assert_eq!(detail.qual_name, "outer::inner");
+    assert_eq!(detail.stable_key, "src/nested.rs#outer::inner#function#0");
+    assert!(
+        store
+            .symbol_by_stable_key("src/nested.rs#inner#function#0")
+            .expect("top")
+            .is_some()
+    );
+    let multi = "struct inner;\nfn a() { fn inner() {} }\nfn b(c: bool) { if c { fn inner() {} } else { fn inner() {} } }\n";
+    store
+        .put_source("src/multi.rs", multi, 0, &language)
+        .expect("put multi");
+    assert!(
+        store
+            .symbol_by_stable_key("src/multi.rs#inner#struct#0")
+            .expect("s")
+            .is_some()
+    );
+    assert!(
+        store
+            .symbol_by_stable_key("src/multi.rs#a::inner#function#0")
+            .expect("a")
+            .is_some()
+    );
+    assert!(
+        store
+            .symbol_by_stable_key("src/multi.rs#b::inner#function#0")
+            .expect("b0")
+            .is_some()
+    );
+    assert!(
+        store
+            .symbol_by_stable_key("src/multi.rs#b::inner#function#1")
+            .expect("b1")
+            .is_some()
+    );
     drop(store);
 }
 

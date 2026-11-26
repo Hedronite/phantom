@@ -3,8 +3,8 @@
 //!
 //! Every pattern in the function counts, wherever it sits: parameters,
 //! `let`, closure parameters, `match` arms, `for`, `if let`, and `while let`.
-//! So do the names of items and `use` leaves declared in the body. Nested
-//! functions are their own scope and are not entered.
+//! So do the names of non-`fn` items and `use` leaves declared in the body.
+//! Nested functions are their own symbol and are not entered here.
 
 use std::collections::HashSet;
 
@@ -47,9 +47,7 @@ pub(crate) fn collect(function: Node<'_>, src: &[u8]) -> HashSet<String> {
             }
             "function_item" | "struct_item" | "enum_item" | "union_item" | "trait_item"
             | "const_item" | "static_item" | "type_item" | "mod_item" => {
-                if let Some(name) = node.child_by_field_name("name") {
-                    names.insert(compact(name, src));
-                }
+                bind_local_item(node, src, &mut names);
                 continue;
             }
             "use_declaration" => {
@@ -63,6 +61,14 @@ pub(crate) fn collect(function: Node<'_>, src: &[u8]) -> HashSet<String> {
         stack.extend(node.named_children(&mut cursor));
     }
     names
+}
+
+fn bind_local_item(node: Node<'_>, src: &[u8], names: &mut HashSet<String>) {
+    if node.kind() != "function_item"
+        && let Some(name) = node.child_by_field_name("name")
+    {
+        names.insert(compact(name, src));
+    }
 }
 
 /// Adds the identifiers a pattern binds. Paths and the type of a struct or
