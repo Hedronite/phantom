@@ -16,10 +16,12 @@ use std::path::Path;
 
 use phantom_fractal_store::{FileStat, Store};
 
-use crate::fingerprint::{ManifestRead, Unread, read_manifests, read_manifests_with, stamp};
+use phantom_fractal_store::StoreError;
+
+use crate::fingerprint::{ManifestRead, Unread, read_manifests_with, stamp};
 use crate::read::{Source, mtime_ns, read_source};
-use crate::registry::{Registry, RustFilter};
-use crate::walk::{Candidate, Walk, walk, walk_with};
+use crate::registry::Registry;
+use crate::walk::{Candidate, Walk, walk_with};
 use crate::{EXTRACTOR_VERSION, IndexError};
 
 /// What [`probe`] found. Each list is sorted repo-relative paths.
@@ -64,9 +66,8 @@ impl Freshness {
 /// walked, or a file it reads cannot be opened or read. A repository that
 /// opens as a root but whose HEAD cannot be read fails it too.
 pub fn probe(root: &Path, store: &Store) -> Result<Freshness, IndexError> {
-    let walk = walk(root)?;
-    let manifests = read_manifests(&walk)?;
-    probe_walk(root, store, &walk, &manifests, RustFilter::is_supported)
+    let registry = crate::default_registry().map_err(StoreError::Extract)?;
+    probe_with(root, store, &registry)
 }
 
 /// Compares `root` with what `store` holds using registered languages in `registry`.

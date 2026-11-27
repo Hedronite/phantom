@@ -1302,3 +1302,85 @@ fn did_you_mean_handles_go_dots_and_excludes_init_and_blank() {
     assert_eq!(init_hits[0].file, "src/init.rs");
     assert!(store.did_you_mean("_").expect("blank").is_empty());
 }
+
+#[test]
+fn rust_shared_file_multi_mount_answers_exact_and_scoped_lookups() {
+    use phantom_fractal_lang::{Module, Target, TargetKind};
+    let db = TempDb::new("multi-mount");
+    let mut store = Store::open(db.path()).expect("open");
+    let lang = language();
+    store
+        .put_source(
+            "src/shared.rs",
+            "pub fn helper() {}\npub struct Widget;\nimpl Widget { pub fn turn(&self) {} }\n",
+            0,
+            &lang,
+        )
+        .expect("put");
+    store
+        .write_crate_graph(
+            &[Package {
+                name: "probe_pkg".to_owned(),
+                version: Some("0.1.0".to_owned()),
+                manifest_path: "Cargo.toml".to_owned(),
+            }],
+            &[
+                Target {
+                    id: 1,
+                    package: "probe_pkg".to_owned(),
+                    name: "probe_pkg".to_owned(),
+                    kind: TargetKind::Lib,
+                    root: "src/lib.rs".to_owned(),
+                },
+                Target {
+                    id: 2,
+                    package: "probe_pkg".to_owned(),
+                    name: "tool".to_owned(),
+                    kind: TargetKind::Bin,
+                    root: "src/bin/tool.rs".to_owned(),
+                },
+            ],
+            &[
+                Module {
+                    id: 1,
+                    target: 1,
+                    parent: None,
+                    path: "crate::shared".to_owned(),
+                    file: "src/shared.rs".to_owned(),
+                    scope: String::new(),
+                },
+                Module {
+                    id: 2,
+                    target: 1,
+                    parent: None,
+                    path: "crate::nested::again".to_owned(),
+                    file: "src/shared.rs".to_owned(),
+                    scope: String::new(),
+                },
+                Module {
+                    id: 3,
+                    target: 2,
+                    parent: None,
+                    path: "crate::helpers".to_owned(),
+                    file: "src/shared.rs".to_owned(),
+                    scope: String::new(),
+                },
+            ],
+            &[],
+        )
+        .expect("graph");
+
+    for q in [
+        "helpers::helper",
+        "crate::helpers::helper",
+        "nested::again::helper",
+        "crate::nested::again::helper",
+        "helpers::Widget::turn",
+        "crate::helpers::Widget::turn",
+        "tool::helpers::helper",
+        "tool::helpers::Widget::turn",
+        "probe_pkg::nested::again::helper",
+    ] {
+        assert_eq!(store.symbols_matching(q).expect(q).len(), 1, "{q}");
+    }
+}

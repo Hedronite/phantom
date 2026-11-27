@@ -897,6 +897,8 @@ fn multilang_kinds_refs_edges_links_and_unresolved_value_ref() {
         1
     );
     assert_eq!(store.unresolved_named("Reader").expect("embed excluded"), 0);
+    assert_eq!(store.value_refs_named("UnresolvedVal").expect("vref"), 1);
+    assert_eq!(store.value_refs_named("Reader").expect("not vref"), 0);
 
     let caller = input.symbols[0].id;
     let target_sym = input.symbols[1].id;

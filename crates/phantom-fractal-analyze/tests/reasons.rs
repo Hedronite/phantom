@@ -487,3 +487,50 @@ fn store_impact_source_reads_go_lang_value_refs_and_source_skipped() {
     let r_do: Vec<&str> = do_imp.reasons.iter().map(|r| r.reason.as_str()).collect();
     assert!(r_do.contains(&"interface_dispatch"), "{r_do:?}");
 }
+
+#[test]
+fn every_completeness_reason_variant_is_reachable() {
+    use phantom_fractal_analyze::{
+        CompletenessReason, DiffState, ImpactOptions, impact, impact_many,
+    };
+    use std::collections::BTreeSet;
+
+    let mut g = support::Graph::new();
+    let id = g.function(1, "M");
+    {
+        let facts = g.facts_mut(id);
+        facts.kind = "method".to_owned();
+        facts.file = "src/a.go".to_owned();
+        facts.visibility = "public".to_owned();
+        facts.trait_name = Some("Tr".to_owned());
+        facts.package = Some("pkg".to_owned());
+    }
+    let caller = g.function(2, "caller");
+    g.call(caller, id, 1.0);
+    g.langs.insert("src/a.go".to_owned(), "go".to_owned());
+    g.unresolved.insert("M".to_owned(), 1);
+    g.macro_args.insert("M".to_owned(), 1);
+    g.value_refs.insert("M".to_owned(), 1);
+    g.rs_skipped = Some(1);
+    g.build_excluded = Some(2);
+
+    let diff = DiffState {
+        stale_index: true,
+        unindexed_changes: 1,
+        manifest_changed: true,
+    };
+    let a1 = impact(&g, id, &ImpactOptions::default()).unwrap();
+    let a2 = impact_many(&g, &[id], &ImpactOptions::default(), &diff).unwrap();
+    let seen: BTreeSet<&str> = a1
+        .reasons
+        .iter()
+        .chain(a2.reasons.iter())
+        .map(|r| r.reason.as_str())
+        .collect();
+    for variant in CompletenessReason::ALL {
+        assert!(
+            seen.contains(variant.as_str()),
+            "unreachable CompletenessReason::{variant:?} in {seen:?}"
+        );
+    }
+}

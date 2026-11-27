@@ -114,7 +114,7 @@ fn extract_kept_files(
         parse_errors: 0,
     };
     for file in kept {
-        extract_one_kept(file, store, drivers, &mut out)?;
+        extract_one_kept(file, store, &drivers, &mut out)?;
     }
     Ok(out)
 }
@@ -303,8 +303,7 @@ fn add_counts(total: &mut ResolveCounts, part: ResolveCounts) {
 /// The graph report of the tree at `root` as last indexed into `store`,
 /// read without writing: for an index pass that rebuilt nothing.
 pub fn stored_graph(store: &Store, root: &Path) -> Result<GraphReport, IndexError> {
-    let rust = crate::registry::RustDriver::owned().map_err(StoreError::Extract)?;
-    let registry = Registry::new(vec![&rust]);
+    let registry = crate::default_registry().map_err(StoreError::Extract)?;
     stored_graph_with(store, root, &registry)
 }
 

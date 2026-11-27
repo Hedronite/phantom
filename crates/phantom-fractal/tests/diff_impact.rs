@@ -263,11 +263,12 @@ fn changed_symbols_files_and_their_impact() {
         [
             "external_users_possible",
             "stale_index",
-            "unindexed_changes"
+            "unindexed_changes",
+            "manifest_changed"
         ]
     );
     let unindexed = &data["impact"]["reasons"][2];
-    assert_eq!(unindexed["count"], 1);
+    assert_eq!(unindexed["count"], 2);
     // `top` calls `fb`: the walk is `impact`'s from `fb` and `fg`.
     // `impact` names each hit with `display` (SPEC-w14 G1b); the diff
     // keeps its old hit shape.
@@ -652,5 +653,119 @@ fn manifest_only_or_rs_comment_only_edit_is_never_exact() {
     assert!(
         reasons(&manifest_only).contains(&"manifest_changed".to_owned()),
         "{manifest_only}"
+    );
+}
+
+#[test]
+fn diff_impact_never_returns_exact_when_use_rebind_or_manifest_joins_body_edit() {
+    let dir = TempDir::new("diff-f2-probe");
+    let data = TempDir::new("diff-f2-data");
+    let repo = dir.path();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"f2_probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("src/a.rs"),
+        "pub fn target() -> i32 { 1 }\npub fn other() -> i32 { 2 }\n",
+    )
+    .unwrap();
+    fs::write(repo.join("src/c.rs"), "pub fn target() -> i32 { 10 }\n").unwrap();
+    fs::write(
+        repo.join("src/b.rs"),
+        "use crate::a::target;\npub fn caller() -> i32 { target() }\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub mod a;\npub mod b;\npub mod c;\n",
+    )
+    .unwrap();
+
+    let run_git = |args: &[&str]| {
+        let st = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("HOME", data.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "T")
+            .env("GIT_AUTHOR_EMAIL", "t@e.com")
+            .env("GIT_COMMITTER_NAME", "T")
+            .env("GIT_COMMITTER_EMAIL", "t@e.com")
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?}");
+    };
+    run_git(&["init", "-q", "-b", "main"]);
+    run_git(&["add", "."]);
+    run_git(&["commit", "-q", "-m", "init"]);
+
+    let run_bin = |args: &[&str]| -> Value {
+        let out = Command::new(BINS[0])
+            .args(args)
+            .current_dir(repo)
+            .env("PHANTOM_FRACTAL_DATA_DIR", data.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "cmd {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+
+    run_bin(&["index", "."]);
+
+    // Case B: use rebind in b.rs + body edit of a::other (re-indexed so stale == false) -> MUST be exact: false (unindexed_changes).
+    fs::write(
+        repo.join("src/b.rs"),
+        "use crate::c::target;\npub fn caller() -> i32 { target() }\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/a.rs"),
+        "pub fn target() -> i32 { 1 }\npub fn other() -> i32 { 99 }\n",
+    )
+    .unwrap();
+    run_bin(&["index", "."]);
+    let rebind_and_body = run_bin(&["impact", "--diff"]);
+    assert_eq!(rebind_and_body["meta"]["stale"], false, "{rebind_and_body}");
+    assert_eq!(
+        rebind_and_body["data"]["impact"]["exact"], false,
+        "{rebind_and_body}"
+    );
+    assert!(
+        reasons(&rebind_and_body["data"]).contains(&"unindexed_changes".to_owned()),
+        "{rebind_and_body}"
+    );
+
+    // Case C: Cargo.toml edit + body edit (restore b.rs to HEAD, re-index so stale == false) -> MUST be exact: false (manifest_changed).
+    run_git(&["checkout", "--", "src/b.rs"]);
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"f2_probe\"\nversion = \"0.2.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    run_bin(&["index", "."]);
+    let manifest_and_body = run_bin(&["impact", "--diff"]);
+    assert_eq!(
+        manifest_and_body["meta"]["stale"], false,
+        "{manifest_and_body}"
+    );
+    assert_eq!(
+        manifest_and_body["data"]["manifest_changed"], true,
+        "{manifest_and_body}"
+    );
+    assert_eq!(
+        manifest_and_body["data"]["impact"]["exact"], false,
+        "{manifest_and_body}"
+    );
+    assert!(
+        reasons(&manifest_and_body["data"]).contains(&"manifest_changed".to_owned()),
+        "{manifest_and_body}"
     );
 }

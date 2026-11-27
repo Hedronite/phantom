@@ -157,8 +157,7 @@ pub(crate) fn cochange(request: &CochangeRequest) -> Result<Reply<CochangeResult
     let asked = checked(request)?;
     let clamped = asked.note();
     let store = current_store(&request.repo)?;
-    let multilang = has_non_rust(&store)?;
-    let file = indexed_file(&store, &request.file, multilang)?;
+    let (file, multilang) = indexed_file_scope(&store, &request.file)?;
     let scan = scan(&store)?;
     let limit = scan.as_ref().map(|_| asked);
     let (partners, truncated) = listed(&store, &file, request, limit)?;
@@ -171,6 +170,12 @@ pub(crate) fn cochange(request: &CochangeRequest) -> Result<Reply<CochangeResult
         tokens: None,
     };
     answer_limited(result, &store, &request.repo, request.max_tokens, clamped)
+}
+
+fn indexed_file_scope(store: &Store, path: &str) -> Result<(String, bool), Failure> {
+    let multilang = has_non_rust(store)?;
+    let file = indexed_file(store, path, multilang)?;
+    Ok((file, multilang))
 }
 
 /// The limit, unless it is 0 or `min_lift` or `max_tokens` is out of
@@ -256,7 +261,9 @@ fn not_indexed_error(multilang: bool) -> Failure {
     Failure::new(
         ErrorKind::NotFound,
         format!(
-            "file is not indexed at HEAD: co-change is kept only for {label};              give a path relative to the repo, or for raw counts over every tracked file              use cochange --count or git log"
+            "file is not indexed at HEAD: co-change is kept only for {label}; \
+             give a path relative to the repo, or for raw counts over every tracked file \
+             use cochange --count or git log"
         ),
     )
 }
@@ -406,6 +413,14 @@ mod tests {
             .unwrap();
         assert!(super::has_non_rust(&s).ok().unwrap());
         let _ = std::fs::remove_file(&tmp);
+        assert_eq!(
+            super::not_indexed_error(false).message,
+            "file is not indexed at HEAD: co-change is kept only for indexed Rust files; give a path relative to the repo, or for raw counts over every tracked file use cochange --count or git log"
+        );
+        assert_eq!(
+            super::not_indexed_error(true).message,
+            "file is not indexed at HEAD: co-change is kept only for indexed files; give a path relative to the repo, or for raw counts over every tracked file use cochange --count or git log"
+        );
         assert_eq!(
             serde_json::to_value(Scope::count()).expect("json"),
             serde_json::json!({

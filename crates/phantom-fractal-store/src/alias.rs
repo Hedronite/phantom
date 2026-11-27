@@ -431,7 +431,10 @@ impl crate::Store {
              WHERE EXISTS (
                  SELECT 1 FROM modules fm
                  JOIN targets t ON t.id = fm.target_id
-                 WHERE fm.id = COALESCE(s.module_id, f.module_id)
+                 WHERE (
+                     fm.id = COALESCE(s.module_id, f.module_id)
+                     OR (f.lang = 'rust' AND fm.file_id = s.file_id AND fm.scope = '')
+                 )
                    AND ((?2 IS NOT NULL AND t.package_id = ?2)
                         OR (?3 IS NOT NULL AND t.id = ?3)
                         OR (?4 IS NOT NULL AND fm.id = ?4))
@@ -478,7 +481,10 @@ impl crate::Store {
                AND EXISTS (
                    SELECT 1 FROM modules gm
                    JOIN targets t ON t.id = gm.target_id
-                   WHERE gm.id = COALESCE(s.module_id, f.module_id)
+                   WHERE (
+                       gm.id = COALESCE(s.module_id, f.module_id)
+                       OR (f.lang = 'rust' AND gm.file_id = s.file_id AND gm.scope = '')
+                   )
                      AND ((?3 IS NOT NULL AND t.package_id = ?3)
                           OR (?4 IS NOT NULL AND t.id = ?4)
                           OR (?5 IS NOT NULL AND gm.id = ?5))

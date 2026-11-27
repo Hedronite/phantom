@@ -171,3 +171,83 @@ fn store_impact_source_reads_go_lang_value_refs_and_source_skipped() {
     let r_do: Vec<&str> = do_imp.reasons.iter().map(|r| r.reason.as_str()).collect();
     assert!(r_do.contains(&"interface_dispatch"), "{r_do:?}");
 }
+
+#[test]
+fn rust_path_multi_mount_probe_answers_callers_callees_impact_and_show() {
+    use std::fs;
+    use std::process::Command;
+
+    let dir = std::env::temp_dir().join(format!("phantom-f1-probe-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    let tree = dir.join("tree");
+    let data = dir.join("data");
+    fs::create_dir_all(tree.join("src/nested")).unwrap();
+    fs::create_dir_all(tree.join("src/bin")).unwrap();
+    fs::create_dir_all(&data).unwrap();
+
+    fs::write(
+        tree.join("Cargo.toml"),
+        "[package]\nname = \"probe_pkg\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::write(
+        tree.join("src/shared.rs"),
+        "pub fn helper() { leaf(); }\npub fn leaf() {}\npub struct Widget;\nimpl Widget { pub fn turn(&self) { leaf(); } }\n",
+    )
+    .unwrap();
+    fs::write(tree.join("src/lib.rs"), "pub mod shared;\n").unwrap();
+    fs::write(
+        tree.join("src/nested/mod.rs"),
+        "#[path = \"../shared.rs\"]\npub mod again;\n",
+    )
+    .unwrap();
+    fs::write(
+        tree.join("src/main.rs"),
+        "mod shared;\nmod nested;\nfn main() { nested::again::helper(); }\n",
+    )
+    .unwrap();
+    fs::write(
+        tree.join("src/bin/tool.rs"),
+        "#[path = \"../shared.rs\"]\nmod helpers;\nfn main() { helpers::helper(); let w = helpers::Widget; w.turn(); }\n",
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_fract");
+    let idx = Command::new(bin)
+        .args(["index", "."])
+        .current_dir(&tree)
+        .env("PHANTOM_FRACTAL_DATA_DIR", &data)
+        .output()
+        .unwrap();
+    assert!(
+        idx.status.success(),
+        "{}",
+        String::from_utf8_lossy(&idx.stderr)
+    );
+
+    for q in [
+        "helpers::helper",
+        "crate::helpers::helper",
+        "nested::again::helper",
+        "crate::nested::again::helper",
+        "helpers::Widget::turn",
+        "crate::helpers::Widget::turn",
+    ] {
+        for sub in ["callers", "callees", "impact", "show"] {
+            let out = Command::new(bin)
+                .args([sub, q])
+                .current_dir(&tree)
+                .env("PHANTOM_FRACTAL_DATA_DIR", &data)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{sub} {q} failed: {}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+            let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(v["ok"], true, "{sub} {q}: {v}");
+        }
+    }
+    let _ = fs::remove_dir_all(&dir);
+}

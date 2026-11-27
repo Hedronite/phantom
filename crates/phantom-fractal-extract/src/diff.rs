@@ -22,7 +22,7 @@ use phantom_fractal_lang::{Extract, ExtractError, Language};
 use phantom_fractal_lang_rust::RustLanguage;
 
 use crate::read::{Source, read_source};
-use crate::registry::{Registry, RustDriver};
+use crate::registry::Registry;
 use crate::walk::{MAX_FILE_BYTES, is_secret, walk_with};
 
 /// One changed symbol.
@@ -113,9 +113,8 @@ impl From<ExtractError> for DiffError {
 /// the walk and not kept (now too large, a link, not UTF-8, and so on),
 /// which removes it. A base path the walk never sees although it is
 /// there, an ignored one, is no change: it is not indexed on either side.
-pub fn diff(root: &Path, base: &Base, language: &RustLanguage) -> Result<Option<Diff>, DiffError> {
-    let rust = RustDriver::new(language);
-    let registry = Registry::new(vec![&rust]);
+pub fn diff(root: &Path, base: &Base, _language: &RustLanguage) -> Result<Option<Diff>, DiffError> {
+    let registry = crate::default_registry()?;
     diff_with(root, base, &registry)
 }
 
@@ -126,7 +125,20 @@ pub fn diff_with(
     registry: &Registry<'_>,
 ) -> Result<Option<Diff>, DiffError> {
     let root = root.canonicalize()?;
-    let walked = walk_with(&root, registry)?;
+    let Some((worktree, found)) = collect_worktree_changes(&root, base, registry)? else {
+        return Ok(None);
+    };
+    classify_all_changes(found, &worktree, registry).map(Some)
+}
+
+type Worktree = BTreeMap<String, Vec<u8>>;
+
+fn collect_worktree_changes(
+    root: &Path,
+    base: &Base,
+    registry: &Registry<'_>,
+) -> Result<Option<(Worktree, phantom_fractal_git::Changes)>, DiffError> {
+    let walked = walk_with(root, registry)?;
     let seen: HashSet<String> = walked
         .files
         .iter()
@@ -135,10 +147,18 @@ pub fn diff_with(
         .collect();
     let worktree = read_worktree(walked.files, registry)?;
     let keep_base =
-        |path: &str, size: u64| keep_base_file(&root, path, size, &worktree, &seen, registry);
-    let Some(found) = changes(&root, base, &worktree, &keep_base)? else {
+        |path: &str, size: u64| keep_base_file(root, path, size, &worktree, &seen, registry);
+    let Some(found) = changes(root, base, &worktree, &keep_base)? else {
         return Ok(None);
     };
+    Ok(Some((worktree, found)))
+}
+
+fn classify_all_changes(
+    found: phantom_fractal_git::Changes,
+    worktree: &BTreeMap<String, Vec<u8>>,
+    registry: &Registry<'_>,
+) -> Result<Diff, DiffError> {
     let mut out = Diff {
         base_oid: found.base_oid,
         changed: Vec::new(),
@@ -146,11 +166,11 @@ pub fn diff_with(
         manifest_changed: false,
     };
     for file in found.files {
-        classify_diff_file(file, &worktree, registry, &mut out)?;
+        classify_diff_file(file, worktree, registry, &mut out)?;
     }
     out.changed
         .sort_by(|a, b| (&a.path, &a.key).cmp(&(&b.path, &b.key)));
-    Ok(Some(out))
+    Ok(out)
 }
 
 fn read_worktree(

@@ -686,7 +686,10 @@ impl crate::Store {
                 OR (f.lang = 'go' AND s.qual_name = ?3)
                 OR EXISTS (
                     SELECT 1 FROM modules fm
-                    WHERE fm.id = COALESCE(s.module_id, f.module_id)
+                    WHERE (
+                        fm.id = COALESCE(s.module_id, f.module_id)
+                        OR (f.lang = 'rust' AND fm.file_id = s.file_id AND fm.scope = '')
+                    )
                       AND CASE
                               WHEN f.lang = 'rust' THEN
                                   CASE
@@ -727,7 +730,10 @@ impl crate::Store {
              WHERE s.owner IS NOT NULL AND s.name = ?2
                AND EXISTS (
                    SELECT 1 FROM modules gm
-                   WHERE gm.id = COALESCE(s.module_id, f.module_id)
+                   WHERE (
+                       gm.id = COALESCE(s.module_id, f.module_id)
+                       OR (f.lang = 'rust' AND gm.file_id = s.file_id AND gm.scope = '')
+                   )
                      AND (
                          (CASE WHEN gm.scope = '' THEN gm.path ELSE substr(gm.path, 1, length(gm.path) - length(gm.scope) - 2) END) = ?1
                          OR (
@@ -886,13 +892,19 @@ impl crate::Store {
     }
 }
 
+const CLEAR_CRATE_GRAPH_SQL: [&str; 6] = [
+    "UPDATE symbols SET module_id = NULL",
+    "UPDATE files SET module_id = NULL",
+    "UPDATE modules SET parent_id = NULL",
+    "DELETE FROM modules",
+    "DELETE FROM targets",
+    "DELETE FROM packages",
+];
+
 fn clear_crate_graph(tx: &rusqlite::Connection) -> Result<(), StoreError> {
-    tx.execute("UPDATE symbols SET module_id = NULL", [])?;
-    tx.execute("UPDATE files SET module_id = NULL", [])?;
-    tx.execute("UPDATE modules SET parent_id = NULL", [])?;
-    tx.execute("DELETE FROM modules", [])?;
-    tx.execute("DELETE FROM targets", [])?;
-    tx.execute("DELETE FROM packages", [])?;
+    for sql in CLEAR_CRATE_GRAPH_SQL {
+        tx.execute(sql, [])?;
+    }
     Ok(())
 }
 
@@ -941,11 +953,8 @@ fn file_ids_map(tx: &rusqlite::Connection) -> Result<HashMap<String, i64>, Store
     #[cfg(test)]
     let queried = crate::fault::tick(queried);
     let mut rows = queried?;
-    let mut map = HashMap::new();
-    while let Some(row) = rows.next()? {
-        map.insert(row.get::<_, String>(0)?, row.get::<_, i64>(1)?);
-    }
-    Ok(map)
+    let pairs = collect_rows(&mut rows, |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(pairs.into_iter().collect())
 }
 
 fn insert_modules(

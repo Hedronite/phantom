@@ -83,6 +83,16 @@ impl crate::Store {
             |row| row.get(0),
         )?)
     }
+
+    /// How many `value_ref` refs end in `name`.
+    pub fn value_refs_named(&self, name: &str) -> Result<i64, StoreError> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM refs r
+             WHERE r.kind = 'value_ref' AND r.last_segment = ?1",
+            [name],
+            |row| row.get(0),
+        )?)
+    }
 }
 
 /// The spans the scorer matches against (SPEC-w10 G1): every stored

@@ -11,7 +11,7 @@ use std::cmp::Reverse;
 use std::path::PathBuf;
 
 use phantom_fractal_analyze::{DiffState, ImpactOptions, impact_many};
-use phantom_fractal_extract::{DiffError, Registry, RustDriver, diff_with};
+use phantom_fractal_extract::{DiffError, Registry, default_registry, diff_with};
 use phantom_fractal_git::{Base, ChangesError};
 use phantom_fractal_proto::ErrorKind;
 use serde::Serialize;
@@ -150,9 +150,8 @@ pub(crate) fn staged_refusal() -> Failure {
 /// What the change in the work tree of `request.repo` against its base
 /// reaches, fitted to `request.max_tokens`.
 pub(crate) fn impact_diff(request: &DiffRequest) -> Result<Reply<DiffResult>, Failure> {
-    let rust = RustDriver::owned()
+    let registry = default_registry()
         .map_err(|err| Failure::new(ErrorKind::Usage, format!("extract: {err}")))?;
-    let registry = Registry::new(vec![&rust]);
     impact_diff_with(request, &registry)
 }
 
@@ -160,24 +159,43 @@ pub(crate) fn impact_diff_with(
     request: &DiffRequest,
     registry: &Registry<'_>,
 ) -> Result<Reply<DiffResult>, Failure> {
+    let (store, names, root) = open_diff_context(request)?;
+    let (result, meta) = compute_diff_impact(&store, &names, &root, request, registry)?;
+    let result = budget::fit(result, request.max_tokens, &meta)?;
+    Ok(Reply::with_meta(result, meta))
+}
+
+fn open_diff_context(
+    request: &DiffRequest,
+) -> Result<(phantom_fractal_store::Store, super::lookup::Names, PathBuf), Failure> {
     check_diff_request(request)?;
     let (store, names) = current_index(&request.repo)?;
     let root = canonical_repo(&request.repo)?;
-    let changes = compute_diff(&root, request.against.as_deref(), registry)?;
-    let (changed, sources) = map_changed_symbols(&store, &changes.changed)?;
-    let meta = fresh::meta(&root, &store)?;
+    Ok((store, names, root))
+}
+
+fn compute_diff_impact(
+    store: &phantom_fractal_store::Store,
+    names: &super::lookup::Names,
+    root: &std::path::Path,
+    request: &DiffRequest,
+    registry: &Registry<'_>,
+) -> Result<(DiffResult, phantom_fractal_proto::Meta), Failure> {
+    let changes = compute_diff(root, request.against.as_deref(), registry)?;
+    let (changed, sources) = map_changed_symbols(store, &changes.changed)?;
+    let meta = fresh::meta(root, store)?;
     let state = build_diff_state(
         &changed,
-        &sources,
         &changes.files_only,
         changes.manifest_changed,
         meta.stale,
         registry,
     );
-    let answer = impact_many(&store, &sources, &request.options, &state)?;
-    let result = assemble_diff_result(request, changes, changed, answer, &names);
-    let result = budget::fit(result, request.max_tokens, &meta)?;
-    Ok(Reply::with_meta(result, meta))
+    let answer = impact_many(store, &sources, &request.options, &state)?;
+    Ok((
+        assemble_diff_result(request, changes, changed, answer, names),
+        meta,
+    ))
 }
 
 fn check_diff_request(request: &DiffRequest) -> Result<(), Failure> {
@@ -294,25 +312,20 @@ fn format_diff_hits(
 /// path-free text; any other failure is usage with a fixed text.
 fn build_diff_state(
     changed: &[ChangedOut],
-    sources: &[i64],
     files_only: &[phantom_fractal_extract::FileOnly],
     manifest_changed: bool,
     stale_index: bool,
     registry: &Registry<'_>,
 ) -> DiffState {
     let unindexed = changed.iter().filter(|symbol| !symbol.in_index).count();
-    let supported_only = if sources.is_empty() {
-        files_only
-            .iter()
-            .filter(|file| registry.is_supported(&file.path))
-            .count()
-    } else {
-        0
-    };
+    let supported_only = files_only
+        .iter()
+        .filter(|file| registry.is_supported(&file.path))
+        .count();
     DiffState {
         stale_index,
         unindexed_changes: u64::try_from(unindexed + supported_only).unwrap_or(u64::MAX),
-        manifest_changed: sources.is_empty() && manifest_changed,
+        manifest_changed,
     }
 }
 
@@ -340,7 +353,6 @@ mod tests {
         // Only a supported .rs file changed outside symbol spans, with clean index: must force unindexed_changes.
         let state = build_diff_state(
             &[],
-            &[],
             &[
                 FileOnly {
                     path: "README.md".to_owned(),
@@ -361,7 +373,6 @@ mod tests {
         // Manifest-only change with no indexed symbol sources: sets manifest_changed = true.
         let man = build_diff_state(
             &[],
-            &[],
             &[FileOnly {
                 path: "Cargo.toml".to_owned(),
                 change: FileChange::Modified,
@@ -373,7 +384,7 @@ mod tests {
         assert!(man.manifest_changed);
         assert_eq!(man.unindexed_changes, 0);
 
-        // Non-empty sources keeps manifest_changed = false in DiffState and counts only unindexed symbols.
+        // Non-empty changed symbols MUST still propagate supported files_only and manifest_changed.
         let with_sources = build_diff_state(
             &[ChangedOut {
                 path: "src/a.rs".to_owned(),
@@ -382,7 +393,6 @@ mod tests {
                 change: "modified",
                 in_index: true,
             }],
-            &[1],
             &[FileOnly {
                 path: "src/c.rs".to_owned(),
                 change: FileChange::Modified,
@@ -392,8 +402,8 @@ mod tests {
             &registry,
         );
         assert!(with_sources.stale_index);
-        assert!(!with_sources.manifest_changed);
-        assert_eq!(with_sources.unindexed_changes, 0);
+        assert!(with_sources.manifest_changed);
+        assert_eq!(with_sources.unindexed_changes, 1);
 
         let bad_depth = super::DiffRequest {
             against: None,

@@ -25,7 +25,7 @@ use std::time::Duration;
 use std::collections::BTreeSet;
 
 use phantom_fractal_extract::{
-    Freshness, Registry, RustDriver, index_with, probe_with, stored_graph_with,
+    Freshness, Registry, default_registry, index_with, probe_with, stored_graph_with,
 };
 use phantom_fractal_git::Window;
 use phantom_fractal_proto::ErrorKind;
@@ -128,9 +128,8 @@ fn watch(
     request: &WatchRequest,
     emit: &mut dyn FnMut(Reply<Batch>) -> Result<(), ()>,
 ) -> Result<(), Stop> {
-    let rust = RustDriver::owned()
+    let registry = default_registry()
         .map_err(|err| Failure::new(ErrorKind::Usage, format!("extract: {err}")))?;
-    let registry = Registry::new(vec![&rust]);
     watch_with(request, &registry, emit)
 }
 
@@ -140,25 +139,49 @@ fn watch_with(
     emit: &mut dyn FnMut(Reply<Batch>) -> Result<(), ()>,
 ) -> Result<(), Stop> {
     let root = checked_root(&request.repo)?;
-    let (mut store, _lock) = open_locked(&index_database_path(&root))?;
+    let (store, lock) = open_locked(&index_database_path(&root))?;
+    // The lock is bound before the store, so when the watch ends the store
+    // is closed first and the lock is released after it, as in `index`.
+    let _lock = lock;
+    let mut store = store;
+    watch_loop(&root, &mut store, request, registry, emit)
+}
+
+fn watch_loop(
+    root: &Path,
+    store: &mut Store,
+    request: &WatchRequest,
+    registry: &Registry<'_>,
+    emit: &mut dyn FnMut(Reply<Batch>) -> Result<(), ()>,
+) -> Result<(), Stop> {
     let mut batches = 0;
     let mut failed = false;
     let mut first = true;
     loop {
-        if !std::mem::take(&mut first) {
-            sleep(request.interval);
-        }
-        let Some(done) =
-            try_watch_step(&root, &mut store, registry, request.debounce, &mut failed)?
+        let Some(done) = wait_and_step(root, store, request, registry, &mut failed, &mut first)?
         else {
             continue;
         };
         batches += 1;
-        emit_batch(&root, &store, batches, done, emit)?;
+        emit_batch(root, store, batches, done, emit)?;
         if request.max_batches.is_some_and(|max| batches >= max) {
             return Ok(());
         }
     }
+}
+
+fn wait_and_step(
+    root: &Path,
+    store: &mut Store,
+    request: &WatchRequest,
+    registry: &Registry<'_>,
+    failed: &mut bool,
+    first: &mut bool,
+) -> Result<Option<Pass>, Stop> {
+    if !std::mem::take(first) {
+        sleep(request.interval);
+    }
+    try_watch_step(root, store, registry, request.debounce, failed)
 }
 
 fn try_watch_step(
@@ -353,16 +376,20 @@ fn refresh_git_cochange(
     head: &str,
     window: Window,
 ) -> Result<Option<CochangeSummary>, Failure> {
-    if is_cochange_fresh(store, head, &window)? {
-        return stored_cochange(store);
+    if !is_cochange_fresh(store, head, &window)? {
+        mine_and_store_cochange(store, root, &window)?;
     }
+    stored_cochange(store)
+}
+
+fn mine_and_store_cochange(store: &mut Store, root: &Path, window: &Window) -> Result<(), Failure> {
     let indexed: BTreeSet<String> = store.files()?.into_iter().map(|f| f.path).collect();
     if let Some(scan) =
-        phantom_fractal_git::mine(root, &window, &indexed).map_err(|_| git_history_failure())?
+        phantom_fractal_git::mine(root, window, &indexed).map_err(|_| git_history_failure())?
     {
         store.write_cochange(&scan)?;
     }
-    stored_cochange(store)
+    Ok(())
 }
 
 fn is_cochange_fresh(store: &Store, head: &str, window: &Window) -> Result<bool, Failure> {
@@ -573,6 +600,43 @@ mod tests {
         assert!(p_noop.report.graph.is_none() && p_noop.cochange.is_some());
         assert_eq!(p_noop.graph.modules, p1.graph.modules);
         assert_eq!(gstore.cochange_scan().unwrap().unwrap().commits_seen, 77);
+        let req_long = super::WatchRequest {
+            repo: git_tree.0.clone(),
+            interval: std::time::Duration::from_secs(30),
+            debounce: std::time::Duration::from_millis(1),
+            max_batches: Some(1),
+        };
+        let mut first = true;
+        let mut tick_failed = false;
+        let t0 = std::time::Instant::now();
+        let _ = super::wait_and_step(
+            &git_tree.0,
+            &mut gstore,
+            &req_long,
+            &registry,
+            &mut tick_failed,
+            &mut first,
+        )
+        .ok()
+        .unwrap();
+        assert!(!first);
+        assert!(t0.elapsed() < std::time::Duration::from_secs(5));
+        let req_short = super::WatchRequest {
+            interval: std::time::Duration::from_millis(25),
+            ..req_long
+        };
+        let t1 = std::time::Instant::now();
+        let _ = super::wait_and_step(
+            &git_tree.0,
+            &mut gstore,
+            &req_short,
+            &registry,
+            &mut tick_failed,
+            &mut first,
+        )
+        .ok()
+        .unwrap();
+        assert!(t1.elapsed() >= std::time::Duration::from_millis(20));
         let w2 = Window {
             days: 30,
             max_commits: 100,
@@ -613,6 +677,7 @@ mod tests {
             panic!("git pass 3 failed");
         };
         assert!(p3.cochange.is_none());
+        assert!(super::mine_and_store_cochange(&mut gstore, &git_tree.0, &w2).is_ok());
         assert_eq!(gstore.cochange_head().unwrap(), None);
         assert_eq!(
             gstore.cochange_scan().unwrap().unwrap().last_oid.as_deref(),

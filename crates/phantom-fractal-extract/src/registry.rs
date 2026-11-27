@@ -156,19 +156,42 @@ impl LanguageDriver for RustDriver<'_> {
     }
 }
 
+enum DriverEntry<'a> {
+    Borrowed(&'a dyn LanguageDriver),
+    Owned(Box<dyn LanguageDriver + 'a>),
+}
+
+impl DriverEntry<'_> {
+    fn as_driver(&self) -> &dyn LanguageDriver {
+        match self {
+            Self::Borrowed(driver) => *driver,
+            Self::Owned(driver) => driver.as_ref(),
+        }
+    }
+}
+
 /// Registry of active [`LanguageDriver`]s for one walk/index/probe/diff pass.
 pub struct Registry<'a> {
-    drivers: Vec<&'a dyn LanguageDriver>,
+    drivers: Vec<DriverEntry<'a>>,
 }
 
 impl<'a> Registry<'a> {
-    /// Creates a registry over `drivers`.
+    /// Creates a registry over borrowed `drivers`.
     pub fn new(drivers: Vec<&'a dyn LanguageDriver>) -> Self {
-        Self { drivers }
+        Self {
+            drivers: drivers.into_iter().map(DriverEntry::Borrowed).collect(),
+        }
     }
 
-    pub(crate) fn drivers(&self) -> &[&'a dyn LanguageDriver] {
-        &self.drivers
+    /// Creates a registry over owned `drivers`.
+    pub fn from_owned(drivers: Vec<Box<dyn LanguageDriver + 'a>>) -> Self {
+        Self {
+            drivers: drivers.into_iter().map(DriverEntry::Owned).collect(),
+        }
+    }
+
+    pub(crate) fn drivers(&self) -> Vec<&dyn LanguageDriver> {
+        self.drivers.iter().map(DriverEntry::as_driver).collect()
     }
 
     /// Finds the driver claiming `path`'s extension.
@@ -176,7 +199,7 @@ impl<'a> Registry<'a> {
         let ext = Path::new(path).extension().and_then(|ext| ext.to_str())?;
         self.drivers
             .iter()
-            .copied()
+            .map(DriverEntry::as_driver)
             .find(|driver| driver.language().extensions().contains(&ext))
     }
 
@@ -192,12 +215,15 @@ impl<'a> Registry<'a> {
         };
         self.drivers
             .iter()
-            .any(|driver| driver.manifest_names().contains(&name))
+            .any(|driver| driver.as_driver().manifest_names().contains(&name))
     }
 
     /// Collects static prune predicates for all registered drivers.
     pub fn prune_rules(&self) -> Vec<fn(&Path, &str, usize) -> bool> {
-        self.drivers.iter().map(|d| d.prune_rule()).collect()
+        self.drivers
+            .iter()
+            .map(|d| d.as_driver().prune_rule())
+            .collect()
     }
 
     /// True when `.git` or any registered driver prunes directory `name`.
@@ -206,19 +232,19 @@ impl<'a> Registry<'a> {
             || self
                 .drivers
                 .iter()
-                .any(|driver| (driver.prune_rule())(parent, name, depth))
+                .any(|driver| (driver.as_driver().prune_rule())(parent, name, depth))
     }
 }
 
-/// Lightweight path/prune filter used by default [`crate::probe`] and
-/// [`crate::walk`] without compiling tree-sitter queries.
+/// Constructs the single default [`Registry`] for CLI and library callers.
+pub fn default_registry() -> Result<Registry<'static>, ExtractError> {
+    Ok(Registry::from_owned(vec![Box::new(RustDriver::owned()?)]))
+}
+
+/// Lightweight Cargo manifest filter used by internal helpers.
 pub(crate) struct RustFilter;
 
 impl RustFilter {
-    pub(crate) fn is_supported(path: &str) -> bool {
-        Path::new(path).extension().is_some_and(|ext| ext == "rs")
-    }
-
     pub(crate) fn is_manifest(path: &str) -> bool {
         is_named_file(path, "Cargo.toml")
     }
@@ -352,5 +378,12 @@ mod tests {
         let (edges, counts) = RustResolver.resolve(&input);
         assert_eq!(edges.len(), 1);
         assert_eq!(counts.edges, 1);
+
+        assert!(RustFilter::is_manifest("Cargo.toml"));
+        assert!(RustFilter::is_manifest("crates/a/Cargo.toml"));
+        assert!(!RustFilter::is_manifest("crates/a/not_Cargo.toml"));
+        assert!(!RustFilter::is_manifest("README.md"));
+        assert!(is_named_file("Cargo.toml", "Cargo.toml"));
+        assert!(!is_named_file("fooCargo.toml", "Cargo.toml"));
     }
 }

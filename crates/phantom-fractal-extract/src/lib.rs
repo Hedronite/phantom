@@ -37,7 +37,7 @@ pub use rebuild::{
 };
 pub use registry::{
     LanguageDriver, ManifestFile, PackageGraph, Registry, RustDriver, RustResolver,
-    SourceFileExtract,
+    SourceFileExtract, default_registry,
 };
 pub use walk::{Candidate, MAX_FILE_BYTES, SkipReason, Skipped, Walk, is_secret, walk, walk_with};
 
@@ -236,10 +236,9 @@ pub fn resolve_query(
 pub fn index(
     root: &Path,
     store: &mut Store,
-    language: &RustLanguage,
+    _language: &RustLanguage,
 ) -> Result<IndexReport, IndexError> {
-    let rust = RustDriver::new(language);
-    let registry = Registry::new(vec![&rust]);
+    let registry = default_registry().map_err(StoreError::Extract)?;
     index_with(root, store, &registry)
 }
 
@@ -384,6 +383,14 @@ impl phantom_fractal_lang::Language for DynLang<'_> {
     ) -> Result<phantom_fractal_lang::Extract, phantom_fractal_lang::ExtractError> {
         self.0.extract(source)
     }
+
+    fn has_parse_errors(&self, source: &str) -> bool {
+        self.0.has_parse_errors(source)
+    }
+
+    fn qualifier_separator(&self) -> &'static str {
+        self.0.qualifier_separator()
+    }
 }
 
 #[cfg(test)]
@@ -399,6 +406,11 @@ mod tests {
         let dyn_lang = DynLang(&rust);
         assert_eq!(dyn_lang.name(), "rust");
         assert_eq!(dyn_lang.extensions(), &["rs"]);
+        assert_eq!(dyn_lang.qualifier_separator(), "::");
+        assert!(!dyn_lang.has_parse_errors(
+            "pub fn ok() {}
+"
+        ));
         assert_eq!(
             dyn_lang
                 .extract(
@@ -411,6 +423,34 @@ pub fn b() {}
                 .len(),
             2
         );
+
+        struct CustomLang;
+        impl Language for CustomLang {
+            fn name(&self) -> &'static str {
+                "custom"
+            }
+            fn extensions(&self) -> &'static [&'static str] {
+                &["c"]
+            }
+            fn extract(
+                &self,
+                _source: &str,
+            ) -> Result<phantom_fractal_lang::Extract, phantom_fractal_lang::ExtractError>
+            {
+                Ok(Default::default())
+            }
+            fn has_parse_errors(&self, source: &str) -> bool {
+                source.contains("ERR")
+            }
+            fn qualifier_separator(&self) -> &'static str {
+                "."
+            }
+        }
+        let custom = CustomLang;
+        let dyn_custom = DynLang(&custom);
+        assert_eq!(dyn_custom.qualifier_separator(), ".");
+        assert!(dyn_custom.has_parse_errors("ERR"));
+        assert!(!dyn_custom.has_parse_errors("ok"));
 
         let resolver = RustResolver;
         assert_eq!(resolver.name(), "rust");

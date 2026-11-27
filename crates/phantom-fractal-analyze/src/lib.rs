@@ -99,14 +99,7 @@ impl ImpactSource for Store {
     }
 
     fn value_refs_named(&self, name: &str) -> Result<i64, StoreError> {
-        let ids = self.ref_ids_of_kind("value_ref")?;
-        let input = self.resolve_input()?;
-        let count = input
-            .refs
-            .iter()
-            .filter(|r| ids.contains(&r.id) && r.text.rsplit([':', '.']).next() == Some(name))
-            .count();
-        Ok(i64::try_from(count).unwrap_or(i64::MAX))
+        Store::value_refs_named(self, name)
     }
 }
 
