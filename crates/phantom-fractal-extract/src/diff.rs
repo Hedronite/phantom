@@ -251,10 +251,9 @@ fn compare_supported_file(
         lang,
     )?;
     changed.extend(compare(&file.path, &old, &new));
-    Ok(match (&old_out, &new_out) {
-        (Some(a), Some(b)) => a != b,
-        (None, Some(b)) => !b.is_empty(),
-        _ => false,
+    Ok(match new_out {
+        Some(b) => old_out.map_or(!b.is_empty(), |a| a != b),
+        None => false,
     })
 }
 
@@ -283,7 +282,10 @@ fn spans_and_outside(
 
 fn outside_signature(lines: &[&str], ranges: &[(String, String, u32, u32)]) -> String {
     let mut covered = vec![false; lines.len()];
-    for &(_, _, start, end) in ranges {
+    for &(_, _, start, end) in ranges
+        .iter()
+        .filter(|(key, ..)| key.rsplit('#').nth(1) != Some("module"))
+    {
         let lo = (start as usize).saturating_sub(1);
         let hi = (end as usize).min(lines.len());
         for slot in covered.get_mut(lo..hi).into_iter().flatten() {

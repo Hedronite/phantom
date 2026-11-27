@@ -874,3 +874,105 @@ fn diff_impact_same_file_case_g_is_inexact_and_case_e_body_only_is_exact() {
         "{case_g_edit}"
     );
 }
+
+#[test]
+fn diff_impact_inline_mod_use_rebind_i0_and_i_are_inexact_while_body_only_is_exact() {
+    let dir = TempDir::new("diff-f6-probe");
+    let data = TempDir::new("diff-f6-data");
+    let repo = dir.path();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"f6_probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/a.rs"), "pub fn target() -> i32 { 1 }\n").unwrap();
+    fs::write(repo.join("src/c.rs"), "pub fn target() -> i32 { 10 }\n").unwrap();
+    fs::write(
+        repo.join("src/m.rs"),
+        "pub(crate) mod inner {\n    use crate::a::target;\n    pub fn caller_in() -> i32 { target() }\n    pub fn other_in() -> i32 { 2 }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/main.rs"),
+        "mod a;\nmod c;\nmod m;\nfn main() { let _ = m::inner::caller_in(); }\n",
+    )
+    .unwrap();
+
+    let run_git = |args: &[&str]| {
+        let st = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("HOME", data.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "T")
+            .env("GIT_AUTHOR_EMAIL", "t@e.com")
+            .env("GIT_COMMITTER_NAME", "T")
+            .env("GIT_COMMITTER_EMAIL", "t@e.com")
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?}");
+    };
+    run_git(&["init", "-q", "-b", "main"]);
+    run_git(&["add", "."]);
+    run_git(&["commit", "-q", "-m", "init"]);
+
+    let run_bin = |args: &[&str]| -> Value {
+        let out = Command::new(BINS[0])
+            .args(args)
+            .current_dir(repo)
+            .env("PHANTOM_FRACTAL_DATA_DIR", data.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "cmd {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+
+    run_bin(&["index", "."]);
+
+    // Pure body + whitespace edit inside inline mod (fresh index) -> exact: true.
+    fs::write(
+        repo.join("src/m.rs"),
+        "pub(crate) mod inner {\n    use crate::a::target;\n\n    pub fn caller_in() -> i32 { target() }\n    pub fn other_in() -> i32 {\n        7\n    }\n}\n",
+    )
+    .unwrap();
+    run_bin(&["index", "."]);
+    let body_only = run_bin(&["impact", "--diff"]);
+    assert_eq!(body_only["meta"]["stale"], false, "{body_only}");
+    assert_eq!(body_only["data"]["impact"]["exact"], true, "{body_only}");
+
+    // Case I0: `use` rebind only inside inline mod (fresh index) -> exact: false.
+    fs::write(
+        repo.join("src/m.rs"),
+        "pub(crate) mod inner {\n    use crate::c::target;\n    pub fn caller_in() -> i32 { target() }\n    pub fn other_in() -> i32 { 2 }\n}\n",
+    )
+    .unwrap();
+    run_bin(&["index", "."]);
+    let i0 = run_bin(&["impact", "--diff"]);
+    assert_eq!(i0["meta"]["stale"], false, "{i0}");
+    assert_eq!(i0["data"]["impact"]["exact"], false, "{i0}");
+    assert!(
+        reasons(&i0["data"]).contains(&"unindexed_changes".to_owned()),
+        "{i0}"
+    );
+
+    // Case I: `use` rebind + body edit inside inline mod (fresh index) -> exact: false.
+    fs::write(
+        repo.join("src/m.rs"),
+        "pub(crate) mod inner {\n    use crate::c::target;\n    pub fn caller_in() -> i32 { target() }\n    pub fn other_in() -> i32 { 99 }\n}\n",
+    )
+    .unwrap();
+    run_bin(&["index", "."]);
+    let i_mixed = run_bin(&["impact", "--diff"]);
+    assert_eq!(i_mixed["meta"]["stale"], false, "{i_mixed}");
+    assert_eq!(i_mixed["data"]["impact"]["exact"], false, "{i_mixed}");
+    assert!(
+        reasons(&i_mixed["data"]).contains(&"unindexed_changes".to_owned()),
+        "{i_mixed}"
+    );
+}
