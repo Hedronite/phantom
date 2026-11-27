@@ -27,9 +27,13 @@
 # may also come before the command; they are handed to it unchanged, so a
 # command that does not take one says so as a usage error.
 #
-# A name in `where`'s display shape, `file.rs:LINE Owner::name`, is read
-# as the path-qualified `file.rs::Owner::name`. No name the CLI resolves
+# A name in `where`'s display shape, `file.rs:LINE Owner::name` or
+# `file.go:LINE Owner.name`, is read as the path-qualified
+# `file.rs::Owner::name` or `file.go::Owner.name`. No name the CLI resolves
 # has that shape, so no answered query changes.
+#
+# Go names use `.`. The displays this script builds for a `.go` file name
+# the owner of a method whatever its case, so each reads back as given.
 #
 # CLI each command actually runs:
 #   where        show [--repo=R] -- NAME, then find -- NAME on not_found
@@ -47,6 +51,12 @@
 #   index        index -- PATH
 # `index` writes Phantom's own data directory, never the repository. It may
 # run at any time; no read command sends it.
+
+# `where`'s display shape, per language.
+const DISPLAY_SHAPES = [
+  '\A(?<file>[\w./-]+\.rs):[0-9]+ (?<qual>[\w:]+)\z'
+  '\A(?<file>[\w./-]+\.go):[0-9]+ (?<qual>[\w.:]+)\z'
+]
 
 const COUNT_NOTE = "raw counts: for every tracked file, the non-merge commits it shares with FILE in the scanned window, no decay and no lift floor; commits over scope.bulk_skip files are skipped and counted in scan.skipped_bulk; history, not dependency"
 const RUST_NOTE = "--rust: indexed Rust files only, decay-weighted (90 days) and lift-filtered; together_decayed is a weight, not a commit count; for raw counts over every tracked file, drop --rust"
@@ -80,12 +90,12 @@ const HELP = {
     { usage: "index [PATH]", answers: "builds or refreshes the index; Phantom's data directory only" }
   ]
   flags: "--repo R, --limit N and --depth N go before or after the command; a word after -- is never a flag"
-  names: "NAME: a bare name, Type::method, module::name, <crate>::item, path:line of a definition (fresh index only), or a display from any reply; on kind ambiguous, rerun with one of matches[].display"
+  names: "NAME: a bare name, Type::method, module::name, <crate>::item, path:line of a definition (fresh index only), or a display from any reply; Go: pkg.Func, Type.Method, import/path.Func, file.go::Type.Method; on kind ambiguous, rerun with one of matches[].display"
   limit: "--limit 1 to 100; above 100 is cut to 100, and meta.limit {asked, used} and data.truncated say so. Keep --limit and --budget small: a harness may cut long output"
   calls: "one phantomq command per shell call, never chained with ; or &&: a harness may cut combined output near 10 KB"
   miss: "on kind not_found nothing is guessed: did_you_mean lists symbols, and retry is the command for the first"
   trust: "where, show, cochange: answer from the reply; path too when found is true and confidence >= 0.5. When found is false or confidence is lower, confirm with one grep. callers, callees, impact, diff-impact follow resolved calls: confirm with one grep of the bare name, search further only on confirm_with_grep"
-  index: "run index when there is none or status says stale; it writes only to Phantom's own data directory, never the repo"
+  index: "run index when there is none or status says stale; it writes only to Phantom's own data directory, never the repo. It cannot clear meta.stale_cause (the local checkout differs): sync or push it, or confirm with one grep"
   envelope: "one JSON line: ok, command, data, meta, exit; or ok false, command, error, kind, stderr, exit"
   read: "SKILL.md beside this script says when to trust each answer"
 }
@@ -360,9 +370,17 @@ def is-upper [s: string] {
   }
 }
 
+def is-go [file: string] { $file | str ends-with ".go" }
+
 # `crate::tui::app::App::watch_dir` -> `App::watch_dir`; a free function
 # keeps its own name. The owner is kept when it looks like a type.
-def short-name [qual: string] {
+# For a `.go` file, `import/path.Type.Method` -> `Type.Method`: an import
+# path may hold dots, so the name is cut from the right, by `kind`.
+def short-name [file: string, qual: string, kind: any] {
+  if (is-go $file) {
+    let keep = if $kind == "method" { 2 } else { 1 }
+    return ($qual | str replace --all "::" "." | split row "." | last $keep | str join ".")
+  }
   let segs = ($qual | split row "::" | where {|s| $s != "" and $s != "crate" })
   let n = ($segs | length)
   if $n == 0 {
@@ -375,21 +393,32 @@ def short-name [qual: string] {
 }
 
 # `file::Owner::name`, the shape callers and callees answer in.
-def at-file [file: string, qual: string] {
-  $"($file)::(short-name $qual)"
+def at-file [file: string, qual: string, kind: any] {
+  $"($file)::(short-name $file $qual $kind)"
 }
 
 # `file:line Owner::name`, the shape where answers in.
-def at-line [path: string, line: any, qual: string] {
+def at-line [path: string, line: any, qual: string, kind: any] {
   let l = if $line == null { "" } else { $":($line)" }
-  $"($path)($l) (short-name $qual)"
+  $"($path)($l) (short-name $path $qual $kind)"
+}
+
+# `file::name` for a reply that names a symbol by its bare name. In a
+# `.go` file the stored key, `file#Owner::name#kind#n`, supplies the owner.
+def at-key [file: string, name: string, key: any] {
+  if (is-go $file) and $key != null {
+    let qual = ($key | str replace $"($file)#" "" | split row "#" | first)
+    $"($file)::($qual | str replace --all '::' '.')"
+  } else {
+    $"($file)::($name)"
+  }
 }
 
 def symbol-row [s: any] {
   if $s == null { null } else {
     let qual = ($s.qual_name? | default ($s.name? | default ""))
     {
-      display: ($s.display? | default (at-file ($s.path? | default "") $qual))
+      display: ($s.display? | default (at-file ($s.path? | default "") $qual ($s.kind? | default null)))
       name: $qual
       kind: ($s.kind? | default null)
       path: ($s.path? | default null)
@@ -404,7 +433,7 @@ def group-calls [hits: list, key: string] {
   let rows = ($hits | each {|h|
     let file = ($h.symbol_path? | default ($h.path? | default ""))
     {
-      display: ($h.display? | default (at-file $file ($h.name? | default "")))
+      display: ($h.display? | default (at-file $file ($h.name? | default "") ($h.kind? | default null)))
       name: ($h.name? | default "")
       file: $file
       site: ($h.line? | default null)
@@ -461,7 +490,7 @@ def copy-keys [data: record, keys: list<string>] {
 }
 
 def reached [h: record] {
-  $h.display? | default (at-file ($h.path? | default "") ($h.name? | default ""))
+  $h.display? | default (at-file ($h.path? | default "") ($h.name? | default "") ($h.kind? | default null))
 }
 
 # impact and diff-impact: callers by depth, tests apart, the files reached.
@@ -507,7 +536,7 @@ def partner-row [p: record] {
 
 def node [n: any] {
   if $n == null { null } else {
-    $"($n.path? | default '')::($n.name? | default '')"
+    at-key ($n.path? | default '') ($n.name? | default '') ($n.key? | default null)
   }
 }
 
@@ -516,9 +545,10 @@ def node [n: any] {
 def repo-arg [p: record] { pass $p "--repo" }
 
 # `file.rs:LINE Owner::name`, the display `where` answers in, as the
-# path-qualified `file.rs::Owner::name`; any other name as it is.
+# path-qualified `file.rs::Owner::name`, and so for `.go`; any other name
+# as it is.
 def symbol-name [name: string] {
-  let m = ($name | parse --regex '\A(?<file>[\w./-]+\.rs):[0-9]+ (?<qual>[\w:]+)\z')
+  let m = ($DISPLAY_SHAPES | each {|shape| $name | parse --regex $shape } | flatten)
   if ($m | is-empty) { $name } else { $"(($m | first).file)::(($m | first).qual)" }
 }
 
@@ -529,7 +559,7 @@ def one-name [command: string, line: string, p: record] {
 def where-hit [s: record] {
   let qual = ($s.qual_name? | default ($s.name? | default ""))
   {
-    display: (at-line ($s.path? | default "") ($s.line? | default null) $qual)
+    display: (at-line ($s.path? | default "") ($s.line? | default null) $qual ($s.kind? | default null))
     name: $qual
     kind: ($s.kind? | default null)
     path: ($s.path? | default null)
@@ -628,7 +658,7 @@ def --wrapped "main diff-impact" [...args: string] {
   let head = {
     base: ($d.base? | default null)
     changed: ($d.changed? | default [] | each {|c|
-      { display: (at-file ($c.path? | default "") ($c.name? | default "")), change: ($c.change? | default null), in_index: ($c.in_index? | default null) }
+      { display: (at-key ($c.path? | default "") ($c.name? | default "") ($c.key? | default null)), change: ($c.change? | default null), in_index: ($c.in_index? | default null) }
     })
     files_only: ($d.files_only? | default [])
     manifest_changed: ($d.manifest_changed? | default null)
@@ -721,7 +751,7 @@ def --wrapped "main rank" [...args: string] {
       { path: ($h.path? | default null), score: ($h.score? | default null) }
     } else {
       {
-        display: (at-file ($h.path? | default "") ($h.qual_name? | default ($h.name? | default "")))
+        display: (at-file ($h.path? | default "") ($h.qual_name? | default ($h.name? | default "")) ($h.kind? | default null))
         kind: ($h.kind? | default null)
         line: ($h.line? | default null)
         score: ($h.score? | default null)

@@ -47,6 +47,10 @@ const POINTER_VERBS: &[&str] = &[
 /// limit cap, what a miss carries, and the trust rule.
 const SHARED: &[&str] = &[
     "Type::method",
+    "pkg.Func",
+    "Type.Method",
+    "import/path.Func",
+    "meta.stale_cause",
     "module::name",
     "<crate>::item",
     "path:line",
@@ -601,8 +605,8 @@ fn nu() -> Option<PathBuf> {
     found
 }
 
-/// `fixtures/resolve-dogfood`, indexed, in a directory whose name holds a
-/// space and a quote, and the skill run on it.
+/// A fixture, by default `fixtures/resolve-dogfood`, indexed, in a directory
+/// whose name holds a space and a quote, and the skill run on it.
 struct Skill {
     nu: PathBuf,
     tmp: TempDir,
@@ -611,10 +615,14 @@ struct Skill {
 
 impl Skill {
     fn new(nu: PathBuf) -> Self {
+        Self::on(nu, "resolve-dogfood")
+    }
+
+    fn on(nu: PathBuf, fixture: &str) -> Self {
         let tmp = TempDir::new("skill-w16");
         let repo = tmp.path().join("it's a repo");
         fs::create_dir_all(&repo).expect("repo dir");
-        copy_fixture("resolve-dogfood", &repo);
+        copy_fixture(fixture, &repo);
         let skill = Self { nu, tmp, repo };
         skill.index();
         skill
@@ -670,6 +678,62 @@ impl Skill {
             .env("SCRIPT", canon().join("phantom/phantom.nu"));
         self.envelope(&mut shell)
     }
+}
+
+/// A Go `retry` pasted back is answered, and a miss with nothing to
+/// suggest carries none.
+#[cfg(unix)]
+#[test]
+fn a_go_retry_pasted_back_names_the_symbol() {
+    let Some(nu) = nu() else { return };
+    let skill = Skill::on(nu, "go-basic");
+
+    let miss = skill.run(&["callers", "nope.Boot"]);
+    assert_eq!(miss["kind"], "not_found", "{miss}");
+    let retry = miss["retry"].as_str().expect("retry");
+    assert_eq!(retry, "phantomq callers -- lib/lib.go::Svc.Boot");
+    let answered = skill.paste(retry);
+    assert_eq!(answered["ok"], true, "{answered}");
+    assert_eq!(
+        answered["data"]["symbol"]["name"], "example.com/gobasic/lib.Svc.Boot",
+        "{answered}"
+    );
+
+    for name in [
+        "nope.Absent",
+        "example.com/gobasic/lib.Absent",
+        "lib/lib.go::Svc.Absent",
+    ] {
+        let miss = skill.run(&["callers", name]);
+        assert_eq!(miss["kind"], "not_found", "{miss}");
+        assert!(miss.get("retry").is_none(), "{miss}");
+    }
+}
+
+/// SPEC-w17 G3c: every copy says `index` cannot clear `meta.stale_cause`.
+#[test]
+fn every_copy_says_how_to_answer_a_stale_cause() {
+    for tree in std::iter::once(&".agents/skills").chain(COPIES) {
+        let read = |file: &str| {
+            let path = root().join(tree).join("phantom").join(file);
+            fs::read_to_string(&path).unwrap_or_else(|err| panic!("{}: {err}", path.display()))
+        };
+        let (skill, body) = (flat(&read("SKILL.md")), read("phantom.nu"));
+        for rule in [
+            "With `meta.stale_cause` set (`local_dirty`, `local_head`)",
+            "`index` cannot clear it: sync or push, or confirm with one grep.",
+        ] {
+            assert!(skill.contains(rule), "{tree} SKILL.md lacks {rule:?}");
+        }
+        let help = "It cannot clear meta.stale_cause (the local checkout differs): \
+                    sync or push it, or confirm with one grep";
+        assert!(body.contains(help), "{tree} phantom.nu lacks the rule");
+    }
+    assert!(
+        pointer().contains("It cannot clear `meta.stale_cause`: sync or push, or grep."),
+        "{}",
+        pointer()
+    );
 }
 
 #[test]

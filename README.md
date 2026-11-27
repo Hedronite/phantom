@@ -89,7 +89,15 @@ SYMBOL is one of:
 - any of these under a workspace crate's own name in place of `crate`, with `-` or `_`, such as `my_crate::util::helper`;
 - `path:line`, the file and line a definition starts at, such as `src/util.rs:5`. It is answered only while the index is fresh: on a stale one it is usage, exit 1, `store: index is stale; run index before resolving path:line`. Two definitions that start on one line are `ambiguous`.
 
-Output names a symbol by its qualified name from `crate`, such as `crate::tests::check`. In a workspace, `crate` is the symbol's own target, and `path` or `symbol_path` says which package it is in. A symbol in an orphan file has no module, so its name starts at its own name or `impl` type.
+In a Go tree, names are spelled with `.`:
+
+- a bare name, `Type.Method`, or a function under its package's short name, such as `pkg.Func` or `pkg.Type.Method`. A short name two packages share is `ambiguous`;
+- the full import path, such as `example.com/mod/internal/core.Leaf` or `example.com/mod/lib.Svc.Boot`. It is matched against the longest stored import path, so dots inside the path are safe;
+- by file, `dir/f.go::Func` or `dir/f.go::Type.Method`, and `path:line` as above.
+
+Replies spell Go names the same way: `import/path.Type.Method`, and `dir/f.go::Type.Method` as `display`.
+
+Output names a Rust symbol by its qualified name from `crate`, such as `crate::tests::check`. In a workspace, `crate` is the symbol's own target, and `path` or `symbol_path` says which package it is in. A symbol in an orphan file has no module, so its name starts at its own name or `impl` type.
 
 - No symbol matches: `not_found`, exit 3. `data.did_you_mean` lists up to 10 symbols whose bare name is the query's last segment (for `path:line`, the file's symbols, nearest the line first), each in the shape of an `ambiguous` candidate without its `display`, or none: `{"did_you_mean":[]}`. When it lists any, `data.retry` is the command line that asks about the first, such as `phantom-fractal callers -- src/util/deep.rs::sink`, quoted for a POSIX shell. It holds the command and its names only, so add `--repo` and any other flag you gave. Phantom never answers for a suggestion itself.
 - More than one matches: `ambiguous`, exit 6. The message lists up to 10 candidates with their paths and lines, `data.candidates` holds the same ones, and `data.total` counts them all. Each candidate ends with `display`, its file-qualified name such as `src/inner.rs::Pair::new`. Qualify the name further to pick one.
@@ -677,8 +685,8 @@ Each index is a directory under the data directory's `repos/`, named `<name>-<ha
 1. `data_dir`: `repos/` and each index directory are private (no group or other bits, and not a link), the data directory is not writable by group or others, and every one of them, and every database file, is owned by the data directory's owner. No data directory yet is fine.
 2. `databases`: each `graph.db`, and its WAL and shared memory when present, is `0600`. Its schema, read from the SQLite header without opening the database, is not newer than this binary's. An older schema is noted. The detail names `index`, but any command that opens the index migrates it, a read included, once: after that it is at this binary's schema.
 3. `locks`: whether a writer holds each index. A held lock is not a fault.
-4. `extractor`: the extractor version this binary writes, 13.
-5. `grammar`: the tree-sitter-rust version the binary was built with.
+4. `extractor`: the extractor version this binary writes, 15.
+5. `grammar`: the tree-sitter-rust and tree-sitter-go versions the binary was built with.
 6. `network`: `none: Phantom has no network code`.
 7. `git`: for each index, whether HEAD reads at its stored tree, or why it was not checked. Only a HEAD that cannot be read is a fault.
 
@@ -852,14 +860,14 @@ Then `phantomq callers app::watch_dir` is the whole call. A harness's allow list
 
 ```markdown
 ## Phantom
-This tree has a Phantom index. For code structure, run these before grep; nothing else needs reading first. (No `phantomq` shim: put `nu .agents/skills/phantom/phantom.nu` in its place.)
+This tree has a Phantom index. For code structure, run these before grep; nothing else needs reading first. (No `phantomq` shim: use `nu .agents/skills/phantom/phantom.nu` instead.)
 - Symbols: `phantomq where NAME`, `phantomq show NAME`, `phantomq callers NAME`, `phantomq callees NAME`, `phantomq impact NAME`, `phantomq path FROM TO`
 - Tree: `phantomq map --budget 1500`, `phantomq cochange FILE`, `phantomq diff-impact`, `phantomq status`, `phantomq index`
-- NAME: a bare name, `Type::method`, `module::name`, `<crate>::item`, a reply's `display`, or `path:line` of a definition (fresh index only).
-- One `phantomq` command per shell call, never chained with `;` or `&&`: harnesses cut combined output near 10 KB. Use `--limit 20` on callers, callees, impact and cochange. Above 100, `--limit` is cut to 100 and `meta.limit` says so.
-- A miss is never guessed at: on `not_found` pick from `did_you_mean`, or run `retry` if its symbol is the one you meant. On `ambiguous` rerun with a `matches[].display`.
-- Trust: answer `where`, `show`, `cochange`, and `path` with `found` true and `confidence` >= 0.5, from the reply, with no grep or file read. Confirm any other `path` with one grep. `callers`, `callees`, `impact` and `diff-impact` follow resolved calls only: confirm with one grep of the bare name, and search further only on `confirm_with_grep: true`.
-- No index, or `meta.stale: true`: run `phantomq index`. It writes only to Phantom's own data directory, never the repo.
+- NAME: bare, `Type::method`, `module::name`, `<crate>::item`, Go `pkg.Func`, `Type.Method`, `import/path.Func`, a reply's `display`, or a definition's `path:line` (fresh index only).
+- One `phantomq` command per shell call, never chained with `;` or `&&` (output is cut near 10 KB). Use `--limit 20` on callers, callees, impact, cochange; above 100 it is cut to 100 (`meta.limit`).
+- On `not_found` pick from `did_you_mean`, or run `retry` if that is your symbol. On `ambiguous` rerun with a `matches[].display`.
+- Trust: answer `where`, `show`, `cochange`, and `path` with `found` true and `confidence` >= 0.5, from the reply, no grep or read. Confirm any other `path` with one grep. `callers`, `callees`, `impact`, `diff-impact` follow resolved calls only: confirm with one grep of the bare name; search further only on `confirm_with_grep: true`.
+- No index, or `meta.stale: true`: run `phantomq index` (writes only to Phantom's own data directory, never the repo). It cannot clear `meta.stale_cause`: sync or push, or grep.
 ```
 
 ### Over MCP

@@ -116,12 +116,14 @@ fn visibility_text(stored: &str) -> String {
     }
 }
 
-/// The store's rows named exactly `request.query` whose `.rs` file the
-/// walk of `request.repo` still keeps, as `find` has always read only
-/// those files.
+/// The store's rows named exactly `request.query` whose file the walk of
+/// `request.repo` still keeps, by the same rules `index` walks with: a Go
+/// tree's `vendor/`, `.` and `_` directories are left out.
 fn kept_rows(request: &FindRequest, store: &Store) -> Result<Vec<FindRow>, Failure> {
     let root = canonical_repo(&request.repo)?;
-    let walk = phantom_fractal_extract::walk(&root)
+    let registry = phantom_fractal_extract::default_registry()
+        .map_err(|err| Failure::new(ErrorKind::Usage, format!("extract: {err}")))?;
+    let walk = phantom_fractal_extract::walk_with(&root, &registry)
         .map_err(|err| Failure::new(ErrorKind::Usage, format!("walk failed: {err}")))?;
     let kept: BTreeSet<&str> = walk.files.iter().map(|file| file.path.as_str()).collect();
     Ok(store
@@ -143,7 +145,7 @@ pub(crate) fn find(request: &FindRequest) -> Result<Reply<FindResult>, Failure> 
 
 /// The matches before any budget. The store's bound FTS match answers an
 /// absent name without a walk. Otherwise the store's rows so named are
-/// kept when the walk still keeps their `.rs` file.
+/// kept when the walk still keeps their file.
 fn matches(request: &FindRequest, store: &Store) -> Result<FindResult, Failure> {
     let query = request.query.as_str();
     if query.is_empty() || store.match_count(query)? == 0 {
