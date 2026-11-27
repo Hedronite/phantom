@@ -71,10 +71,20 @@ pub struct Module {
     pub parent: Option<Id>,
     /// The module path from the crate root, such as `crate::a::b`.
     pub path: String,
-    /// The file that holds the module's body.
+    /// The file that holds the module's body, or empty for multi-file packages.
     pub file: String,
     /// The inline-module path within `file`: empty for a file module.
     pub scope: String,
+}
+
+/// Explicit file-to-module membership for multi-file packages whose
+/// `modules.file_id` is `NULL` (SPEC-w17 G2a).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileModule {
+    /// Repo-relative file path.
+    pub file: String,
+    /// The [`Module::id`] this file belongs to.
+    pub module: Id,
 }
 
 /// A declared item or method.
@@ -108,17 +118,61 @@ pub enum SymbolKind {
     Trait,
     Module,
     Method,
+    Interface,
+    TypeAlias,
+    Const,
+    Var,
+}
+
+impl SymbolKind {
+    const TEXTS: &[(Self, &str)] = &[
+        (Self::Function, "function"),
+        (Self::Struct, "struct"),
+        (Self::Enum, "enum"),
+        (Self::Trait, "trait"),
+        (Self::Module, "module"),
+        (Self::Method, "method"),
+        (Self::Interface, "interface"),
+        (Self::TypeAlias, "type_alias"),
+        (Self::Const, "const"),
+        (Self::Var, "var"),
+    ];
+
+    /// Stable lowercase text stored in `symbols.kind`.
+    pub fn as_str(self) -> &'static str {
+        Self::TEXTS
+            .iter()
+            .find(|(kind, _)| *kind == self)
+            .expect("all SymbolKind variants covered")
+            .1
+    }
+
+    /// Parses a stored `symbols.kind` text.
+    pub fn from_store_str(text: &str) -> Option<Self> {
+        Self::TEXTS
+            .iter()
+            .find(|(_, name)| *name == text)
+            .map(|(kind, _)| *kind)
+    }
 }
 
 impl From<ItemKind> for SymbolKind {
     fn from(kind: ItemKind) -> Self {
-        match kind {
-            ItemKind::Function => Self::Function,
-            ItemKind::Struct => Self::Struct,
-            ItemKind::Enum => Self::Enum,
-            ItemKind::Trait => Self::Trait,
-            ItemKind::Module => Self::Module,
-        }
+        const MAP: &[(ItemKind, SymbolKind)] = &[
+            (ItemKind::Function, SymbolKind::Function),
+            (ItemKind::Struct, SymbolKind::Struct),
+            (ItemKind::Enum, SymbolKind::Enum),
+            (ItemKind::Trait, SymbolKind::Trait),
+            (ItemKind::Module, SymbolKind::Module),
+            (ItemKind::Interface, SymbolKind::Interface),
+            (ItemKind::TypeAlias, SymbolKind::TypeAlias),
+            (ItemKind::Const, SymbolKind::Const),
+            (ItemKind::Var, SymbolKind::Var),
+        ];
+        MAP.iter()
+            .find(|(item, _)| *item == kind)
+            .expect("all ItemKind variants mapped")
+            .1
     }
 }
 
@@ -205,23 +259,46 @@ pub enum Reason {
     /// supplies, with exactly one item of that name across the globbed
     /// modules (SPEC-w13 G2a).
     UseGlob,
+    /// A call qualified by an imported Go package or alias.
+    PackageImport,
+    /// A Go method call promoted through an embedded struct field.
+    EmbeddedMethod,
+    /// A Go call through an interface method specification.
+    InterfaceMethod,
 }
 
 impl Reason {
+    const TEXTS: &[(Self, &str)] = &[
+        (Self::PathExact, "path-exact"),
+        (Self::Local, "local"),
+        (Self::UseAlias, "use-alias"),
+        (Self::Assoc, "assoc"),
+        (Self::SelfMethod, "self-method"),
+        (Self::SelfAssoc, "self-assoc"),
+        (Self::CratePath, "crate-path"),
+        (Self::TypedMethod, "typed-method"),
+        (Self::UniqueMethod, "unique-method"),
+        (Self::UseGlob, "use-glob"),
+        (Self::PackageImport, "package-import"),
+        (Self::EmbeddedMethod, "embedded-method"),
+        (Self::InterfaceMethod, "interface-method"),
+    ];
+
     /// The store's `edges.reason` text.
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::PathExact => "path-exact",
-            Self::Local => "local",
-            Self::UseAlias => "use-alias",
-            Self::Assoc => "assoc",
-            Self::SelfMethod => "self-method",
-            Self::SelfAssoc => "self-assoc",
-            Self::CratePath => "crate-path",
-            Self::TypedMethod => "typed-method",
-            Self::UniqueMethod => "unique-method",
-            Self::UseGlob => "use-glob",
-        }
+        Self::TEXTS
+            .iter()
+            .find(|(reason, _)| *reason == self)
+            .expect("all Reason variants covered")
+            .1
+    }
+
+    /// Parses a stored `edges.reason` text.
+    pub fn from_store_str(text: &str) -> Option<Self> {
+        Self::TEXTS
+            .iter()
+            .find(|(_, name)| *name == text)
+            .map(|(reason, _)| *reason)
     }
 }
 
@@ -277,6 +354,8 @@ pub enum LinkKind {
     Import,
     /// A struct or enum to the one workspace trait it implements.
     Impl,
+    /// A Go struct or interface embedding another type/interface.
+    Embeds,
 }
 
 impl LinkKind {
@@ -285,6 +364,7 @@ impl LinkKind {
         match self {
             Self::Import => "import",
             Self::Impl => "impl",
+            Self::Embeds => "embeds",
         }
     }
 }
@@ -324,18 +404,30 @@ pub enum LinkReason {
     CratePath,
     /// An `impl Trait for Type`, whose trait path resolved by any tier.
     ImplTrait,
+    /// A Go struct implementing an interface by method set.
+    StructuralImpl,
+    /// A Go struct or interface embedding another type.
+    EmbeddedType,
 }
 
 impl LinkReason {
+    const TEXTS: &[(Self, &str)] = &[
+        (Self::PathExact, "path-exact"),
+        (Self::Local, "local"),
+        (Self::UseAlias, "use-alias"),
+        (Self::CratePath, "crate-path"),
+        (Self::ImplTrait, "impl-trait"),
+        (Self::StructuralImpl, "structural-impl"),
+        (Self::EmbeddedType, "embedded-type"),
+    ];
+
     /// The store's `edges.reason` text, the same text a call edge of the
     /// same tier carries.
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::PathExact => "path-exact",
-            Self::Local => "local",
-            Self::UseAlias => "use-alias",
-            Self::CratePath => "crate-path",
-            Self::ImplTrait => "impl-trait",
-        }
+        Self::TEXTS
+            .iter()
+            .find(|(reason, _)| *reason == self)
+            .expect("all LinkReason variants covered")
+            .1
     }
 }

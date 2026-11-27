@@ -400,15 +400,8 @@ impl Reexport {
 }
 
 /// The stored text of a symbol kind.
-pub(crate) const fn kind_text(kind: SymbolKind) -> &'static str {
-    match kind {
-        SymbolKind::Function => "function",
-        SymbolKind::Struct => "struct",
-        SymbolKind::Enum => "enum",
-        SymbolKind::Trait => "trait",
-        SymbolKind::Module => "module",
-        SymbolKind::Method => "method",
-    }
+pub(crate) fn kind_text(kind: SymbolKind) -> &'static str {
+    kind.as_str()
 }
 
 #[cfg(test)]

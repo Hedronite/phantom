@@ -416,3 +416,250 @@ fn map_rows_skip_tests_and_modules() {
     assert!(paths >= 1);
     drop(store);
 }
+
+#[test]
+fn go_entry_points_and_rust_main_rules() {
+    use super::graph::{GoFixtureLang, go_item};
+    use phantom_fractal_lang::{Extract, FileModule, ItemKind, Module, Target, TargetKind};
+
+    let db = TempDb::new("goentries");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+
+    let go_main = "// cmd/app/main.go";
+    let go_extra = "// cmd/app/extra.go";
+    let go_helper = "// cmd/app/helper.go";
+    let go_pkg_main = "// pkg/fake_main.go";
+    let go_main_lib = "// pkgmain/entry.go";
+    let go_test = "// pkg/foo_test.go";
+    let go = GoFixtureLang::new(vec![
+        (
+            go_main,
+            Extract {
+                items: vec![
+                    go_item(ItemKind::Function, "init", 1),
+                    go_item(ItemKind::Var, "init", 2),
+                ],
+                item_scopes: vec![String::new(), String::new()],
+                item_owners: vec![None, None],
+                ..Extract::default()
+            },
+        ),
+        (
+            go_extra,
+            Extract {
+                items: vec![go_item(ItemKind::Function, "main", 1)],
+                item_scopes: vec![String::new()],
+                item_owners: vec![None],
+                ..Extract::default()
+            },
+        ),
+        (
+            go_helper,
+            Extract {
+                items: vec![go_item(ItemKind::Function, "helper", 1)],
+                item_scopes: vec![String::new()],
+                item_owners: vec![None],
+                ..Extract::default()
+            },
+        ),
+        (
+            go_pkg_main,
+            Extract {
+                items: vec![go_item(ItemKind::Function, "main", 1)],
+                item_scopes: vec![String::new()],
+                item_owners: vec![None],
+                ..Extract::default()
+            },
+        ),
+        (
+            go_main_lib,
+            Extract {
+                items: vec![go_item(ItemKind::Function, "main", 1)],
+                item_scopes: vec![String::new()],
+                item_owners: vec![None],
+                ..Extract::default()
+            },
+        ),
+        (
+            go_test,
+            Extract {
+                items: vec![
+                    go_item(ItemKind::Function, "TestLogin", 1),
+                    go_item(ItemKind::Function, "BenchmarkParse", 2),
+                    go_item(ItemKind::Function, "FuzzInput", 3),
+                    go_item(ItemKind::Function, "ExampleBasic", 4),
+                    go_item(ItemKind::Const, "TestConst", 5),
+                ],
+                item_scopes: vec![String::new(); 5],
+                item_owners: vec![None; 5],
+                ..Extract::default()
+            },
+        ),
+    ]);
+    store
+        .put_source("cmd/app/main.go", go_main, 0, &go)
+        .unwrap();
+    store
+        .put_source("cmd/app/extra.go", go_extra, 0, &go)
+        .unwrap();
+    store
+        .put_source("cmd/app/helper.go", go_helper, 0, &go)
+        .unwrap();
+    store
+        .put_source("pkg/fake_main.go", go_pkg_main, 0, &go)
+        .unwrap();
+    store
+        .put_source("pkgmain/entry.go", go_main_lib, 0, &go)
+        .unwrap();
+    store
+        .put_source("pkg/foo_test.go", go_test, 0, &go)
+        .unwrap();
+
+    let rust = language();
+    store
+        .put_source("src/main.rs", "fn main() {}\\n", 0, &rust)
+        .unwrap();
+    store
+        .put_source("src/other.rs", "fn main() {}\\n", 0, &rust)
+        .unwrap();
+
+    store
+        .write_crate_graph_with_files(
+            &[
+                crate::Package {
+                    name: "example.com/go".to_owned(),
+                    version: None,
+                    manifest_path: "go.mod".to_owned(),
+                },
+                crate::Package {
+                    name: "rust_bin".to_owned(),
+                    version: None,
+                    manifest_path: "Cargo.toml".to_owned(),
+                },
+            ],
+            &[
+                Target {
+                    id: 1,
+                    package: "example.com/go".to_owned(),
+                    name: "app".to_owned(),
+                    kind: TargetKind::Bin,
+                    root: String::new(),
+                },
+                Target {
+                    id: 2,
+                    package: "example.com/go".to_owned(),
+                    name: "pkg".to_owned(),
+                    kind: TargetKind::Lib,
+                    root: String::new(),
+                },
+                Target {
+                    id: 4,
+                    package: "example.com/go".to_owned(),
+                    name: "main".to_owned(),
+                    kind: TargetKind::Lib,
+                    root: String::new(),
+                },
+                Target {
+                    id: 3,
+                    package: "rust_bin".to_owned(),
+                    name: "rust_bin".to_owned(),
+                    kind: TargetKind::Bin,
+                    root: "src/main.rs".to_owned(),
+                },
+            ],
+            &[
+                Module {
+                    id: 10,
+                    target: 1,
+                    parent: None,
+                    path: "example.com/go/cmd/app".to_owned(),
+                    file: String::new(),
+                    scope: String::new(),
+                },
+                Module {
+                    id: 11,
+                    target: 2,
+                    parent: None,
+                    path: "example.com/go/pkg".to_owned(),
+                    file: String::new(),
+                    scope: String::new(),
+                },
+                Module {
+                    id: 14,
+                    target: 4,
+                    parent: None,
+                    path: "example.com/go/pkgmain".to_owned(),
+                    file: String::new(),
+                    scope: String::new(),
+                },
+                Module {
+                    id: 12,
+                    target: 3,
+                    parent: None,
+                    path: "crate".to_owned(),
+                    file: "src/main.rs".to_owned(),
+                    scope: String::new(),
+                },
+                Module {
+                    id: 13,
+                    target: 3,
+                    parent: None,
+                    path: "crate::other".to_owned(),
+                    file: "src/other.rs".to_owned(),
+                    scope: String::new(),
+                },
+            ],
+            &[
+                FileModule {
+                    file: "cmd/app/main.go".to_owned(),
+                    module: 10,
+                },
+                FileModule {
+                    file: "cmd/app/extra.go".to_owned(),
+                    module: 10,
+                },
+                FileModule {
+                    file: "cmd/app/helper.go".to_owned(),
+                    module: 10,
+                },
+                FileModule {
+                    file: "pkg/fake_main.go".to_owned(),
+                    module: 11,
+                },
+                FileModule {
+                    file: "pkgmain/entry.go".to_owned(),
+                    module: 14,
+                },
+                FileModule {
+                    file: "pkg/foo_test.go".to_owned(),
+                    module: 11,
+                },
+            ],
+            &[],
+        )
+        .expect("graph");
+
+    let rows = store.rank_input().expect("rank symbols");
+    let flag = |path: &str, kind: &str| -> bool {
+        rows.iter()
+            .find(|r| r.path == path && r.kind == kind)
+            .unwrap_or_else(|| panic!("missing {path} {kind}"))
+            .is_main
+    };
+    assert!(flag("cmd/app/main.go", "function"));
+    assert!(!flag("cmd/app/main.go", "var"));
+    assert!(flag("cmd/app/extra.go", "function"));
+    assert!(!flag("cmd/app/helper.go", "function"));
+    assert!(!flag("pkg/fake_main.go", "function"));
+    assert!(flag("pkgmain/entry.go", "function"));
+    assert!(!flag("pkg/foo_test.go", "const"));
+    assert_eq!(
+        rows.iter()
+            .filter(|r| r.path == "pkg/foo_test.go" && r.is_main)
+            .count(),
+        4
+    );
+    assert!(flag("src/main.rs", "function"));
+    assert!(!flag("src/other.rs", "function"));
+}

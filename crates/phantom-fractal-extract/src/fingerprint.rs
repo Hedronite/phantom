@@ -5,6 +5,7 @@
 
 use crate::IndexError;
 use crate::read::{Source, read_source};
+use crate::registry::{Registry, RustFilter};
 use crate::walk::{Candidate, Walk};
 
 /// Why the bounded read gave no text for a file.
@@ -53,9 +54,24 @@ pub(crate) struct ManifestRead {
 
 /// Every walked `Cargo.toml` through the bounded read, in walk order.
 pub(crate) fn read_manifests(walk: &Walk) -> Result<Vec<ManifestRead>, IndexError> {
+    read_manifests_matching(walk, RustFilter::is_manifest)
+}
+
+/// Every walked manifest file registered in `registry`, in walk order.
+pub(crate) fn read_manifests_with(
+    walk: &Walk,
+    registry: &Registry<'_>,
+) -> Result<Vec<ManifestRead>, IndexError> {
+    read_manifests_matching(walk, |path| registry.is_manifest(path))
+}
+
+fn read_manifests_matching<F>(walk: &Walk, matches: F) -> Result<Vec<ManifestRead>, IndexError>
+where
+    F: Fn(&str) -> bool,
+{
     walk.files
         .iter()
-        .filter(|file| file.path == "Cargo.toml" || file.path.ends_with("/Cargo.toml"))
+        .filter(|file| matches(&file.path))
         .map(|file| {
             Ok(ManifestRead {
                 path: file.path.clone(),
@@ -69,8 +85,8 @@ pub(crate) fn read_manifests(walk: &Walk) -> Result<Vec<ManifestRead>, IndexErro
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Stamp {
     pub fingerprint: [u8; 32],
-    /// The number of `.rs` records.
-    pub rs_skipped: u64,
+    /// The number of skipped source records (`source_skipped`, stored under `rs_skipped`).
+    pub source_skipped: u64,
 }
 
 /// The blake3 of the records, in this order:
@@ -94,7 +110,7 @@ pub(crate) fn stamp(manifests: &[ManifestRead], rust: &[(&str, Unread)]) -> Stam
     }
     Stamp {
         fingerprint: *hasher.finalize().as_bytes(),
-        rs_skipped: rust.len() as u64,
+        source_skipped: rust.len() as u64,
     }
 }
 

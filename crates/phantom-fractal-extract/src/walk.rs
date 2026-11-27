@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use ignore::{DirEntry, WalkBuilder};
 
+use crate::registry::Registry;
+
 /// Largest file the walk keeps and [`read_source`](crate::read_source)
 /// reads. Larger files are skipped, not truncated.
 pub const MAX_FILE_BYTES: u64 = 1024 * 1024;
@@ -72,6 +74,15 @@ pub struct Walk {
 /// global gitignore is not read, so two machines walk the same tree the same
 /// way. Symlinks are never followed.
 pub fn walk(root: &Path) -> std::io::Result<Walk> {
+    walk_filtered(root, vec![crate::registry::is_rust_target_pruned])
+}
+
+/// Walks `root` using directory prune rules from `registry`.
+pub fn walk_with(root: &Path, registry: &Registry<'_>) -> std::io::Result<Walk> {
+    walk_filtered(root, registry.prune_rules())
+}
+
+fn walk_filtered(root: &Path, rules: Vec<fn(&Path, &str, usize) -> bool>) -> std::io::Result<Walk> {
     let root = root.canonicalize()?;
     let mut out = Walk::default();
     let walker = WalkBuilder::new(&root)
@@ -80,7 +91,7 @@ pub fn walk(root: &Path) -> std::io::Result<Walk> {
         .require_git(false)
         .follow_links(false)
         .sort_by_file_name(|a, b| a.cmp(b))
-        .filter_entry(|entry| !is_pruned_dir(entry))
+        .filter_entry(move |entry| !is_pruned_dir(entry, &rules))
         .build();
     for entry in walker {
         match entry {
@@ -91,20 +102,19 @@ pub fn walk(root: &Path) -> std::io::Result<Walk> {
     Ok(out)
 }
 
-/// `.git`, and a `target` directory at the root or beside a `Cargo.toml`.
-/// A `target` module elsewhere, such as `src/target/`, is walked.
-fn is_pruned_dir(entry: &DirEntry) -> bool {
+/// True when `entry` is a directory pruned by `.git` or a driver rule.
+fn is_pruned_dir(entry: &DirEntry, rules: &[fn(&Path, &str, usize) -> bool]) -> bool {
     if !entry.file_type().is_some_and(|kind| kind.is_dir()) {
         return false;
     }
-    match entry.file_name().to_str() {
-        Some(".git") => true,
-        Some("target") => entry
-            .path()
-            .parent()
-            .is_some_and(|parent| entry.depth() == 1 || parent.join("Cargo.toml").is_file()),
-        _ => false,
+    let Some(name) = entry.file_name().to_str() else {
+        return false;
+    };
+    if name == ".git" {
+        return true;
     }
+    let parent = entry.path().parent().unwrap_or_else(|| Path::new(""));
+    rules.iter().any(|rule| rule(parent, name, entry.depth()))
 }
 
 fn visit(root: &Path, entry: &DirEntry, out: &mut Walk) {

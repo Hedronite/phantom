@@ -168,6 +168,7 @@ fn stale_index_and_unindexed_changes_come_last_and_only_when_they_apply() {
         DiffState {
             stale_index: true,
             unindexed_changes: 3,
+            manifest_changed: false,
         },
     );
     assert_eq!(
@@ -183,6 +184,7 @@ fn stale_index_and_unindexed_changes_come_last_and_only_when_they_apply() {
         DiffState {
             stale_index: false,
             unindexed_changes: 1,
+            manifest_changed: false,
         },
     );
     assert_eq!(reasons(&only_unindexed), [("unindexed_changes", Some(1))]);
@@ -192,11 +194,12 @@ fn stale_index_and_unindexed_changes_come_last_and_only_when_they_apply() {
         DiffState {
             stale_index: false,
             unindexed_changes: 0,
+            manifest_changed: false,
         },
     );
     assert!(zero.exact);
     assert_eq!(
-        CompletenessReason::ALL[5..],
+        CompletenessReason::ALL[5..7],
         [
             CompletenessReason::StaleIndex,
             CompletenessReason::UnindexedChanges

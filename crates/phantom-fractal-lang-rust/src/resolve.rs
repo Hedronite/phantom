@@ -55,6 +55,9 @@ pub fn confidence(reason: Reason) -> f64 {
         Reason::UseGlob => 0.85,
         Reason::TypedMethod => 0.8,
         Reason::UniqueMethod => 0.5,
+        Reason::PackageImport => 0.95,
+        Reason::EmbeddedMethod => 0.85,
+        Reason::InterfaceMethod => 0.8,
     }
 }
 
@@ -114,6 +117,7 @@ pub fn resolve(input: &ResolveInput) -> (Vec<Edge>, ResolveCounts) {
                 };
                 (source, index.place_cured(call, source))
             }
+            RefKind::Embed | RefKind::ValueRef => continue,
         };
         match placed {
             Placed::Edge(target, reason) => {

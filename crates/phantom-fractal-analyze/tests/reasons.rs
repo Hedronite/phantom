@@ -120,6 +120,10 @@ fn every_reason_at_once_keeps_the_fixed_order() {
             "external_users_possible",
             "stale_index",
             "unindexed_changes",
+            "interface_dispatch",
+            "value_reference",
+            "build_excluded",
+            "manifest_changed",
         ]
     );
     assert!(!g.impact(1).exact);
@@ -198,4 +202,335 @@ fn tests_never_count_toward_risk() {
     assert_eq!(got.counts.tests, 30);
     assert_eq!(got.risk, Risk::Low);
     assert_eq!(Risk::Unknown.as_str(), "unknown");
+}
+
+#[test]
+fn multilang_interface_value_build_manifest_and_go_external_rules() {
+    use phantom_fractal_analyze::{DiffState, ImpactOptions, ImpactSource, impact_many};
+    use phantom_fractal_store::{CallHit, StoreError, SymbolFacts};
+
+    // Exercise default trait methods directly.
+    struct MinimalSource(SymbolFacts);
+    impl ImpactSource for MinimalSource {
+        fn callers(&self, _id: i64) -> Result<Vec<CallHit>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn facts(&self, id: i64) -> Result<Option<SymbolFacts>, StoreError> {
+            Ok((id == self.0.id).then(|| self.0.clone()))
+        }
+        fn unresolved_named(&self, _name: &str) -> Result<i64, StoreError> {
+            Ok(0)
+        }
+        fn macro_args_named(&self, _name: &str) -> Result<i64, StoreError> {
+            Ok(0)
+        }
+        fn rs_skipped(&self) -> Result<Option<u64>, StoreError> {
+            Ok(Some(0))
+        }
+    }
+    let minimal = MinimalSource(SymbolFacts {
+        id: 1,
+        name: "Fn".to_owned(),
+        kind: "function".to_owned(),
+        file: "src/a.rs".to_owned(),
+        line: Some(1),
+        visibility: "private".to_owned(),
+        trait_name: None,
+        is_test: false,
+        package: Some("app".to_owned()),
+        target_kind: Some("lib".to_owned()),
+    });
+    assert_eq!(minimal.file_lang("src/a.rs").unwrap(), None);
+    assert_eq!(minimal.value_refs_named("Fn").unwrap(), 0);
+    assert_eq!(minimal.build_excluded_count().unwrap(), None);
+    assert!(
+        phantom_fractal_analyze::impact(&minimal, 1, &ImpactOptions::default())
+            .unwrap()
+            .exact
+    );
+
+    // Go method triggers interface_dispatch even with trait_name == None.
+    let mut g = target();
+    g.facts_mut(1).kind = "method".to_owned();
+    g.facts_mut(1).file = "pkg/a.go".to_owned();
+    assert_eq!(reasons(&g), [(CompletenessReason::InterfaceDispatch, None)]);
+
+    // ValueReference & BuildExcluded apply only when positive.
+    let mut g2 = target();
+    g2.value_refs.insert("t".to_owned(), 2);
+    g2.build_excluded = Some(0);
+    assert_eq!(
+        reasons(&g2),
+        [(CompletenessReason::ValueReference, Some(2))]
+    );
+    g2.build_excluded = Some(3);
+    assert_eq!(
+        reasons(&g2),
+        [
+            (CompletenessReason::ValueReference, Some(2)),
+            (CompletenessReason::BuildExcluded, Some(3)),
+        ]
+    );
+
+    // Go ExternalUsersPossible = false for package main and internal/... paths,
+    // while normal Go libs and Rust internal/ paths stay true.
+    for (file, pkg, lang, expected_external) in [
+        ("pkg/a.go", "example.com/app", None, true),
+        ("internal_helper/a.go", "example.com/app", None, true),
+        ("internal/a.go", "example.com/app", None, false),
+        ("pkg/internal/a.go", "example.com/app", None, false),
+        ("cmd/main.go", "main", None, false),
+        ("custom/ext", "example.com/app", Some("go"), true),
+        ("internal/custom.ext", "example.com/app", Some("go"), false),
+        ("internal/a.rs", "rust_pkg", Some("rust"), true),
+    ] {
+        let mut gx = target();
+        gx.facts_mut(1).file = file.to_owned();
+        gx.facts_mut(1).visibility = "public".to_owned();
+        gx.facts_mut(1).package = Some(pkg.to_owned());
+        gx.facts_mut(1).target_kind = Some("lib".to_owned());
+        if let Some(l) = lang {
+            gx.set_lang(file, l);
+        }
+        let got = reasons(&gx);
+        let has_ext = got.iter().any(|(r, _)| *r == ExternalUsersPossible);
+        assert_eq!(has_ext, expected_external, "{file} {pkg} {lang:?}: {got:?}");
+    }
+
+    // ManifestChanged fires on diff impact when DiffState::manifest_changed is true.
+    let gm = target();
+    let res = impact_many(
+        &gm,
+        &[],
+        &ImpactOptions::default(),
+        &DiffState {
+            stale_index: false,
+            unindexed_changes: 0,
+            manifest_changed: true,
+        },
+    )
+    .unwrap();
+    assert!(!res.exact);
+    assert_eq!(
+        res.reasons
+            .iter()
+            .map(|r| r.reason.as_str())
+            .collect::<Vec<_>>(),
+        ["manifest_changed"]
+    );
+}
+
+#[test]
+fn store_impact_source_reads_go_lang_value_refs_and_source_skipped() {
+    use phantom_fractal_analyze::{ImpactOptions, ImpactSource};
+    use phantom_fractal_extract::lang::{
+        Caller, Extract, ExtractError, FileModule, Item, ItemKind, Language, Method, Module,
+        RefKind, Reference, Target, TargetKind, Visibility,
+    };
+    use phantom_fractal_store::{Package, Store};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    struct Tmp(PathBuf);
+    impl Tmp {
+        fn new() -> Self {
+            static C: AtomicU32 = AtomicU32::new(0);
+            let p = std::env::temp_dir().join(format!(
+                "phantom-analyze-store-{}-{}",
+                std::process::id(),
+                C.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = fs::remove_dir_all(&p);
+            fs::create_dir_all(&p).unwrap();
+            Self(p.join("graph.db"))
+        }
+    }
+    impl Drop for Tmp {
+        fn drop(&mut self) {
+            if let Some(p) = self.0.parent() {
+                let _ = fs::remove_dir_all(p);
+            }
+        }
+    }
+
+    struct GoLang;
+    impl Language for GoLang {
+        fn name(&self) -> &'static str {
+            "go"
+        }
+        fn extensions(&self) -> &'static [&'static str] {
+            &["go"]
+        }
+        fn qualifier_separator(&self) -> &'static str {
+            "."
+        }
+        fn extract(&self, _s: &str) -> Result<Extract, ExtractError> {
+            Ok(Extract {
+                items: vec![
+                    Item {
+                        kind: ItemKind::Function,
+                        name: "Hook".to_owned(),
+                        visibility: Visibility::Public,
+                        start_line: 1,
+                        end_line: 1,
+                        signature: "func Hook()".to_owned(),
+                        doc_summary: None,
+                        is_test: false,
+                    },
+                    Item {
+                        kind: ItemKind::Struct,
+                        name: "T".to_owned(),
+                        visibility: Visibility::Public,
+                        start_line: 2,
+                        end_line: 2,
+                        signature: "type T struct".to_owned(),
+                        doc_summary: None,
+                        is_test: false,
+                    },
+                ],
+                item_scopes: vec![String::new(), String::new()],
+                item_owners: vec![None, None],
+                methods: vec![Method {
+                    owner: "T".to_owned(),
+                    owner_path: "T".to_owned(),
+                    trait_name: None,
+                    name: "Do".to_owned(),
+                    visibility: Visibility::Public,
+                    scope: String::new(),
+                    start_line: 4,
+                    end_line: 4,
+                    signature: "func (T) Do()".to_owned(),
+                    doc_summary: None,
+                    is_test: false,
+                }],
+                refs: vec![Reference {
+                    kind: RefKind::ValueRef,
+                    text: "pkg.Hook".to_owned(),
+                    last_segment: "Hook".to_owned(),
+                    line: 5,
+                    col: 1,
+                    scope: String::new(),
+                    from: Some(Caller {
+                        name: "Do".to_owned(),
+                        owner: Some("T".to_owned()),
+                        start_line: 4,
+                    }),
+                    receiver: None,
+                    receiver_type: None,
+                    shadowed: false,
+                }],
+                ..Extract::default()
+            })
+        }
+    }
+
+    let tmp = Tmp::new();
+    let mut store = Store::open(&tmp.0).unwrap();
+    store
+        .put_source("internal/pkg/a.go", "package pkg\n", 0, &GoLang)
+        .unwrap();
+    store
+        .write_crate_graph_with_files(
+            &[Package {
+                name: "example.com/app".to_owned(),
+                version: None,
+                manifest_path: "go.mod".to_owned(),
+            }],
+            &[Target {
+                id: 1,
+                package: "example.com/app".to_owned(),
+                name: "pkg".to_owned(),
+                kind: TargetKind::Lib,
+                root: String::new(),
+            }],
+            &[Module {
+                id: 1,
+                target: 1,
+                parent: None,
+                path: "example.com/app/internal/pkg".to_owned(),
+                file: String::new(),
+                scope: String::new(),
+            }],
+            &[FileModule {
+                file: "internal/pkg/a.go".to_owned(),
+                module: 1,
+            }],
+            &[],
+        )
+        .unwrap();
+    store.set_workspace_fingerprint(&[0u8; 32], 2).unwrap();
+
+    assert_eq!(store.rs_skipped().unwrap(), Some(2));
+    assert_eq!(
+        store.file_lang("internal/pkg/a.go").unwrap().as_deref(),
+        Some("go")
+    );
+    assert_eq!(store.file_lang("src/lib.rs").unwrap(), None);
+    assert_eq!(store.value_refs_named("Hook").unwrap(), 1);
+    assert_eq!(store.value_refs_named("Other").unwrap(), 0);
+
+    let hook_id = store.symbols_matching("Hook").unwrap()[0].id;
+    let hook_imp =
+        phantom_fractal_analyze::impact(&store, hook_id, &ImpactOptions::default()).unwrap();
+    assert!(!hook_imp.exact);
+    let r_hook: Vec<&str> = hook_imp.reasons.iter().map(|r| r.reason.as_str()).collect();
+    assert!(r_hook.contains(&"value_reference"), "{r_hook:?}");
+    assert!(r_hook.contains(&"parse_skipped_files"), "{r_hook:?}");
+    assert!(
+        !r_hook.contains(&"external_users_possible"),
+        "internal/ must suppress external: {r_hook:?}"
+    );
+
+    let do_id = store.symbols_matching("Do").unwrap()[0].id;
+    let do_imp = phantom_fractal_analyze::impact(&store, do_id, &ImpactOptions::default()).unwrap();
+    let r_do: Vec<&str> = do_imp.reasons.iter().map(|r| r.reason.as_str()).collect();
+    assert!(r_do.contains(&"interface_dispatch"), "{r_do:?}");
+}
+
+#[test]
+fn every_completeness_reason_variant_is_reachable() {
+    use phantom_fractal_analyze::{
+        CompletenessReason, DiffState, ImpactOptions, impact, impact_many,
+    };
+    use std::collections::BTreeSet;
+
+    let mut g = support::Graph::new();
+    let id = g.function(1, "M");
+    {
+        let facts = g.facts_mut(id);
+        facts.kind = "method".to_owned();
+        facts.file = "src/a.go".to_owned();
+        facts.visibility = "public".to_owned();
+        facts.trait_name = Some("Tr".to_owned());
+        facts.package = Some("pkg".to_owned());
+    }
+    let caller = g.function(2, "caller");
+    g.call(caller, id, 1.0);
+    g.langs.insert("src/a.go".to_owned(), "go".to_owned());
+    g.unresolved.insert("M".to_owned(), 1);
+    g.macro_args.insert("M".to_owned(), 1);
+    g.value_refs.insert("M".to_owned(), 1);
+    g.rs_skipped = Some(1);
+    g.build_excluded = Some(2);
+
+    let diff = DiffState {
+        stale_index: true,
+        unindexed_changes: 1,
+        manifest_changed: true,
+    };
+    let a1 = impact(&g, id, &ImpactOptions::default()).unwrap();
+    let a2 = impact_many(&g, &[id], &ImpactOptions::default(), &diff).unwrap();
+    let seen: BTreeSet<&str> = a1
+        .reasons
+        .iter()
+        .chain(a2.reasons.iter())
+        .map(|r| r.reason.as_str())
+        .collect();
+    for variant in CompletenessReason::ALL {
+        assert!(
+            seen.contains(variant.as_str()),
+            "unreachable CompletenessReason::{variant:?} in {seen:?}"
+        );
+    }
 }

@@ -1,16 +1,20 @@
 //! The crate-graph and edge rebuild of one index pass (SPEC-w3 G2c), and
 //! the same counts read back when a pass rebuilds nothing.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use phantom_fractal_lang::{Extract, Id, Language, Link, ResolveInput};
-use phantom_fractal_lang_rust::{RustLanguage, links, method_owners, resolve, resolve_graph};
+use phantom_fractal_lang::{Extract, Id, Link, ResolveCounts, ResolveInput};
+use phantom_fractal_lang_rust::{links, method_owners};
 use phantom_fractal_store::{Store, StoreError};
 
 use crate::deps;
 use crate::fingerprint::{Contents, ManifestRead, Stamp, read_manifests};
-use crate::graph::{self, Manifest, SourceFile};
+use crate::graph::Manifest;
+use crate::registry::{
+    LanguageDriver, ManifestFile, PackageGraph, Registry, SourceFileExtract, is_named_file,
+    scope_input,
+};
 use crate::walk::{Candidate, walk};
 use crate::{EXTRACTOR_VERSION, GraphReport, IndexError, ReasonCounts};
 
@@ -26,84 +30,331 @@ use crate::{EXTRACTOR_VERSION, GraphReport, IndexError, ReasonCounts};
 /// own test flags, which the store restores before it marks the symbols
 /// of test modules, so a module that stops being a test module leaves no
 /// mark behind.
-pub(crate) fn rebuild(
+struct ExtractedSources {
+    by_driver: Vec<Vec<SourceFileExtract>>,
+    own_tests: Vec<(String, Vec<bool>)>,
+    parse_errors: u64,
+}
+
+pub(crate) fn rebuild_with(
     manifests: &[ManifestRead],
     stamp: &Stamp,
     kept: &[&Candidate],
     store: &mut Store,
-    language: &RustLanguage,
+    registry: &Registry<'_>,
 ) -> Result<GraphReport, IndexError> {
-    let manifests = kept_manifests(manifests);
-    let mut files = Vec::with_capacity(kept.len());
-    let mut own_tests = Vec::with_capacity(kept.len());
-    for file in kept {
-        let mod_decls = match Contents::read(file)? {
-            Contents::Text(text) => {
-                let extract = language.extract(&text).map_err(StoreError::Extract)?;
-                // A file that changed since this pass stored it keeps its
-                // rows' flags; the next pass re-stores it.
-                if is_stored_text(store, &file.path, &text)? {
-                    own_tests.push((file.path.clone(), own_test_flags(&extract)));
-                }
-                extract.mod_decls
-            }
-            Contents::Unread(_) => Vec::new(),
-        };
-        files.push(SourceFile {
-            path: file.path.clone(),
-            mod_decls,
-        });
-    }
-    let graph = graph::build(&manifests, &files);
-    for (path, flags) in &own_tests {
-        store.reset_symbol_test_flags(path, flags)?;
-    }
-    store.write_crate_graph(
-        &graph.packages,
-        &graph.targets,
-        &graph.modules,
-        &graph.test_modules,
+    let manifest_files = kept_manifest_files(manifests);
+    let extracted = extract_kept_files(kept, store, registry)?;
+    let (graph, driver_targets) = write_merged_graph(store, registry, &manifest_files, &extracted)?;
+    let rust_manifests = cargo_manifests(&manifest_files);
+    let input = resolve_input(store, &rust_manifests)?;
+    let (calls, all_links, counts) = resolve_drivers(registry, &driver_targets, &input);
+    persist_resolved(
+        store,
+        &calls,
+        &all_links,
+        &input,
+        stamp.fingerprint,
+        stamp.source_skipped + extracted.parse_errors,
     )?;
-    let input = resolve_input(store, &manifests)?;
-    let resolved = resolve_graph(&input);
-    store.replace_edges(&resolved.calls)?;
-    store.write_links(&resolved.links)?;
-    store.write_method_owners(&method_owners(&input))?;
-    store.set_extractor_version(EXTRACTOR_VERSION)?;
-    store.set_workspace_fingerprint(&stamp.fingerprint, stamp.rs_skipped)?;
     Ok(GraphReport {
         modules: graph.modules.len(),
-        orphans: graph.orphans.len(),
-        counts: resolved.counts,
-        edges_by_reason: ReasonCounts::of(&resolved.calls),
+        orphans: graph.orphans,
+        counts,
+        edges_by_reason: ReasonCounts::of(&calls),
     })
 }
 
+fn write_merged_graph(
+    store: &mut Store,
+    registry: &Registry<'_>,
+    manifest_files: &[ManifestFile],
+    extracted: &ExtractedSources,
+) -> Result<(PackageGraph, Vec<HashSet<Id>>), IndexError> {
+    for (path, flags) in &extracted.own_tests {
+        store.reset_symbol_test_flags(path, flags)?;
+    }
+    let (graph, driver_targets) =
+        merge_driver_graphs(registry, manifest_files, &extracted.by_driver);
+    store.write_crate_graph_with_files(
+        &graph.packages,
+        &graph.targets,
+        &graph.modules,
+        &graph.file_modules,
+        &graph.test_modules,
+    )?;
+    Ok((graph, driver_targets))
+}
+
+fn persist_resolved(
+    store: &mut Store,
+    calls: &[phantom_fractal_lang::Edge],
+    all_links: &[Link],
+    input: &ResolveInput,
+    fingerprint: [u8; 32],
+    source_skipped: u64,
+) -> Result<(), IndexError> {
+    store.replace_edges(calls)?;
+    store.write_links(all_links)?;
+    store.write_method_owners(&method_owners(input))?;
+    store.set_extractor_version(EXTRACTOR_VERSION)?;
+    store.set_workspace_fingerprint(&fingerprint, source_skipped)?;
+    Ok(())
+}
+
+fn extract_kept_files(
+    kept: &[&Candidate],
+    store: &Store,
+    registry: &Registry<'_>,
+) -> Result<ExtractedSources, IndexError> {
+    let drivers = registry.drivers();
+    let mut out = ExtractedSources {
+        by_driver: vec![Vec::new(); drivers.len()],
+        own_tests: Vec::with_capacity(kept.len()),
+        parse_errors: 0,
+    };
+    for file in kept {
+        extract_one_kept(file, store, &drivers, &mut out)?;
+    }
+    Ok(out)
+}
+
+fn extract_one_kept(
+    file: &Candidate,
+    store: &Store,
+    drivers: &[&dyn LanguageDriver],
+    out: &mut ExtractedSources,
+) -> Result<(), IndexError> {
+    let Some(idx) = driver_index_for(drivers, &file.path) else {
+        return Ok(());
+    };
+    let lang = drivers[idx].language();
+    let extract = match Contents::read(file)? {
+        Contents::Text(text) => parse_kept_text(&file.path, &text, lang, store, out)?,
+        Contents::Unread(_) => Extract::default(),
+    };
+    out.by_driver[idx].push(SourceFileExtract {
+        path: file.path.clone(),
+        extract,
+    });
+    Ok(())
+}
+
+fn parse_kept_text(
+    path: &str,
+    text: &str,
+    lang: &dyn phantom_fractal_lang::Language,
+    store: &Store,
+    out: &mut ExtractedSources,
+) -> Result<Extract, IndexError> {
+    if lang.has_parse_errors(text) {
+        out.parse_errors += 1;
+    }
+    let extract = lang.extract(text).map_err(StoreError::Extract)?;
+    if is_stored_text(store, path, text)? {
+        out.own_tests
+            .push((path.to_owned(), own_test_flags(&extract)));
+    }
+    Ok(extract)
+}
+
+fn driver_index_for(drivers: &[&dyn LanguageDriver], path: &str) -> Option<usize> {
+    let ext = Path::new(path).extension().and_then(|ext| ext.to_str())?;
+    drivers
+        .iter()
+        .position(|driver| driver.language().extensions().contains(&ext))
+}
+
+fn merge_driver_graphs(
+    registry: &Registry<'_>,
+    manifests: &[ManifestFile],
+    by_driver: &[Vec<SourceFileExtract>],
+) -> (PackageGraph, Vec<HashSet<Id>>) {
+    let drivers = registry.drivers();
+    if drivers.len() == 1 {
+        let single = drivers[0].build_graph(manifests, &by_driver[0]);
+        let ids: HashSet<Id> = single.targets.iter().map(|t| t.id).collect();
+        return (single, vec![ids]);
+    }
+    let mut merged = PackageGraph::default();
+    let mut target_sets = Vec::with_capacity(drivers.len());
+    let mut next_target: Id = 1;
+    let mut next_module: Id = 1;
+    for (idx, driver) in drivers.iter().enumerate() {
+        let has_manifests = manifests.iter().any(|m| {
+            Path::new(&m.path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| driver.manifest_names().contains(&n))
+        });
+        if by_driver[idx].is_empty() && !has_manifests {
+            target_sets.push(HashSet::new());
+            continue;
+        }
+        let part = driver.build_graph(manifests, &by_driver[idx]);
+        let ids = append_package_graph(&mut merged, part, &mut next_target, &mut next_module);
+        target_sets.push(ids);
+    }
+    (merged, target_sets)
+}
+
+fn append_package_graph(
+    merged: &mut PackageGraph,
+    part: PackageGraph,
+    next_target: &mut Id,
+    next_module: &mut Id,
+) -> HashSet<Id> {
+    merged.packages.extend(part.packages);
+    merged.orphans += part.orphans;
+    let (target_map, own_targets) = remap_targets(part.targets, next_target, &mut merged.targets);
+    let mod_map = remap_modules(part.modules, &target_map, next_module, &mut merged.modules);
+    remap_module_refs(part.file_modules, part.test_modules, &mod_map, merged);
+    own_targets
+}
+
+fn remap_targets(
+    targets: Vec<phantom_fractal_lang::Target>,
+    next_target: &mut Id,
+    out: &mut Vec<phantom_fractal_lang::Target>,
+) -> (HashMap<Id, Id>, HashSet<Id>) {
+    let mut target_map = HashMap::new();
+    let mut own_targets = HashSet::new();
+    for mut t in targets {
+        let new_id = *next_target;
+        *next_target += 1;
+        target_map.insert(t.id, new_id);
+        t.id = new_id;
+        own_targets.insert(new_id);
+        out.push(t);
+    }
+    (target_map, own_targets)
+}
+
+fn remap_modules(
+    modules: Vec<phantom_fractal_lang::Module>,
+    target_map: &HashMap<Id, Id>,
+    next_module: &mut Id,
+    out: &mut Vec<phantom_fractal_lang::Module>,
+) -> HashMap<Id, Id> {
+    let mut mod_map = HashMap::new();
+    for m in &modules {
+        let new_id = *next_module;
+        *next_module += 1;
+        mod_map.insert(m.id, new_id);
+    }
+    for mut m in modules {
+        m.id = mod_map[&m.id];
+        m.target = target_map[&m.target];
+        m.parent = m.parent.and_then(|p| mod_map.get(&p).copied());
+        out.push(m);
+    }
+    mod_map
+}
+
+fn remap_module_refs(
+    file_modules: Vec<phantom_fractal_lang::FileModule>,
+    test_modules: Vec<Id>,
+    mod_map: &HashMap<Id, Id>,
+    merged: &mut PackageGraph,
+) {
+    for mut fm in file_modules {
+        fm.module = mod_map[&fm.module];
+        merged.file_modules.push(fm);
+    }
+    for tm in test_modules {
+        if let Some(&new_id) = mod_map.get(&tm) {
+            merged.test_modules.push(new_id);
+        }
+    }
+}
+
+fn resolve_drivers(
+    registry: &Registry<'_>,
+    driver_targets: &[HashSet<Id>],
+    input: &ResolveInput,
+) -> (Vec<phantom_fractal_lang::Edge>, Vec<Link>, ResolveCounts) {
+    let drivers = registry.drivers();
+    if drivers.len() == 1 {
+        let g = drivers[0].resolver().resolve_graph(input);
+        return (g.calls, g.links, g.counts);
+    }
+    let mut calls = Vec::new();
+    let mut links_out = Vec::new();
+    let mut counts = ResolveCounts::default();
+    for (idx, driver) in drivers.iter().enumerate() {
+        let scoped = scope_input(input, driver.language().extensions(), &driver_targets[idx]);
+        let g = driver.resolver().resolve_graph(&scoped);
+        calls.extend(g.calls);
+        links_out.extend(g.links);
+        add_counts(&mut counts, g.counts);
+    }
+    (calls, links_out, counts)
+}
+
+fn add_counts(total: &mut ResolveCounts, part: ResolveCounts) {
+    total.edges += part.edges;
+    total.unresolved += part.unresolved;
+    total.external += part.external;
+    total.no_source += part.no_source;
+    total.method_calls += part.method_calls;
+    total.macros += part.macros;
+}
+
 /// The graph report of the tree at `root` as last indexed into `store`,
-/// read without writing: for an index pass that rebuilt nothing. The
-/// resolver is pure and the input is built as the index pass builds it, so
-/// its counts are the ones the last rebuild found. An orphan is a stored
-/// file no module reaches.
+/// read without writing: for an index pass that rebuilt nothing.
 pub fn stored_graph(store: &Store, root: &Path) -> Result<GraphReport, IndexError> {
-    let manifests = kept_manifests(&read_manifests(&walk(root)?)?);
+    let registry = crate::default_registry().map_err(StoreError::Extract)?;
+    stored_graph_with(store, root, &registry)
+}
+
+/// Like [`stored_graph`], over any registered language set.
+pub fn stored_graph_with(
+    store: &Store,
+    root: &Path,
+    registry: &Registry<'_>,
+) -> Result<GraphReport, IndexError> {
+    let walk = crate::walk::walk_with(root, registry)?;
+    let manifest_reads = crate::fingerprint::read_manifests_with(&walk, registry)?;
+    let manifests = cargo_manifests(&kept_manifest_files(&manifest_reads));
     let input = resolve_input(store, &manifests)?;
-    let (edges, counts) = resolve(&input);
-    let reached: HashSet<&str> = input
-        .modules
+    let driver_targets: Vec<HashSet<Id>> = registry
+        .drivers()
         .iter()
-        .map(|module| module.file.as_str())
+        .map(|d| targets_for_driver(&input, d.language().extensions()))
         .collect();
-    let orphans = store
-        .file_paths()?
-        .iter()
-        .filter(|path| !reached.contains(path.as_str()))
-        .count();
+    let (edges, _, counts) = resolve_drivers(registry, &driver_targets, &input);
+    let orphans = count_orphans(store, &input)?;
     Ok(GraphReport {
         modules: input.modules.len(),
         orphans,
         counts,
         edges_by_reason: ReasonCounts::of(&edges),
     })
+}
+
+fn targets_for_driver(input: &ResolveInput, exts: &[&str]) -> HashSet<Id> {
+    input
+        .symbols
+        .iter()
+        .filter(|s| {
+            Path::new(&s.file)
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| exts.contains(&e))
+        })
+        .filter_map(|s| s.module)
+        .filter_map(|mid| input.modules.iter().find(|m| m.id == mid).map(|m| m.target))
+        .collect()
+}
+
+fn count_orphans(store: &Store, _input: &ResolveInput) -> Result<usize, IndexError> {
+    let mut orphans = 0;
+    for file in store.files()? {
+        if !store.file_has_module(file.id)? {
+            orphans += 1;
+        }
+    }
+    Ok(orphans)
 }
 
 /// The `(method, type)` owner pairs of the tree at `root` as last indexed
@@ -158,16 +409,105 @@ fn resolve_input(store: &Store, manifests: &[Manifest]) -> Result<ResolveInput, 
     Ok(input)
 }
 
-/// The manifests the bounded read kept as UTF-8 text, in walk order.
-fn kept_manifests(manifests: &[ManifestRead]) -> Vec<Manifest> {
+/// Kept manifest files as UTF-8 text, in walk order.
+fn kept_manifest_files(manifests: &[ManifestRead]) -> Vec<ManifestFile> {
     manifests
         .iter()
         .filter_map(|manifest| match &manifest.contents {
-            Contents::Text(text) => Some(Manifest {
+            Contents::Text(text) => Some(ManifestFile {
                 path: manifest.path.clone(),
                 text: text.clone(),
             }),
             Contents::Unread(_) => None,
         })
         .collect()
+}
+
+fn cargo_manifests(manifests: &[ManifestFile]) -> Vec<Manifest> {
+    manifests
+        .iter()
+        .filter(|manifest| is_named_file(&manifest.path, "Cargo.toml"))
+        .map(|manifest| Manifest {
+            path: manifest.path.clone(),
+            text: manifest.text.clone(),
+        })
+        .collect()
+}
+
+fn kept_manifests(manifests: &[ManifestRead]) -> Vec<Manifest> {
+    cargo_manifests(&kept_manifest_files(manifests))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use phantom_fractal_lang::resolve::{Module, Target, TargetKind};
+
+    #[test]
+    fn merge_helpers_accumulate_orphans_ids_and_counts() {
+        let mut total = ResolveCounts {
+            edges: 2,
+            unresolved: 2,
+            external: 2,
+            no_source: 2,
+            method_calls: 2,
+            macros: 2,
+        };
+        let part = ResolveCounts {
+            edges: 3,
+            unresolved: 3,
+            external: 3,
+            no_source: 3,
+            method_calls: 3,
+            macros: 3,
+        };
+        add_counts(&mut total, part);
+        assert_eq!(total.edges, 5);
+        assert_eq!(total.unresolved, 5);
+        assert_eq!(total.external, 5);
+        assert_eq!(total.no_source, 5);
+        assert_eq!(total.method_calls, 5);
+        assert_eq!(total.macros, 5);
+
+        let mut merged = PackageGraph {
+            orphans: 2,
+            ..PackageGraph::default()
+        };
+        let mut next_target = 1;
+        let mut next_module = 1;
+        let g = PackageGraph {
+            orphans: 3,
+            targets: vec![Target {
+                id: 1,
+                package: "p".to_owned(),
+                name: "p".to_owned(),
+                kind: TargetKind::Lib,
+                root: "src/lib.rs".to_owned(),
+            }],
+            modules: vec![
+                Module {
+                    id: 1,
+                    target: 1,
+                    parent: None,
+                    path: "crate".to_owned(),
+                    file: "src/lib.rs".to_owned(),
+                    scope: String::new(),
+                },
+                Module {
+                    id: 2,
+                    target: 1,
+                    parent: Some(1),
+                    path: "crate::sub".to_owned(),
+                    file: "src/sub.rs".to_owned(),
+                    scope: String::new(),
+                },
+            ],
+            ..PackageGraph::default()
+        };
+        let _ = append_package_graph(&mut merged, g, &mut next_target, &mut next_module);
+        assert_eq!(merged.orphans, 5);
+        assert_eq!(next_module, 3);
+        assert_eq!(merged.modules.len(), 2);
+        assert_eq!(merged.modules[1].id, 2);
+    }
 }

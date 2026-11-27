@@ -102,6 +102,13 @@ impl Scope {
         }
     }
 
+    pub(crate) fn decayed_for(multilang: bool) -> Self {
+        Self {
+            files: if multilang { "indexed" } else { "indexed .rs" },
+            ..Self::decayed()
+        }
+    }
+
     /// `--count`'s: every tracked file, one per shared commit, from one.
     pub(crate) const fn count() -> Self {
         Self {
@@ -150,7 +157,7 @@ pub(crate) fn cochange(request: &CochangeRequest) -> Result<Reply<CochangeResult
     let asked = checked(request)?;
     let clamped = asked.note();
     let store = current_store(&request.repo)?;
-    let file = indexed_file(&store, &request.file)?;
+    let (file, multilang) = indexed_file_scope(&store, &request.file)?;
     let scan = scan(&store)?;
     let limit = scan.as_ref().map(|_| asked);
     let (partners, truncated) = listed(&store, &file, request, limit)?;
@@ -159,10 +166,16 @@ pub(crate) fn cochange(request: &CochangeRequest) -> Result<Reply<CochangeResult
         scan,
         partners,
         truncated: asked.truncated(truncated),
-        scope: Some(Scope::decayed()),
+        scope: Some(Scope::decayed_for(multilang)),
         tokens: None,
     };
     answer_limited(result, &store, &request.repo, request.max_tokens, clamped)
+}
+
+fn indexed_file_scope(store: &Store, path: &str) -> Result<(String, bool), Failure> {
+    let multilang = has_non_rust(store)?;
+    let file = indexed_file(store, path, multilang)?;
+    Ok((file, multilang))
 }
 
 /// The limit, unless it is 0 or `min_lift` or `max_tokens` is out of
@@ -222,21 +235,37 @@ pub(crate) fn relative(path: &str) -> &str {
 /// `NotFound`, which says co-change is kept only for indexed files and
 /// points to `--count` and git. The message never holds the path, which
 /// may be absolute.
-fn indexed_file(store: &Store, path: &str) -> Result<String, Failure> {
+fn has_non_rust(store: &Store) -> Result<bool, Failure> {
+    Ok(store
+        .files()?
+        .into_iter()
+        .any(|file| !file.path.ends_with(".rs")))
+}
+
+fn indexed_file(store: &Store, path: &str, multilang: bool) -> Result<String, Failure> {
     let relative = relative(path);
     store
         .files()?
         .into_iter()
         .map(|file| file.path)
         .find(|stored| stored == relative)
-        .ok_or_else(|| {
-            Failure::new(
-                ErrorKind::NotFound,
-                "file is not indexed at HEAD: co-change is kept only for indexed Rust files; \
-                 give a path relative to the repo, or for raw counts over every tracked file \
-                 use cochange --count or git log",
-            )
-        })
+        .ok_or_else(|| not_indexed_error(multilang))
+}
+
+fn not_indexed_error(multilang: bool) -> Failure {
+    let label = if multilang {
+        "indexed files"
+    } else {
+        "indexed Rust files"
+    };
+    Failure::new(
+        ErrorKind::NotFound,
+        format!(
+            "file is not indexed at HEAD: co-change is kept only for {label}; \
+             give a path relative to the repo, or for raw counts over every tracked file \
+             use cochange --count or git log"
+        ),
+    )
 }
 
 /// The stored scan's HEAD and window, or none without a scan.
@@ -342,6 +371,55 @@ mod tests {
                 "min_commits": MIN_TOGETHER,
                 "bulk_skip": BULK_FILES,
             })
+        );
+        assert_eq!(
+            serde_json::to_value(Scope::decayed_for(false)).expect("json"),
+            serde_json::to_value(Scope::decayed()).expect("json"),
+        );
+        assert_eq!(
+            serde_json::to_value(Scope::decayed_for(true)).expect("json"),
+            serde_json::json!({
+                "files": "indexed",
+                "weighting": "decay 90d",
+                "min_commits": MIN_TOGETHER,
+                "bulk_skip": BULK_FILES,
+            })
+        );
+        // Verify has_non_rust on Store with Rust-only vs non-Rust indexed files.
+        let tmp = std::env::temp_dir().join(format!("phantom-coch-nr-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let mut s = phantom_fractal_store::Store::open(&tmp).unwrap();
+        let rust = phantom_fractal_lang_rust::RustLanguage::new().unwrap();
+        s.put_source("src/lib.rs", "pub fn a() {}\n", 0, &rust)
+            .unwrap();
+        assert!(!super::has_non_rust(&s).ok().unwrap());
+        struct GoStub;
+        impl phantom_fractal_lang::Language for GoStub {
+            fn name(&self) -> &'static str {
+                "go"
+            }
+            fn extensions(&self) -> &'static [&'static str] {
+                &["go"]
+            }
+            fn extract(
+                &self,
+                _src: &str,
+            ) -> Result<phantom_fractal_lang::Extract, phantom_fractal_lang::ExtractError>
+            {
+                Ok(Default::default())
+            }
+        }
+        s.put_source("pkg/a.go", "package pkg\n", 0, &GoStub)
+            .unwrap();
+        assert!(super::has_non_rust(&s).ok().unwrap());
+        let _ = std::fs::remove_file(&tmp);
+        assert_eq!(
+            super::not_indexed_error(false).message,
+            "file is not indexed at HEAD: co-change is kept only for indexed Rust files; give a path relative to the repo, or for raw counts over every tracked file use cochange --count or git log"
+        );
+        assert_eq!(
+            super::not_indexed_error(true).message,
+            "file is not indexed at HEAD: co-change is kept only for indexed files; give a path relative to the repo, or for raw counts over every tracked file use cochange --count or git log"
         );
         assert_eq!(
             serde_json::to_value(Scope::count()).expect("json"),

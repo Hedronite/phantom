@@ -221,10 +221,10 @@ fn a_clean_tree_changes_nothing_and_the_keys_are_in_spec_order() {
 #[test]
 fn changed_symbols_files_and_their_impact() {
     let world = World::new();
-    world.write(
-        "src/b.rs",
-        "/// b's function.\npub fn fb() { let _ = 1; }\n",
-    );
+    let b_body = fs::read_to_string(world.root().join("src/b.rs"))
+        .expect("read b")
+        .replace("pub fn fb() {}", "pub fn fb() { let _ = 1; }");
+    world.write("src/b.rs", &b_body);
     world.write("src/z.rs", "pub fn fz() {}\n");
     fs::remove_file(world.root().join("src/g.rs")).expect("remove g");
     world.write("README.md", "notes\n");
@@ -263,11 +263,12 @@ fn changed_symbols_files_and_their_impact() {
         [
             "external_users_possible",
             "stale_index",
-            "unindexed_changes"
+            "unindexed_changes",
+            "manifest_changed"
         ]
     );
     let unindexed = &data["impact"]["reasons"][2];
-    assert_eq!(unindexed["count"], 1);
+    assert_eq!(unindexed["count"], 2);
     // `top` calls `fb`: the walk is `impact`'s from `fb` and `fg`.
     // `impact` names each hit with `display` (SPEC-w14 G1b); the diff
     // keeps its old hit shape.
@@ -286,10 +287,10 @@ fn changed_symbols_files_and_their_impact() {
 #[test]
 fn the_reasons_appear_only_when_they_apply() {
     let world = World::new();
-    world.write(
-        "src/b.rs",
-        "/// b's function.\npub fn fb() { let _ = 1; }\n",
-    );
+    let b_body = fs::read_to_string(world.root().join("src/b.rs"))
+        .expect("read b")
+        .replace("pub fn fb() {}", "pub fn fb() { let _ = 1; }");
+    world.write("src/b.rs", &b_body);
     let data = world.ok(&["impact", "--diff"])["data"].clone();
     assert_eq!(reasons(&data), ["external_users_possible", "stale_index"]);
     world.ok(&["index", "."]);
@@ -415,10 +416,10 @@ fn staged_unstaged_no_git_and_no_index_are_refused() {
 #[test]
 fn diff_impact_is_the_cli_line_and_keeps_to_the_roots() {
     let world = World::new();
-    world.write(
-        "src/b.rs",
-        "/// b's function.\npub fn fb() { let _ = 1; }\n",
-    );
+    let b_body = fs::read_to_string(world.root().join("src/b.rs"))
+        .expect("read b")
+        .replace("pub fn fb() {}", "pub fn fb() { let _ = 1; }");
+    world.write("src/b.rs", &b_body);
     world.write("README.md", "notes\n");
     let old = world.repo.rev("HEAD~2");
     let pairs: Vec<(Value, Vec<&str>)> = vec![
@@ -534,10 +535,10 @@ fn diff_impact_is_the_cli_line_and_keeps_to_the_roots() {
 #[test]
 fn no_reply_holds_an_absolute_path() {
     let world = World::new();
-    world.write(
-        "src/b.rs",
-        "/// b's function.\npub fn fb() { let _ = 1; }\n",
-    );
+    let b_body = fs::read_to_string(world.root().join("src/b.rs"))
+        .expect("read b")
+        .replace("pub fn fb() {}", "pub fn fb() { let _ = 1; }");
+    world.write("src/b.rs", &b_body);
     let root = world.root().to_str().expect("utf-8").to_owned();
     let data = world.data.path().to_str().expect("utf-8").to_owned();
     let mut script = Script::after_main();
@@ -561,10 +562,10 @@ fn no_reply_holds_an_absolute_path() {
 #[test]
 fn summary_and_no_tests_leave_out_their_keys() {
     let world = World::new();
-    world.write(
-        "src/b.rs",
-        "/// b's function.\npub fn fb() { let _ = 1; }\n",
-    );
+    let b_body = fs::read_to_string(world.root().join("src/b.rs"))
+        .expect("read b")
+        .replace("pub fn fb() {}", "pub fn fb() { let _ = 1; }");
+    world.write("src/b.rs", &b_body);
     for (args, want) in [
         (
             &["impact", "--diff"][..],
@@ -594,4 +595,384 @@ fn summary_and_no_tests_leave_out_their_keys() {
     let full = world.ok(&["impact", "--diff"])["data"]["impact"].clone();
     assert_eq!(summary["counts"], full["counts"]);
     assert_eq!(summary["reasons"], full["reasons"]);
+}
+
+#[test]
+fn manifest_only_or_rs_comment_only_edit_is_never_exact() {
+    let world = World::new();
+
+    // 1. Clean against older commit with only a Cargo.toml change -> exact: false + manifest_changed reason.
+    // 2. Clean against commit with only a comment edit in src/z_comment.rs -> exact: false + unindexed_changes.
+    let manifest = fs::read_to_string(world.root().join("Cargo.toml")).unwrap();
+    let mut script = Script::after_main();
+    script.commit(
+        support::HEAD + support::DAY,
+        &[(
+            "Cargo.toml",
+            format!("{manifest}\n[features]\nextra = []\n"),
+        )],
+    );
+    script.commit(
+        support::HEAD + 2 * support::DAY,
+        &[(
+            "src/z_comment.rs",
+            "// pure comment\npub fn kept() {}\n".to_owned(),
+        )],
+    );
+    script.commit(
+        support::HEAD + 3 * support::DAY,
+        &[(
+            "src/z_comment.rs",
+            "// pure comment edited\npub fn kept() {}\n".to_owned(),
+        )],
+    );
+    world.repo.import(&script);
+    world.ok(&["index", "."]);
+
+    let c1 = world.repo.rev("HEAD~2");
+    let c0 = world.repo.rev("HEAD~3");
+    let manifest_diff = world.ok(&["impact", "--diff", "--against", &c0])["data"].clone();
+    // c0 -> worktree touches Cargo.toml AND z_comment.rs (added). Test c2 -> worktree (only comment edit):
+    let c2 = world.repo.rev("HEAD~1");
+    let comment_diff = world.ok(&["impact", "--diff", "--against", &c2])["data"].clone();
+    assert_eq!(comment_diff["changed"], json!([]));
+    assert_eq!(comment_diff["impact"]["exact"], false, "{comment_diff}");
+    assert!(
+        reasons(&comment_diff).contains(&"unindexed_changes".to_owned()),
+        "{comment_diff}"
+    );
+    assert_eq!(manifest_diff["manifest_changed"], true);
+
+    // Now test clean Cargo.toml-only diff: reset HEAD to c1, index, and diff against c0.
+    world.repo.git(&["reset", "--hard", &c1], None);
+    world.ok(&["index", "."]);
+    let manifest_only = world.ok(&["impact", "--diff", "--against", &c0])["data"].clone();
+    assert_eq!(manifest_only["manifest_changed"], true);
+    assert_eq!(manifest_only["changed"], json!([]));
+    assert_eq!(manifest_only["impact"]["exact"], false, "{manifest_only}");
+    assert!(
+        reasons(&manifest_only).contains(&"manifest_changed".to_owned()),
+        "{manifest_only}"
+    );
+}
+
+#[test]
+fn diff_impact_never_returns_exact_when_use_rebind_or_manifest_joins_body_edit() {
+    let dir = TempDir::new("diff-f2-probe");
+    let data = TempDir::new("diff-f2-data");
+    let repo = dir.path();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"f2_probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("src/a.rs"),
+        "pub fn target() -> i32 { 1 }\npub fn other() -> i32 { 2 }\n",
+    )
+    .unwrap();
+    fs::write(repo.join("src/c.rs"), "pub fn target() -> i32 { 10 }\n").unwrap();
+    fs::write(
+        repo.join("src/b.rs"),
+        "use crate::a::target;\npub fn caller() -> i32 { target() }\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/lib.rs"),
+        "pub mod a;\npub mod b;\npub mod c;\n",
+    )
+    .unwrap();
+
+    let run_git = |args: &[&str]| {
+        let st = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("HOME", data.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "T")
+            .env("GIT_AUTHOR_EMAIL", "t@e.com")
+            .env("GIT_COMMITTER_NAME", "T")
+            .env("GIT_COMMITTER_EMAIL", "t@e.com")
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?}");
+    };
+    run_git(&["init", "-q", "-b", "main"]);
+    run_git(&["add", "."]);
+    run_git(&["commit", "-q", "-m", "init"]);
+
+    let run_bin = |args: &[&str]| -> Value {
+        let out = Command::new(BINS[0])
+            .args(args)
+            .current_dir(repo)
+            .env("PHANTOM_FRACTAL_DATA_DIR", data.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "cmd {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+
+    run_bin(&["index", "."]);
+
+    // Case B: use rebind in b.rs + body edit of a::other (re-indexed so stale == false) -> MUST be exact: false (unindexed_changes).
+    fs::write(
+        repo.join("src/b.rs"),
+        "use crate::c::target;\npub fn caller() -> i32 { target() }\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/a.rs"),
+        "pub fn target() -> i32 { 1 }\npub fn other() -> i32 { 99 }\n",
+    )
+    .unwrap();
+    run_bin(&["index", "."]);
+    let rebind_and_body = run_bin(&["impact", "--diff"]);
+    assert_eq!(rebind_and_body["meta"]["stale"], false, "{rebind_and_body}");
+    assert_eq!(
+        rebind_and_body["data"]["impact"]["exact"], false,
+        "{rebind_and_body}"
+    );
+    assert!(
+        reasons(&rebind_and_body["data"]).contains(&"unindexed_changes".to_owned()),
+        "{rebind_and_body}"
+    );
+
+    // Case C: Cargo.toml edit + body edit (restore b.rs to HEAD, re-index so stale == false) -> MUST be exact: false (manifest_changed).
+    run_git(&["checkout", "--", "src/b.rs"]);
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"f2_probe\"\nversion = \"0.2.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    run_bin(&["index", "."]);
+    let manifest_and_body = run_bin(&["impact", "--diff"]);
+    assert_eq!(
+        manifest_and_body["meta"]["stale"], false,
+        "{manifest_and_body}"
+    );
+    assert_eq!(
+        manifest_and_body["data"]["manifest_changed"], true,
+        "{manifest_and_body}"
+    );
+    assert_eq!(
+        manifest_and_body["data"]["impact"]["exact"], false,
+        "{manifest_and_body}"
+    );
+    assert!(
+        reasons(&manifest_and_body["data"]).contains(&"manifest_changed".to_owned()),
+        "{manifest_and_body}"
+    );
+}
+
+#[test]
+fn diff_impact_same_file_case_g_is_inexact_and_case_e_body_only_is_exact() {
+    let dir = TempDir::new("diff-f5-probe");
+    let data = TempDir::new("diff-f5-data");
+    let repo = dir.path();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"f5_probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/a.rs"), "pub fn target() -> i32 { 1 }\n").unwrap();
+    fs::write(repo.join("src/c.rs"), "pub fn target() -> i32 { 10 }\n").unwrap();
+    fs::write(
+        repo.join("src/b.rs"),
+        "use crate::a::target;\npub fn caller() -> i32 { target() }\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/main.rs"),
+        "mod a;\nmod b;\nmod c;\nfn main() { let _ = b::caller(); }\n",
+    )
+    .unwrap();
+
+    let run_git = |args: &[&str]| {
+        let st = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("HOME", data.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "T")
+            .env("GIT_AUTHOR_EMAIL", "t@e.com")
+            .env("GIT_COMMITTER_NAME", "T")
+            .env("GIT_COMMITTER_EMAIL", "t@e.com")
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?}");
+    };
+    run_git(&["init", "-q", "-b", "main"]);
+    run_git(&["add", "."]);
+    run_git(&["commit", "-q", "-m", "init"]);
+
+    let run_bin = |args: &[&str]| -> Value {
+        let out = Command::new(BINS[0])
+            .args(args)
+            .current_dir(repo)
+            .env("PHANTOM_FRACTAL_DATA_DIR", data.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "cmd {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+
+    run_bin(&["index", "."]);
+
+    // Case E: pure multi-line body edit inside b::caller (fresh index) -> exact: true.
+    fs::write(
+        repo.join("src/b.rs"),
+        "use crate::a::target;\npub fn caller() -> i32 {\n    let _x = 1;\n    target()\n}\n",
+    )
+    .unwrap();
+    run_bin(&["index", "."]);
+    let case_e = run_bin(&["impact", "--diff"]);
+    assert_eq!(case_e["meta"]["stale"], false, "{case_e}");
+    assert_eq!(case_e["data"]["impact"]["exact"], true, "{case_e}");
+
+    // Case G (exact QA probe): same-file `use` rebind + adding `pub fn extra() {}` in b.rs, fresh index -> exact: false.
+    fs::write(
+        repo.join("src/b.rs"),
+        "use crate::c::target;\npub fn caller() -> i32 { target() }\npub fn extra() {}\n",
+    )
+    .unwrap();
+    run_bin(&["index", "."]);
+    let case_g_add = run_bin(&["impact", "--diff"]);
+    assert_eq!(case_g_add["meta"]["stale"], false, "{case_g_add}");
+    assert_eq!(case_g_add["data"]["impact"]["exact"], false, "{case_g_add}");
+    assert!(
+        reasons(&case_g_add["data"]).contains(&"unindexed_changes".to_owned()),
+        "{case_g_add}"
+    );
+
+    // Case G2: same-file `use` rebind + body edit of existing `caller()` only (no added fn), fresh index -> exact: false.
+    fs::write(
+        repo.join("src/b.rs"),
+        "use crate::c::target;\npub fn caller() -> i32 {\n    target() + 1\n}\n",
+    )
+    .unwrap();
+    run_bin(&["index", "."]);
+    let case_g_edit = run_bin(&["impact", "--diff"]);
+    assert_eq!(case_g_edit["meta"]["stale"], false, "{case_g_edit}");
+    assert_eq!(
+        case_g_edit["data"]["impact"]["exact"], false,
+        "{case_g_edit}"
+    );
+    assert!(
+        reasons(&case_g_edit["data"]).contains(&"unindexed_changes".to_owned()),
+        "{case_g_edit}"
+    );
+}
+
+#[test]
+fn diff_impact_inline_mod_use_rebind_i0_and_i_are_inexact_while_body_only_is_exact() {
+    let dir = TempDir::new("diff-f6-probe");
+    let data = TempDir::new("diff-f6-data");
+    let repo = dir.path();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"f6_probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/a.rs"), "pub fn target() -> i32 { 1 }\n").unwrap();
+    fs::write(repo.join("src/c.rs"), "pub fn target() -> i32 { 10 }\n").unwrap();
+    fs::write(
+        repo.join("src/m.rs"),
+        "pub(crate) mod inner {\n    use crate::a::target;\n    pub fn caller_in() -> i32 { target() }\n    pub fn other_in() -> i32 { 2 }\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/main.rs"),
+        "mod a;\nmod c;\nmod m;\nfn main() { let _ = m::inner::caller_in(); }\n",
+    )
+    .unwrap();
+
+    let run_git = |args: &[&str]| {
+        let st = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("HOME", data.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "T")
+            .env("GIT_AUTHOR_EMAIL", "t@e.com")
+            .env("GIT_COMMITTER_NAME", "T")
+            .env("GIT_COMMITTER_EMAIL", "t@e.com")
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?}");
+    };
+    run_git(&["init", "-q", "-b", "main"]);
+    run_git(&["add", "."]);
+    run_git(&["commit", "-q", "-m", "init"]);
+
+    let run_bin = |args: &[&str]| -> Value {
+        let out = Command::new(BINS[0])
+            .args(args)
+            .current_dir(repo)
+            .env("PHANTOM_FRACTAL_DATA_DIR", data.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "cmd {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+
+    run_bin(&["index", "."]);
+
+    // Pure body + whitespace edit inside inline mod (fresh index) -> exact: true.
+    fs::write(
+        repo.join("src/m.rs"),
+        "pub(crate) mod inner {\n    use crate::a::target;\n\n    pub fn caller_in() -> i32 { target() }\n    pub fn other_in() -> i32 {\n        7\n    }\n}\n",
+    )
+    .unwrap();
+    run_bin(&["index", "."]);
+    let body_only = run_bin(&["impact", "--diff"]);
+    assert_eq!(body_only["meta"]["stale"], false, "{body_only}");
+    assert_eq!(body_only["data"]["impact"]["exact"], true, "{body_only}");
+
+    // Case I0: `use` rebind only inside inline mod (fresh index) -> exact: false.
+    fs::write(
+        repo.join("src/m.rs"),
+        "pub(crate) mod inner {\n    use crate::c::target;\n    pub fn caller_in() -> i32 { target() }\n    pub fn other_in() -> i32 { 2 }\n}\n",
+    )
+    .unwrap();
+    run_bin(&["index", "."]);
+    let i0 = run_bin(&["impact", "--diff"]);
+    assert_eq!(i0["meta"]["stale"], false, "{i0}");
+    assert_eq!(i0["data"]["impact"]["exact"], false, "{i0}");
+    assert!(
+        reasons(&i0["data"]).contains(&"unindexed_changes".to_owned()),
+        "{i0}"
+    );
+
+    // Case I: `use` rebind + body edit inside inline mod (fresh index) -> exact: false.
+    fs::write(
+        repo.join("src/m.rs"),
+        "pub(crate) mod inner {\n    use crate::c::target;\n    pub fn caller_in() -> i32 { target() }\n    pub fn other_in() -> i32 { 99 }\n}\n",
+    )
+    .unwrap();
+    run_bin(&["index", "."]);
+    let i_mixed = run_bin(&["impact", "--diff"]);
+    assert_eq!(i_mixed["meta"]["stale"], false, "{i_mixed}");
+    assert_eq!(i_mixed["data"]["impact"]["exact"], false, "{i_mixed}");
+    assert!(
+        reasons(&i_mixed["data"]).contains(&"unindexed_changes".to_owned()),
+        "{i_mixed}"
+    );
 }

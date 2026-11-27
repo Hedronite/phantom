@@ -802,3 +802,169 @@ fn replacing_or_removing_an_impl_owner_file_keeps_the_pass() {
     drop(store);
     drop(language);
 }
+
+#[test]
+fn multilang_kinds_refs_edges_links_and_unresolved_value_ref() {
+    use super::graph::{GoFixtureLang, go_item, go_ref};
+    use phantom_fractal_lang::{
+        Edge, Extract, FileModule, ItemKind, Link, LinkKind, LinkReason, Module, Node, Reason,
+        RefKind, Target, TargetKind,
+    };
+
+    let db = TempDb::new("w17kinds");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+
+    let src = "// pkg/kinds.go";
+    let go = GoFixtureLang::new(vec![(
+        src,
+        Extract {
+            items: vec![
+                go_item(ItemKind::Function, "Caller", 1),
+                go_item(ItemKind::Interface, "Reader", 2),
+                go_item(ItemKind::TypeAlias, "Alias", 3),
+                go_item(ItemKind::Const, "Max", 4),
+                go_item(ItemKind::Var, "Hook", 5),
+            ],
+            item_scopes: vec![String::new(); 5],
+            item_owners: vec![None; 5],
+            refs: vec![
+                go_ref(
+                    RefKind::ValueRef,
+                    "UnresolvedVal",
+                    "UnresolvedVal",
+                    6,
+                    "Caller",
+                    1,
+                ),
+                go_ref(RefKind::Embed, "Reader", "Reader", 7, "Caller", 1),
+                go_ref(RefKind::Call, "PkgFn", "PkgFn", 8, "Caller", 1),
+                go_ref(RefKind::MethodCall, "EmbM", "EmbM", 9, "Caller", 1),
+                go_ref(RefKind::MethodCall, "IfaceM", "IfaceM", 10, "Caller", 1),
+            ],
+            ..Extract::default()
+        },
+    )]);
+    store.put_source("pkg/kinds.go", src, 0, &go).expect("put");
+    store
+        .write_crate_graph_with_files(
+            &[crate::Package {
+                name: "example.com/k".to_owned(),
+                version: None,
+                manifest_path: "go.mod".to_owned(),
+            }],
+            &[Target {
+                id: 1,
+                package: "example.com/k".to_owned(),
+                name: "pkg".to_owned(),
+                kind: TargetKind::Lib,
+                root: String::new(),
+            }],
+            &[Module {
+                id: 1,
+                target: 1,
+                parent: None,
+                path: "example.com/k/pkg".to_owned(),
+                file: String::new(),
+                scope: String::new(),
+            }],
+            &[FileModule {
+                file: "pkg/kinds.go".to_owned(),
+                module: 1,
+            }],
+            &[],
+        )
+        .expect("graph");
+
+    let items = store.read_items("pkg/kinds.go").expect("items");
+    assert_eq!(
+        items.iter().map(|i| i.kind).collect::<Vec<_>>(),
+        vec![
+            ItemKind::Function,
+            ItemKind::Interface,
+            ItemKind::TypeAlias,
+            ItemKind::Const,
+            ItemKind::Var,
+        ]
+    );
+
+    let input = store.resolve_input().expect("resolve input");
+    assert_eq!(input.refs.len(), 5);
+    assert_eq!(input.refs[0].kind, RefKind::ValueRef);
+    assert_eq!(input.refs[1].kind, RefKind::Embed);
+    assert_eq!(
+        store.unresolved_named("UnresolvedVal").expect("value_ref"),
+        1
+    );
+    assert_eq!(store.unresolved_named("Reader").expect("embed excluded"), 0);
+    assert_eq!(store.value_refs_named("UnresolvedVal").expect("vref"), 1);
+    assert_eq!(store.value_refs_named("Reader").expect("not vref"), 0);
+
+    let caller = input.symbols[0].id;
+    let target_sym = input.symbols[1].id;
+    store
+        .replace_edges(&[
+            Edge {
+                ref_id: input.refs[2].id,
+                source: caller,
+                target: target_sym,
+                confidence: 0.9,
+                reason: Reason::PackageImport,
+            },
+            Edge {
+                ref_id: input.refs[3].id,
+                source: caller,
+                target: target_sym,
+                confidence: 0.85,
+                reason: Reason::EmbeddedMethod,
+            },
+            Edge {
+                ref_id: input.refs[4].id,
+                source: caller,
+                target: target_sym,
+                confidence: 0.7,
+                reason: Reason::InterfaceMethod,
+            },
+        ])
+        .expect("edges");
+
+    let callers = store.callers(target_sym).expect("callers");
+    assert_eq!(callers.len(), 3);
+    let mut got_reasons: Vec<&str> = callers.iter().map(|c| c.reason.as_str()).collect();
+    got_reasons.sort();
+    assert_eq!(
+        got_reasons,
+        vec![
+            Reason::EmbeddedMethod.as_str(),
+            Reason::InterfaceMethod.as_str(),
+            Reason::PackageImport.as_str(),
+        ]
+    );
+
+    store
+        .write_links(&[
+            Link {
+                kind: LinkKind::Embeds,
+                source: Node::Symbol(caller),
+                target: Node::Symbol(target_sym),
+                confidence: 1.0,
+                reason: LinkReason::EmbeddedType,
+                ref_id: None,
+            },
+            Link {
+                kind: LinkKind::Impl,
+                source: Node::Symbol(caller),
+                target: Node::Symbol(target_sym),
+                confidence: 0.8,
+                reason: LinkReason::StructuralImpl,
+                ref_id: None,
+            },
+        ])
+        .expect("links");
+
+    let embed_rows = store.edges_of_kind("embeds").expect("embeds");
+    assert_eq!(embed_rows.len(), 1);
+    assert_eq!(embed_rows[0].reason, "embedded-type");
+    let impl_rows = store.edges_of_kind("impl").expect("impl");
+    assert_eq!(impl_rows[0].reason, "structural-impl");
+}

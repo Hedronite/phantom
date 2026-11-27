@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 
 use phantom_fractal_lang::{
-    CallRef, Edge, Id, Link, Module, Reason, ResolveInput, Symbol, SymbolKind, Target, TargetKind,
-    UseBinding,
+    CallRef, Edge, FileModule, Id, Link, Module, Reason, ResolveInput, Symbol, SymbolKind, Target,
+    TargetKind, UseBinding, format_file_display, parse_qual_input,
 };
 
 use crate::StoreError;
@@ -145,46 +145,15 @@ pub(crate) fn is_file_path(segment: &str) -> bool {
     segment.contains('/') || segment.contains('.')
 }
 pub(crate) fn reason_from_text(reason: &str) -> Result<Reason, StoreError> {
-    match reason {
-        "path-exact" => Ok(Reason::PathExact),
-        "local" => Ok(Reason::Local),
-        "use-alias" => Ok(Reason::UseAlias),
-        "assoc" => Ok(Reason::Assoc),
-        "self-method" => Ok(Reason::SelfMethod),
-        "self-assoc" => Ok(Reason::SelfAssoc),
-        "crate-path" => Ok(Reason::CratePath),
-        "typed-method" => Ok(Reason::TypedMethod),
-        "unique-method" => Ok(Reason::UniqueMethod),
-        "use-glob" => Ok(Reason::UseGlob),
-        other => Err(StoreError::UnknownReason(other.to_owned())),
-    }
+    Reason::from_store_str(reason).ok_or_else(|| StoreError::UnknownReason(reason.to_owned()))
 }
 
 pub(crate) fn reason_to_text(reason: Reason) -> &'static str {
-    match reason {
-        Reason::PathExact => "path-exact",
-        Reason::Local => "local",
-        Reason::UseAlias => "use-alias",
-        Reason::Assoc => "assoc",
-        Reason::SelfMethod => "self-method",
-        Reason::SelfAssoc => "self-assoc",
-        Reason::CratePath => "crate-path",
-        Reason::TypedMethod => "typed-method",
-        Reason::UniqueMethod => "unique-method",
-        Reason::UseGlob => "use-glob",
-    }
+    reason.as_str()
 }
 
 pub(crate) fn symbol_kind_from_text(kind: &str) -> Result<SymbolKind, StoreError> {
-    match kind {
-        "function" => Ok(SymbolKind::Function),
-        "struct" => Ok(SymbolKind::Struct),
-        "enum" => Ok(SymbolKind::Enum),
-        "trait" => Ok(SymbolKind::Trait),
-        "module" => Ok(SymbolKind::Module),
-        "method" => Ok(SymbolKind::Method),
-        other => Err(StoreError::UnknownKind(other.to_owned())),
-    }
+    SymbolKind::from_store_str(kind).ok_or_else(|| StoreError::UnknownKind(kind.to_owned()))
 }
 
 pub(crate) fn target_kind_to_text(kind: TargetKind) -> &'static str {
@@ -222,108 +191,22 @@ impl crate::Store {
         modules: &[Module],
         test_modules: &[Id],
     ) -> Result<(), StoreError> {
+        self.write_crate_graph_with_files(packages, targets, modules, &[], test_modules)
+    }
+
+    /// Replaces `packages`, `targets`, and `modules` and applies explicit
+    /// `(file, module)` bindings for multi-file packages whose `modules.file_id`
+    /// may be `NULL` (SPEC-w17 G2a).
+    pub fn write_crate_graph_with_files(
+        &mut self,
+        packages: &[Package],
+        targets: &[Target],
+        modules: &[Module],
+        file_modules: &[FileModule],
+        test_modules: &[Id],
+    ) -> Result<(), StoreError> {
         let tx = self.conn.savepoint()?;
-        // Module ids are referenced from files and symbols with foreign
-        // keys; a replace first clears both, then deletes the tables.
-        tx.execute("UPDATE symbols SET module_id = NULL", [])?;
-        tx.execute("UPDATE files SET module_id = NULL", [])?;
-        tx.execute("UPDATE modules SET parent_id = NULL", [])?;
-        tx.execute("DELETE FROM modules", [])?;
-        tx.execute("DELETE FROM targets", [])?;
-        tx.execute("DELETE FROM packages", [])?;
-        let mut package_ids: HashMap<String, i64> = HashMap::new();
-        for package in packages {
-            tx.execute(
-                "INSERT INTO packages(name, version, manifest_path) VALUES (?1, ?2, ?3)",
-                (&package.name, &package.version, &package.manifest_path),
-            )?;
-            package_ids.insert(package.name.clone(), tx.last_insert_rowid());
-        }
-        let mut target_ids: HashMap<i64, i64> = HashMap::new();
-        for target in targets {
-            let package_id = *package_ids
-                .get(&target.package)
-                .ok_or_else(|| StoreError::UnknownPackage(target.package.clone()))?;
-            tx.execute(
-                "INSERT INTO targets(package_id, kind, name, root_file) VALUES (?1, ?2, ?3, ?4)",
-                (
-                    package_id,
-                    target_kind_to_text(target.kind),
-                    &target.name,
-                    &target.root,
-                ),
-            )?;
-            target_ids.insert(target.id, tx.last_insert_rowid());
-        }
-        let file_ids: HashMap<String, i64> = {
-            let mut statement = tx.prepare("SELECT path, id FROM files")?;
-            let queried = statement.query([]);
-            #[cfg(test)]
-            let queried = crate::fault::tick(queried);
-            let mut rows = queried?;
-            let mut map = HashMap::new();
-            while let Some(row) = rows.next()? {
-                map.insert(row.get::<_, String>(0)?, row.get::<_, i64>(1)?);
-            }
-            map
-        };
-        // First pass over the module ids so a parent never needs an id
-        // that is not yet written; input ids must be unique.
-        let mut module_ids: HashMap<i64, i64> = HashMap::new();
-        for module in modules {
-            module_ids.insert(module.id, (module_ids.len() as i64) + 1);
-        }
-        for module in modules {
-            let stored_id = *module_ids
-                .get(&module.id)
-                .ok_or_else(|| StoreError::UnknownTarget(module.target))?;
-            let target_id = *target_ids
-                .get(&module.target)
-                .ok_or_else(|| StoreError::UnknownTarget(module.target))?;
-            let parent_id = module
-                .parent
-                .and_then(|parent| module_ids.get(&parent).copied());
-            tx.execute(
-                "INSERT INTO modules(id, target_id, parent_id, path, file_id, scope)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                (
-                    stored_id,
-                    target_id,
-                    parent_id,
-                    &module.path,
-                    file_ids.get(&module.file).copied(),
-                    &module.scope,
-                ),
-            )?;
-        }
-        tx.execute(
-            "UPDATE files SET module_id = (
-                 SELECT m.id FROM modules m
-                 WHERE m.file_id = files.id AND m.scope = ''
-                 ORDER BY m.id LIMIT 1
-             )",
-            [],
-        )?;
-        tx.execute(
-            "UPDATE symbols SET module_id = (
-                 SELECT m.id FROM modules m
-                 WHERE m.file_id = symbols.file_id AND m.scope = symbols.scope
-                 ORDER BY m.id LIMIT 1
-             )",
-            [],
-        )?;
-        let tested: Vec<i64> = modules
-            .iter()
-            .filter(|module| test_modules.contains(&module.id))
-            .filter_map(|module| module_ids.get(&module.id).copied())
-            .collect();
-        // Bind one update per test-module row: no id list splicing.
-        for stored_id in tested {
-            tx.execute(
-                "UPDATE symbols SET is_test = 1 WHERE module_id = ?1",
-                [stored_id],
-            )?;
-        }
+        populate_crate_graph(&tx, packages, targets, modules, file_modules, test_modules)?;
         tx.commit()?;
         Ok(())
     }
@@ -355,7 +238,7 @@ impl crate::Store {
         {
             let mut statement = self.conn.prepare(
                 "SELECT m.id, m.target_id, m.parent_id, m.path, f.path, m.scope
-                 FROM modules m JOIN files f ON f.id = m.file_id
+                 FROM modules m LEFT JOIN files f ON f.id = m.file_id
                  ORDER BY m.id",
             )?;
             let queried = statement.query([]);
@@ -368,7 +251,7 @@ impl crate::Store {
                     target: row.get(1)?,
                     parent: row.get(2)?,
                     path: row.get(3)?,
-                    file: row.get(4)?,
+                    file: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                     scope: row.get(5)?,
                 });
             }
@@ -404,8 +287,11 @@ impl crate::Store {
         {
             let mut statement = self.conn.prepare(
                 "SELECT r.text, r.alias, r.glob, r.scope, f.path,
-                        (SELECT m.id FROM modules m WHERE m.file_id = f.id AND m.scope = ''
-                         ORDER BY m.id LIMIT 1),
+                        COALESCE(
+                            f.module_id,
+                            (SELECT m.id FROM modules m WHERE m.file_id = f.id AND m.scope = ''
+                             ORDER BY m.id LIMIT 1)
+                        ),
                         r.id
                  FROM refs r JOIN files f ON f.id = r.file_id
                  WHERE r.kind = 'use' ORDER BY r.id",
@@ -430,11 +316,15 @@ impl crate::Store {
         {
             let mut statement = self.conn.prepare(
                 "SELECT r.id, r.from_symbol,
-                        (SELECT m.id FROM modules m WHERE m.file_id = r.file_id AND m.scope = ''
-                         ORDER BY m.id LIMIT 1),
+                        COALESCE(
+                            f.module_id,
+                            (SELECT m.id FROM modules m WHERE m.file_id = r.file_id AND m.scope = ''
+                             ORDER BY m.id LIMIT 1)
+                        ),
                         r.scope, f.path, r.kind, r.text, r.receiver_hint, r.receiver, r.shadowed
                  FROM refs r JOIN files f ON f.id = r.file_id
-                 WHERE r.kind IN ('call', 'method_call', 'macro', 'macro_arg') ORDER BY r.id",
+                 WHERE r.kind IN ('call', 'method_call', 'macro', 'macro_arg', 'embed', 'value_ref')
+                 ORDER BY r.id",
             )?;
             let queried = statement.query([]);
             #[cfg(test)]
@@ -504,7 +394,10 @@ impl crate::Store {
     /// call-edge read keeps its rows and filters.
     pub fn write_links(&mut self, links: &[Link]) -> Result<(), StoreError> {
         let tx = self.conn.savepoint()?;
-        tx.execute("DELETE FROM edges WHERE kind IN ('import', 'impl')", [])?;
+        tx.execute(
+            "DELETE FROM edges WHERE kind IN ('import', 'impl', 'embeds')",
+            [],
+        )?;
         for link in links {
             tx.execute(
                 "INSERT INTO edges(
@@ -567,10 +460,19 @@ impl crate::Store {
         )
     }
 
-    /// The stored `.rs` skip count, or nothing when it was never stored
-    /// or is not decimal text.
+    /// The stored `.rs` skip count (compatibility alias for [`Self::source_skipped`]).
     pub fn rs_skipped(&self) -> Result<Option<u64>, StoreError> {
-        Ok(crate::schema::meta_get(&self.conn, "rs_skipped")?.and_then(|value| value.parse().ok()))
+        self.source_skipped()
+    }
+
+    /// The stored skipped-source count, or nothing when it was never stored
+    /// or is not decimal text.
+    pub fn source_skipped(&self) -> Result<Option<u64>, StoreError> {
+        if let Some(value) = crate::schema::meta_get(&self.conn, "rs_skipped")? {
+            return Ok(value.parse().ok());
+        }
+        Ok(crate::schema::meta_get(&self.conn, "source_skipped")?
+            .and_then(|value| value.parse().ok()))
     }
 
     /// Writes both meta keys in one transaction — the fingerprint as 64
@@ -578,10 +480,10 @@ impl crate::Store {
     pub fn set_workspace_fingerprint(
         &mut self,
         fingerprint: &[u8; 32],
-        rs_skipped: u64,
+        source_skipped: u64,
     ) -> Result<(), StoreError> {
         let hex = hex_lower(fingerprint);
-        let skipped = rs_skipped.to_string();
+        let skipped = source_skipped.to_string();
         let tx = self.conn.savepoint()?;
         for (key, value) in [
             ("workspace_fingerprint", hex.as_str()),
@@ -757,10 +659,23 @@ impl crate::Store {
     /// The spellings the base answers: the bare name, the in-file
     /// qualified name, and the file module path joined to it, `crate::`
     /// optional.
+    /// Renders `<file>::<qual>` display for `hit` keyed on its file's language.
+    pub fn format_symbol_display(&self, hit: &SymbolMatch) -> Result<String, StoreError> {
+        let lang: Option<String> = self
+            .conn
+            .query_row("SELECT lang FROM files WHERE path = ?1", [&hit.file], |r| {
+                r.get(0)
+            })
+            .ok();
+        let lang = lang.as_deref().unwrap_or("rust");
+        Ok(format_file_display(lang, &hit.file, &hit.qual_name))
+    }
+
     fn symbols_matching_exact(&self, query: &str) -> Result<Vec<SymbolMatch>, StoreError> {
         // The optional `crate::` prefix is stripped in Rust, not in SQL,
         // so one bound value covers both spellings.
         let qualified = query.strip_prefix("crate::").unwrap_or(query);
+        let go_query = parse_qual_input("go", query);
         let mut statement = self.conn.prepare(
             "SELECT s.id, s.kind, COALESCE(m.path, ''), s.qual_name, f.path, s.start_line
              FROM symbols s
@@ -768,19 +683,29 @@ impl crate::Store {
              LEFT JOIN modules m ON m.id = s.module_id
              WHERE s.name = ?1
                 OR s.qual_name = ?1
+                OR (f.lang = 'go' AND s.qual_name = ?3)
                 OR EXISTS (
                     SELECT 1 FROM modules fm
-                    WHERE fm.file_id = s.file_id AND fm.scope = ''
+                    WHERE (
+                        fm.id = COALESCE(s.module_id, f.module_id)
+                        OR (f.lang = 'rust' AND fm.file_id = s.file_id AND fm.scope = '')
+                    )
                       AND CASE
-                              WHEN fm.path = 'crate' THEN s.qual_name
-                              WHEN fm.path LIKE 'crate::%'
-                                    THEN substr(fm.path, 8) || '::' || s.qual_name
-                              ELSE fm.path || '::' || s.qual_name
-                          END = ?2
+                              WHEN f.lang = 'rust' THEN
+                                  CASE
+                                      WHEN (CASE WHEN fm.scope = '' THEN fm.path ELSE substr(fm.path, 1, length(fm.path) - length(fm.scope) - 2) END) = 'crate'
+                                          THEN s.qual_name
+                                      WHEN (CASE WHEN fm.scope = '' THEN fm.path ELSE substr(fm.path, 1, length(fm.path) - length(fm.scope) - 2) END) LIKE 'crate::%'
+                                          THEN substr(CASE WHEN fm.scope = '' THEN fm.path ELSE substr(fm.path, 1, length(fm.path) - length(fm.scope) - 2) END, 8) || '::' || s.qual_name
+                                      ELSE (CASE WHEN fm.scope = '' THEN fm.path ELSE substr(fm.path, 1, length(fm.path) - length(fm.scope) - 2) END) || '::' || s.qual_name
+                                  END
+                              WHEN fm.scope = '' THEN fm.path || '::' || s.qual_name
+                              ELSE substr(fm.path, 1, length(fm.path) - length(fm.scope) - 2) || '::' || s.qual_name
+                          END = CASE WHEN f.lang = 'rust' THEN ?2 ELSE ?3 END
                 )
              ORDER BY s.qual_name, f.path, s.id",
         )?;
-        let queried = statement.query([query, qualified]);
+        let queried = statement.query([query, qualified, go_query.as_str()]);
         #[cfg(test)]
         let queried = crate::fault::tick(queried);
         let mut rows = queried?;
@@ -805,12 +730,15 @@ impl crate::Store {
              WHERE s.owner IS NOT NULL AND s.name = ?2
                AND EXISTS (
                    SELECT 1 FROM modules gm
-                   WHERE gm.file_id = s.file_id AND gm.scope = ''
+                   WHERE (
+                       gm.id = COALESCE(s.module_id, f.module_id)
+                       OR (f.lang = 'rust' AND gm.file_id = s.file_id AND gm.scope = '')
+                   )
                      AND (
-                         gm.path = ?1
+                         (CASE WHEN gm.scope = '' THEN gm.path ELSE substr(gm.path, 1, length(gm.path) - length(gm.scope) - 2) END) = ?1
                          OR (
-                             length(gm.path) > length(?1) + 2
-                             AND substr(gm.path, -length(?1) - 2) = '::' || ?1
+                             length(CASE WHEN gm.scope = '' THEN gm.path ELSE substr(gm.path, 1, length(gm.path) - length(gm.scope) - 2) END) > length(?1) + 2
+                             AND substr(CASE WHEN gm.scope = '' THEN gm.path ELSE substr(gm.path, 1, length(gm.path) - length(gm.scope) - 2) END, -length(?1) - 2) = '::' || ?1
                          )
                      )
                )
@@ -839,15 +767,16 @@ impl crate::Store {
         if name.is_empty() || !is_file_path(file) {
             return Ok(Vec::new());
         }
+        let go_name = parse_qual_input("go", name);
         let mut statement = self.conn.prepare(
             "SELECT s.id, s.kind, COALESCE(m.path, ''), s.qual_name, f.path, s.start_line
              FROM symbols s
              JOIN files f ON f.id = s.file_id
              LEFT JOIN modules m ON m.id = s.module_id
-             WHERE f.path = ?1 AND s.qual_name = ?2
+             WHERE f.path = ?1 AND (s.qual_name = ?2 OR (f.lang = 'go' AND s.qual_name = ?3))
              ORDER BY s.qual_name, f.path, s.id",
         )?;
-        let queried = statement.query([file, name]);
+        let queried = statement.query([file, name, go_name.as_str()]);
         #[cfg(test)]
         let queried = crate::fault::tick(queried);
         let mut rows = queried?;
@@ -878,13 +807,14 @@ impl crate::Store {
         if let Some(pl) = crate::alias::parse_path_line(query) {
             return self.did_you_mean_at_line(pl.path, pl.line);
         }
-        let last = query.rsplit("::").next().unwrap_or(query);
+        let last = query.rsplit([':', '.']).next().unwrap_or(query);
         let mut statement = self.conn.prepare(
             "SELECT s.id, s.kind, COALESCE(m.path, ''), s.qual_name, f.path, s.start_line
              FROM symbols s
              JOIN files f ON f.id = s.file_id
              LEFT JOIN modules m ON m.id = s.module_id
              WHERE s.name = ?1
+               AND NOT (f.lang = 'go' AND s.name IN ('init', '_'))
              ORDER BY s.qual_name, f.path, s.id
              LIMIT 10",
         )?;
@@ -960,4 +890,208 @@ impl crate::Store {
             |row| row.get(0),
         )?)
     }
+}
+
+const CLEAR_CRATE_GRAPH_SQL: [&str; 6] = [
+    "UPDATE symbols SET module_id = NULL",
+    "UPDATE files SET module_id = NULL",
+    "UPDATE modules SET parent_id = NULL",
+    "DELETE FROM modules",
+    "DELETE FROM targets",
+    "DELETE FROM packages",
+];
+
+fn clear_crate_graph(tx: &rusqlite::Connection) -> Result<(), StoreError> {
+    for sql in CLEAR_CRATE_GRAPH_SQL {
+        tx.execute(sql, [])?;
+    }
+    Ok(())
+}
+
+fn insert_packages(
+    tx: &rusqlite::Connection,
+    packages: &[Package],
+) -> Result<HashMap<String, i64>, StoreError> {
+    let mut package_ids = HashMap::new();
+    for package in packages {
+        tx.execute(
+            "INSERT INTO packages(name, version, manifest_path) VALUES (?1, ?2, ?3)",
+            (&package.name, &package.version, &package.manifest_path),
+        )?;
+        package_ids.insert(package.name.clone(), tx.last_insert_rowid());
+    }
+    Ok(package_ids)
+}
+
+fn insert_targets(
+    tx: &rusqlite::Connection,
+    targets: &[Target],
+    package_ids: &HashMap<String, i64>,
+) -> Result<HashMap<i64, i64>, StoreError> {
+    let mut target_ids = HashMap::new();
+    for target in targets {
+        let package_id = *package_ids
+            .get(&target.package)
+            .ok_or_else(|| StoreError::UnknownPackage(target.package.clone()))?;
+        tx.execute(
+            "INSERT INTO targets(package_id, kind, name, root_file) VALUES (?1, ?2, ?3, ?4)",
+            (
+                package_id,
+                target_kind_to_text(target.kind),
+                &target.name,
+                &target.root,
+            ),
+        )?;
+        target_ids.insert(target.id, tx.last_insert_rowid());
+    }
+    Ok(target_ids)
+}
+
+fn file_ids_map(tx: &rusqlite::Connection) -> Result<HashMap<String, i64>, StoreError> {
+    let mut statement = tx.prepare("SELECT path, id FROM files")?;
+    let queried = statement.query([]);
+    #[cfg(test)]
+    let queried = crate::fault::tick(queried);
+    let mut rows = queried?;
+    let pairs = collect_rows(&mut rows, |row| Ok((row.get(0)?, row.get(1)?)))?;
+    Ok(pairs.into_iter().collect())
+}
+
+fn insert_modules(
+    tx: &rusqlite::Connection,
+    modules: &[Module],
+    target_ids: &HashMap<i64, i64>,
+    file_ids: &HashMap<String, i64>,
+) -> Result<HashMap<i64, i64>, StoreError> {
+    let mut module_ids: HashMap<i64, i64> = HashMap::new();
+    for module in modules {
+        module_ids.insert(module.id, (module_ids.len() as i64) + 1);
+    }
+    for module in modules {
+        let stored_id = module_ids[&module.id];
+        let target_id = *target_ids
+            .get(&module.target)
+            .ok_or_else(|| StoreError::UnknownTarget(module.target))?;
+        let parent_id = module
+            .parent
+            .and_then(|parent| module_ids.get(&parent).copied());
+        tx.execute(
+            "INSERT INTO modules(id, target_id, parent_id, path, file_id, scope)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            (
+                stored_id,
+                target_id,
+                parent_id,
+                &module.path,
+                file_ids.get(&module.file).copied(),
+                &module.scope,
+            ),
+        )?;
+    }
+    Ok(module_ids)
+}
+
+fn populate_crate_graph(
+    tx: &rusqlite::Connection,
+    packages: &[Package],
+    targets: &[Target],
+    modules: &[Module],
+    file_modules: &[FileModule],
+    test_modules: &[Id],
+) -> Result<(), StoreError> {
+    clear_crate_graph(tx)?;
+    let package_ids = insert_packages(tx, packages)?;
+    let target_ids = insert_targets(tx, targets, &package_ids)?;
+    populate_modules(tx, modules, file_modules, &target_ids, test_modules)
+}
+
+fn populate_modules(
+    tx: &rusqlite::Connection,
+    modules: &[Module],
+    file_modules: &[FileModule],
+    target_ids: &HashMap<i64, i64>,
+    test_modules: &[Id],
+) -> Result<(), StoreError> {
+    let file_ids = file_ids_map(tx)?;
+    let module_ids = insert_modules(tx, modules, target_ids, &file_ids)?;
+    link_file_modules(tx, file_modules, &file_ids, &module_ids)?;
+    mark_test_modules(tx, modules, test_modules, &module_ids)
+}
+
+fn link_file_modules(
+    tx: &rusqlite::Connection,
+    file_modules: &[FileModule],
+    file_ids: &HashMap<String, i64>,
+    module_ids: &HashMap<i64, i64>,
+) -> Result<(), StoreError> {
+    link_default_modules(tx)?;
+    for mapping in file_modules {
+        bind_one_file_module(tx, mapping, file_ids, module_ids)?;
+    }
+    Ok(())
+}
+
+fn link_default_modules(tx: &rusqlite::Connection) -> Result<(), StoreError> {
+    tx.execute(
+        "UPDATE files SET module_id = (
+             SELECT m.id FROM modules m
+             WHERE m.file_id = files.id AND m.scope = ''
+             ORDER BY m.id LIMIT 1
+         )",
+        [],
+    )?;
+    tx.execute(
+        "UPDATE symbols SET module_id = (
+             SELECT m.id FROM modules m
+             WHERE m.file_id = symbols.file_id AND m.scope = symbols.scope
+             ORDER BY m.id LIMIT 1
+         )",
+        [],
+    )?;
+    Ok(())
+}
+
+fn bind_one_file_module(
+    tx: &rusqlite::Connection,
+    mapping: &FileModule,
+    file_ids: &HashMap<String, i64>,
+    module_ids: &HashMap<i64, i64>,
+) -> Result<(), StoreError> {
+    let stored_module_id = *module_ids
+        .get(&mapping.module)
+        .ok_or(StoreError::UnknownTarget(mapping.module))?;
+    let Some(&file_id) = file_ids.get(&mapping.file) else {
+        return Ok(());
+    };
+    tx.execute(
+        "UPDATE files SET module_id = ?1 WHERE id = ?2",
+        (stored_module_id, file_id),
+    )?;
+    tx.execute(
+        "UPDATE symbols SET module_id = ?1
+         WHERE file_id = ?2
+           AND scope = COALESCE((SELECT scope FROM modules WHERE id = ?1), '')",
+        (stored_module_id, file_id),
+    )?;
+    Ok(())
+}
+
+fn mark_test_modules(
+    tx: &rusqlite::Connection,
+    modules: &[Module],
+    test_modules: &[Id],
+    module_ids: &HashMap<i64, i64>,
+) -> Result<(), StoreError> {
+    let tested: Vec<i64> = modules
+        .iter()
+        .filter(|module| test_modules.contains(&module.id))
+        .filter_map(|module| module_ids.get(&module.id).copied())
+        .collect();
+    for stored_id in tested {
+        tx.execute(
+            "UPDATE symbols SET is_test = 1 WHERE module_id = ?1",
+            [stored_id],
+        )?;
+    }
+    Ok(())
 }

@@ -11,6 +11,8 @@
 
 use std::collections::BTreeSet;
 
+use phantom_fractal_lang::parse_qual_input;
+
 use crate::StoreError;
 use crate::fetch::collect_rows;
 use crate::graph::{SymbolMatch, is_file_path, symbol_match_row};
@@ -61,6 +63,7 @@ pub struct AliasRewrite {
 enum ScopeFilter {
     Package(i64),
     Target(i64),
+    Module(i64),
 }
 
 struct StoredTarget {
@@ -69,6 +72,9 @@ struct StoredTarget {
     package_name: String,
     target_name: String,
     kind: String,
+    lang: String,
+    module_id: Option<i64>,
+    module_path: String,
 }
 
 /// Parses an exact 1-based `path:line` query (`src/foo.rs:42` or `./src/foo.rs:42`).
@@ -111,7 +117,11 @@ fn resolve_alias_targets(
     targets: &[StoredTarget],
     query: &str,
 ) -> Vec<(ScopeFilter, AliasRewrite)> {
-    rust_crate_aliases(targets, query)
+    let rust = rust_crate_aliases(targets, query);
+    if !rust.is_empty() {
+        return rust;
+    }
+    go_package_aliases(targets, query)
 }
 
 fn rust_crate_aliases(targets: &[StoredTarget], query: &str) -> Vec<(ScopeFilter, AliasRewrite)> {
@@ -123,6 +133,73 @@ fn rust_crate_aliases(targets: &[StoredTarget], query: &str) -> Vec<(ScopeFilter
     let mut out = matching_package_scopes(targets, prefix, &norm, &rewritten);
     collect_target_scopes(targets, prefix, &norm, &rewritten, &mut out);
     out
+}
+
+fn go_package_aliases(targets: &[StoredTarget], query: &str) -> Vec<(ScopeFilter, AliasRewrite)> {
+    let prefix_matches: Vec<&StoredTarget> = targets
+        .iter()
+        .filter(|t| is_go_import_prefix(t, query))
+        .collect();
+    if let Some(best_len) = prefix_matches.iter().map(|t| t.module_path.len()).max() {
+        return prefix_matches
+            .into_iter()
+            .filter(|t| t.module_path.len() == best_len)
+            .filter_map(|t| go_rewrite(t, &t.module_path, &query[best_len + 1..]))
+            .collect();
+    }
+    go_short_package_aliases(targets, query)
+}
+
+fn is_go_import_prefix(target: &StoredTarget, query: &str) -> bool {
+    target.lang == "go"
+        && target.module_id.is_some()
+        && !target.module_path.is_empty()
+        && query
+            .strip_prefix(&target.module_path)
+            .is_some_and(|rest| rest.starts_with('.') && rest.len() > 1)
+}
+
+fn go_short_package_aliases(
+    targets: &[StoredTarget],
+    query: &str,
+) -> Vec<(ScopeFilter, AliasRewrite)> {
+    let Some((pkg, rest)) = query.split_once('.') else {
+        return Vec::new();
+    };
+    if rest.is_empty() {
+        return Vec::new();
+    }
+    targets
+        .iter()
+        .filter(|t| t.lang == "go" && t.module_id.is_some() && matches_go_short(t, pkg))
+        .filter_map(|t| go_rewrite(t, pkg, rest))
+        .collect()
+}
+
+fn matches_go_short(target: &StoredTarget, pkg: &str) -> bool {
+    !target.module_path.is_empty()
+        && (target.target_name == pkg
+            || target.module_path.rsplit('/').next() == Some(pkg)
+            || (pkg == "main" && target.kind == "bin"))
+}
+
+fn go_rewrite(
+    target: &StoredTarget,
+    prefix: &str,
+    rest: &str,
+) -> Option<(ScopeFilter, AliasRewrite)> {
+    let module_id = target.module_id?;
+    let qual = parse_qual_input("go", rest);
+    let rewritten = format!("{}::{qual}", target.module_path);
+    Some((
+        ScopeFilter::Module(module_id),
+        AliasRewrite {
+            prefix: prefix.to_owned(),
+            package: target.package_name.clone(),
+            target: target.target_name.clone(),
+            rewritten,
+        },
+    ))
 }
 
 fn split_crate_prefix(query: &str) -> Option<(&str, &str)> {
@@ -139,7 +216,10 @@ fn matching_package_scopes(
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
     for t in targets {
-        if normalize_crate_name(&t.package_name) == norm && seen.insert(t.package_id) {
+        if t.lang != "go"
+            && normalize_crate_name(&t.package_name) == norm
+            && seen.insert(t.package_id)
+        {
             out.push((
                 ScopeFilter::Package(t.package_id),
                 AliasRewrite {
@@ -161,9 +241,12 @@ fn collect_target_scopes(
     rewritten: &str,
     out: &mut Vec<(ScopeFilter, AliasRewrite)>,
 ) {
+    let mut seen = BTreeSet::new();
     for t in targets {
-        if normalize_crate_name(&t.package_name) != norm
+        if t.lang != "go"
+            && normalize_crate_name(&t.package_name) != norm
             && normalize_crate_name(&t.target_name) == norm
+            && seen.insert(t.target_id)
         {
             out.push((
                 ScopeFilter::Target(t.target_id),
@@ -178,19 +261,22 @@ fn collect_target_scopes(
     }
 }
 
-fn scope_ids(scope: ScopeFilter) -> (Option<i64>, Option<i64>) {
+fn scope_ids(scope: ScopeFilter) -> (Option<i64>, Option<i64>, Option<i64>) {
     match scope {
-        ScopeFilter::Package(pkg) => (Some(pkg), None),
-        ScopeFilter::Target(tgt) => (None, Some(tgt)),
+        ScopeFilter::Package(pkg) => (Some(pkg), None, None),
+        ScopeFilter::Target(tgt) => (None, Some(tgt), None),
+        ScopeFilter::Module(module_id) => (None, None, Some(module_id)),
     }
 }
 
 impl crate::Store {
     /// Stored workspace package and target names for alias resolution and diagnostics.
     pub fn package_aliases(&self) -> Result<Vec<PackageAlias>, StoreError> {
+        let mut seen = BTreeSet::new();
         Ok(self
             .stored_targets()?
             .into_iter()
+            .filter(|t| seen.insert(t.target_id))
             .map(|t| PackageAlias {
                 package: t.package_name,
                 target: t.target_name,
@@ -299,10 +385,18 @@ impl crate::Store {
 
     fn stored_targets(&self) -> Result<Vec<StoredTarget>, StoreError> {
         let mut statement = self.conn.prepare(
-            "SELECT t.id, p.id, p.name, t.name, t.kind
+            "SELECT t.id, p.id, p.name, t.name, t.kind,
+                    COALESCE(
+                        (SELECT f.lang FROM files f WHERE f.module_id = m.id LIMIT 1),
+                        (SELECT f.lang FROM files f WHERE f.id = m.file_id LIMIT 1),
+                        (SELECT f.lang FROM files f WHERE f.path = t.root_file LIMIT 1),
+                        'rust'
+                    ),
+                    m.id, COALESCE(m.path, '')
              FROM targets t
              JOIN packages p ON p.id = t.package_id
-             ORDER BY t.id",
+             LEFT JOIN modules m ON m.target_id = t.id AND m.scope = ''
+             ORDER BY t.id, m.id",
         )?;
         let queried = statement.query([]);
         #[cfg(test)]
@@ -315,6 +409,9 @@ impl crate::Store {
                 package_name: row.get(2)?,
                 target_name: row.get(3)?,
                 kind: row.get(4)?,
+                lang: row.get(5)?,
+                module_id: row.get(6)?,
+                module_path: row.get(7)?,
             })
         })
     }
@@ -325,7 +422,7 @@ impl crate::Store {
         rewritten: &str,
     ) -> Result<Vec<SymbolMatch>, StoreError> {
         let qualified = rewritten.strip_prefix("crate::").unwrap_or(rewritten);
-        let (pkg_id, tgt_id) = scope_ids(scope);
+        let (pkg_id, tgt_id, mod_id) = scope_ids(scope);
         let mut statement = self.conn.prepare(
             "SELECT s.id, s.kind, COALESCE(m.path, ''), s.qual_name, f.path, s.start_line
              FROM symbols s
@@ -334,18 +431,29 @@ impl crate::Store {
              WHERE EXISTS (
                  SELECT 1 FROM modules fm
                  JOIN targets t ON t.id = fm.target_id
-                 WHERE fm.file_id = s.file_id AND fm.scope = ''
-                   AND ((?2 IS NOT NULL AND t.package_id = ?2) OR (?3 IS NOT NULL AND t.id = ?3))
+                 WHERE (
+                     fm.id = COALESCE(s.module_id, f.module_id)
+                     OR (f.lang = 'rust' AND fm.file_id = s.file_id AND fm.scope = '')
+                 )
+                   AND ((?2 IS NOT NULL AND t.package_id = ?2)
+                        OR (?3 IS NOT NULL AND t.id = ?3)
+                        OR (?4 IS NOT NULL AND fm.id = ?4))
                    AND CASE
-                           WHEN fm.path = 'crate' THEN s.qual_name
-                           WHEN fm.path LIKE 'crate::%'
-                                 THEN substr(fm.path, 8) || '::' || s.qual_name
-                           ELSE fm.path || '::' || s.qual_name
-                       END = ?1
+                           WHEN f.lang = 'rust' THEN
+                               CASE
+                                   WHEN (CASE WHEN fm.scope = '' THEN fm.path ELSE substr(fm.path, 1, length(fm.path) - length(fm.scope) - 2) END) = 'crate'
+                                       THEN s.qual_name
+                                   WHEN (CASE WHEN fm.scope = '' THEN fm.path ELSE substr(fm.path, 1, length(fm.path) - length(fm.scope) - 2) END) LIKE 'crate::%'
+                                       THEN substr(CASE WHEN fm.scope = '' THEN fm.path ELSE substr(fm.path, 1, length(fm.path) - length(fm.scope) - 2) END, 8) || '::' || s.qual_name
+                                   ELSE (CASE WHEN fm.scope = '' THEN fm.path ELSE substr(fm.path, 1, length(fm.path) - length(fm.scope) - 2) END) || '::' || s.qual_name
+                               END = ?1
+                           WHEN fm.scope = '' THEN fm.path || '::' || s.qual_name = ?5
+                           ELSE substr(fm.path, 1, length(fm.path) - length(fm.scope) - 2) || '::' || s.qual_name = ?5
+                       END
              )
              ORDER BY s.qual_name, f.path, s.id",
         )?;
-        let queried = statement.query((qualified, pkg_id, tgt_id));
+        let queried = statement.query((qualified, pkg_id, tgt_id, mod_id, rewritten));
         #[cfg(test)]
         let queried = crate::fault::tick(queried);
         let mut rows = queried?;
@@ -363,7 +471,7 @@ impl crate::Store {
         let Some((module, name)) = qualified.rsplit_once("::") else {
             return Ok(Vec::new());
         };
-        let (pkg_id, tgt_id) = scope_ids(scope);
+        let (pkg_id, tgt_id, mod_id) = scope_ids(scope);
         let mut statement = self.conn.prepare(
             "SELECT s.id, s.kind, COALESCE(m.path, ''), s.qual_name, f.path, s.start_line
              FROM symbols s
@@ -373,19 +481,24 @@ impl crate::Store {
                AND EXISTS (
                    SELECT 1 FROM modules gm
                    JOIN targets t ON t.id = gm.target_id
-                   WHERE gm.file_id = s.file_id AND gm.scope = ''
-                     AND ((?3 IS NOT NULL AND t.package_id = ?3) OR (?4 IS NOT NULL AND t.id = ?4))
+                   WHERE (
+                       gm.id = COALESCE(s.module_id, f.module_id)
+                       OR (f.lang = 'rust' AND gm.file_id = s.file_id AND gm.scope = '')
+                   )
+                     AND ((?3 IS NOT NULL AND t.package_id = ?3)
+                          OR (?4 IS NOT NULL AND t.id = ?4)
+                          OR (?5 IS NOT NULL AND gm.id = ?5))
                      AND (
-                         gm.path = ?1
+                         (CASE WHEN gm.scope = '' THEN gm.path ELSE substr(gm.path, 1, length(gm.path) - length(gm.scope) - 2) END) = ?1
                          OR (
-                             length(gm.path) > length(?1) + 2
-                             AND substr(gm.path, -length(?1) - 2) = '::' || ?1
+                             length(CASE WHEN gm.scope = '' THEN gm.path ELSE substr(gm.path, 1, length(gm.path) - length(gm.scope) - 2) END) > length(?1) + 2
+                             AND substr(CASE WHEN gm.scope = '' THEN gm.path ELSE substr(gm.path, 1, length(gm.path) - length(gm.scope) - 2) END, -length(?1) - 2) = '::' || ?1
                          )
                      )
                )
              ORDER BY s.qual_name, f.path, s.id",
         )?;
-        let queried = statement.query((module, name, pkg_id, tgt_id));
+        let queried = statement.query((module, name, pkg_id, tgt_id, mod_id));
         #[cfg(test)]
         let queried = crate::fault::tick(queried);
         let mut rows = queried?;
@@ -402,4 +515,28 @@ fn sort_symbol_matches(matches: &mut [SymbolMatch]) {
             .then_with(|| a.file.cmp(&b.file))
             .then_with(|| a.id.cmp(&b.id))
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn go_short_alias_rejects_empty_member_after_dot() {
+        let targets = vec![StoredTarget {
+            target_id: 1,
+            package_id: 1,
+            package_name: "gopkg.in/yaml.v3".to_owned(),
+            target_name: "yaml".to_owned(),
+            kind: "lib".to_owned(),
+            lang: "go".to_owned(),
+            module_id: Some(1),
+            module_path: "gopkg.in/yaml.v3".to_owned(),
+        }];
+        assert!(resolve_alias_targets(&targets, "yaml.").is_empty());
+        assert!(resolve_alias_targets(&targets, "gopkg.in/yaml.v3.").is_empty());
+        assert!(resolve_alias_targets(&targets, "gopkg.in/yaml.v3/Decode").is_empty());
+        assert!(resolve_alias_targets(&targets, ".Decode").is_empty());
+        assert!(resolve_alias_targets(&targets, "a/b.Decode").is_empty());
+    }
 }

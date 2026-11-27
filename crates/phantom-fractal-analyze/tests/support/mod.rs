@@ -13,6 +13,9 @@ pub struct Graph {
     pub unresolved: HashMap<String, i64>,
     pub macro_args: HashMap<String, i64>,
     pub rs_skipped: Option<u64>,
+    pub value_refs: HashMap<String, i64>,
+    pub build_excluded: Option<u64>,
+    pub langs: HashMap<String, String>,
 }
 
 impl Graph {
@@ -24,6 +27,9 @@ impl Graph {
             unresolved: HashMap::new(),
             macro_args: HashMap::new(),
             rs_skipped: Some(0),
+            value_refs: HashMap::new(),
+            build_excluded: None,
+            langs: HashMap::new(),
         }
     }
 
@@ -105,6 +111,18 @@ impl ImpactSource for Graph {
     fn rs_skipped(&self) -> Result<Option<u64>, StoreError> {
         Ok(self.rs_skipped)
     }
+
+    fn file_lang(&self, path: &str) -> Result<Option<String>, StoreError> {
+        Ok(self.langs.get(path).cloned())
+    }
+
+    fn value_refs_named(&self, name: &str) -> Result<i64, StoreError> {
+        Ok(self.value_refs.get(name).copied().unwrap_or(0))
+    }
+
+    fn build_excluded_count(&self) -> Result<Option<u64>, StoreError> {
+        Ok(self.build_excluded)
+    }
 }
 
 /// `(depth, name, confidence)` for every reported non-test hit.
@@ -159,4 +177,11 @@ pub fn star(direct: i64, second: i64) -> Graph {
         g.call(id, 100, 1.0);
     }
     g
+}
+
+#[allow(dead_code)]
+impl Graph {
+    pub fn set_lang(&mut self, file: &str, lang: &str) {
+        self.langs.insert(file.to_owned(), lang.to_owned());
+    }
 }

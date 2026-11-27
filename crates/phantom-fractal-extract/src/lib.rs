@@ -14,6 +14,7 @@ mod fresh;
 pub mod graph;
 mod read;
 mod rebuild;
+pub mod registry;
 mod walk;
 
 use std::collections::HashSet;
@@ -25,13 +26,20 @@ use phantom_fractal_lang::{Edge, Reason, ResolveCounts};
 use phantom_fractal_lang_rust::RustLanguage;
 use phantom_fractal_store::{IndexState, Store, StoreError, SymbolMatch, parse_path_line};
 
-use fingerprint::{Unread, read_manifests, stamp};
+use fingerprint::{Unread, read_manifests_with, stamp};
 
-pub use diff::{ChangedSymbol, Diff, DiffError, FileOnly, diff, symbol_keys};
-pub use fresh::{Freshness, probe};
+pub use diff::{ChangedSymbol, Diff, DiffError, FileOnly, diff, diff_with, symbol_keys};
+pub use fresh::{Freshness, probe, probe_with};
+pub use phantom_fractal_lang as lang;
 pub use read::{Source, read_source};
-pub use rebuild::{stored_graph, stored_input, stored_links, stored_method_owners};
-pub use walk::{Candidate, MAX_FILE_BYTES, SkipReason, Skipped, Walk, is_secret, walk};
+pub use rebuild::{
+    stored_graph, stored_graph_with, stored_input, stored_links, stored_method_owners,
+};
+pub use registry::{
+    LanguageDriver, ManifestFile, PackageGraph, Registry, RustDriver, RustResolver,
+    SourceFileExtract, default_registry,
+};
+pub use walk::{Candidate, MAX_FILE_BYTES, SkipReason, Skipped, Walk, is_secret, walk, walk_with};
 
 /// Version of the extraction this walker writes, stored after each graph
 /// rebuild. Bump it when the stored rows for an unchanged file would differ:
@@ -112,7 +120,9 @@ impl ReasonCounts {
     pub fn of(edges: &[Edge]) -> Self {
         let mut counts = Self::default();
         for edge in edges {
-            *counts.slot(edge.reason) += 1;
+            if let Some(slot) = counts.slot(edge.reason) {
+                *slot += 1;
+            }
         }
         counts
     }
@@ -120,21 +130,22 @@ impl ReasonCounts {
     /// The count for `reason`.
     pub fn get(&self, reason: Reason) -> u64 {
         let mut copy = *self;
-        *copy.slot(reason)
+        copy.slot(reason).copied().unwrap_or(0)
     }
 
-    fn slot(&mut self, reason: Reason) -> &mut u64 {
+    fn slot(&mut self, reason: Reason) -> Option<&mut u64> {
         match reason {
-            Reason::PathExact => &mut self.path_exact,
-            Reason::Local => &mut self.local,
-            Reason::UseAlias => &mut self.use_alias,
-            Reason::Assoc => &mut self.assoc,
-            Reason::SelfMethod => &mut self.self_method,
-            Reason::SelfAssoc => &mut self.self_assoc,
-            Reason::CratePath => &mut self.crate_path,
-            Reason::TypedMethod => &mut self.typed_method,
-            Reason::UniqueMethod => &mut self.unique_method,
-            Reason::UseGlob => &mut self.use_glob,
+            Reason::PathExact => Some(&mut self.path_exact),
+            Reason::Local => Some(&mut self.local),
+            Reason::UseAlias => Some(&mut self.use_alias),
+            Reason::Assoc => Some(&mut self.assoc),
+            Reason::SelfMethod => Some(&mut self.self_method),
+            Reason::SelfAssoc => Some(&mut self.self_assoc),
+            Reason::CratePath => Some(&mut self.crate_path),
+            Reason::TypedMethod => Some(&mut self.typed_method),
+            Reason::UniqueMethod => Some(&mut self.unique_method),
+            Reason::UseGlob => Some(&mut self.use_glob),
+            Reason::PackageImport | Reason::EmbeddedMethod | Reason::InterfaceMethod => None,
         }
     }
 }
@@ -225,75 +236,126 @@ pub fn resolve_query(
 pub fn index(
     root: &Path,
     store: &mut Store,
-    language: &RustLanguage,
+    _language: &RustLanguage,
 ) -> Result<IndexReport, IndexError> {
-    let walk = walk(root)?;
+    let registry = default_registry().map_err(StoreError::Extract)?;
+    index_with(root, store, &registry)
+}
+
+/// Indexes every kept file claimed by any driver in `registry`.
+pub fn index_with(
+    root: &Path,
+    store: &mut Store,
+    registry: &Registry<'_>,
+) -> Result<IndexReport, IndexError> {
+    let walk = walk_with(root, registry)?;
     store.atomic_batch(|store| {
-        let walk = &walk;
         let reextract = store.extractor_version()? != Some(EXTRACTOR_VERSION);
         let mut report = IndexReport {
             skipped: walk.skipped.clone(),
             ..IndexReport::default()
         };
-        let mut kept: Vec<&Candidate> = Vec::new();
-        for file in walk.files.iter().filter(|file| is_rust(&file.path)) {
-            let (bytes, mtime_ns) = match read_source(&file.abs_path)? {
-                Source::Bytes { bytes, mtime_ns } => (bytes, mtime_ns),
-                Source::Skipped(reason) => {
-                    report.skipped.push(Skipped {
-                        path: file.path.clone(),
-                        reason,
-                    });
-                    continue;
-                }
-            };
-            let Ok(source) = String::from_utf8(bytes) else {
-                report.not_utf8.push(file.path.clone());
-                continue;
-            };
-            kept.push(file);
-            if !reextract && is_unchanged(store, &file.path, &source)? {
-                report.unchanged.push(file.path.clone());
-                continue;
-            }
-            store.put_source(&file.path, &source, mtime_ns, language)?;
-            report.written.push(file.path.clone());
-        }
-        let kept_paths: HashSet<&str> = kept.iter().map(|file| file.path.as_str()).collect();
-        for path in store.file_paths()? {
-            if !kept_paths.contains(path.as_str()) {
-                store.remove_file(&path)?;
-                report.removed.push(path);
-            }
-        }
-        // Every skipped `.rs` file, the walk's skips then the read's, then
-        // every one that is not UTF-8, each in walk order.
-        let unread: Vec<(&str, Unread)> = report
-            .skipped
-            .iter()
-            .filter(|skip| is_rust(&skip.path))
-            .map(|skip| (skip.path.as_str(), Unread::Skipped))
-            .chain(
-                report
-                    .not_utf8
-                    .iter()
-                    .map(|path| (path.as_str(), Unread::NotUtf8)),
-            )
-            .collect();
-        let manifests = read_manifests(walk)?;
+        let kept = index_sources(&walk, store, registry, reextract, &mut report)?;
+        remove_stale_files(store, &kept, &mut report)?;
+        let unread = unread_sources(&report, registry);
+        let manifests = read_manifests_with(&walk, registry)?;
         let stamp = stamp(&manifests, &unread);
         let stale = store.workspace_fingerprint()? != Some(stamp.fingerprint);
         if reextract || !report.written.is_empty() || !report.removed.is_empty() || stale {
-            report.graph = Some(rebuild::rebuild(
-                &manifests, &stamp, &kept, store, language,
+            report.graph = Some(rebuild::rebuild_with(
+                &manifests, &stamp, &kept, store, registry,
             )?);
         }
         Ok(report)
     })
 }
 
-fn is_rust(path: &str) -> bool {
-    Path::new(path).extension().is_some_and(|ext| ext == "rs")
+fn index_sources<'a>(
+    walk: &'a Walk,
+    store: &mut Store,
+    registry: &Registry<'_>,
+    reextract: bool,
+    report: &mut IndexReport,
+) -> Result<Vec<&'a Candidate>, IndexError> {
+    let mut kept = Vec::new();
+    for file in &walk.files {
+        if let Some(driver) = registry.language_for(&file.path) {
+            index_one_source(file, driver.language(), store, reextract, report, &mut kept)?;
+        }
+    }
+    Ok(kept)
+}
+
+fn index_one_source<'a>(
+    file: &'a Candidate,
+    language: &dyn phantom_fractal_lang::Language,
+    store: &mut Store,
+    reextract: bool,
+    report: &mut IndexReport,
+    kept: &mut Vec<&'a Candidate>,
+) -> Result<(), IndexError> {
+    let Some((source, mtime_ns)) = read_utf8_source(file, report)? else {
+        return Ok(());
+    };
+    kept.push(file);
+    if !reextract && is_unchanged(store, &file.path, &source)? {
+        report.unchanged.push(file.path.clone());
+        return Ok(());
+    }
+    store.put_source(&file.path, &source, mtime_ns, &DynLang(language))?;
+    report.written.push(file.path.clone());
+    Ok(())
+}
+
+fn read_utf8_source(
+    file: &Candidate,
+    report: &mut IndexReport,
+) -> Result<Option<(String, i64)>, IndexError> {
+    let (bytes, mtime_ns) = match read_source(&file.abs_path)? {
+        Source::Bytes { bytes, mtime_ns } => (bytes, mtime_ns),
+        Source::Skipped(reason) => {
+            report.skipped.push(Skipped {
+                path: file.path.clone(),
+                reason,
+            });
+            return Ok(None);
+        }
+    };
+    let Ok(source) = String::from_utf8(bytes) else {
+        report.not_utf8.push(file.path.clone());
+        return Ok(None);
+    };
+    Ok(Some((source, mtime_ns)))
+}
+
+fn remove_stale_files(
+    store: &mut Store,
+    kept: &[&Candidate],
+    report: &mut IndexReport,
+) -> Result<(), IndexError> {
+    let kept_paths: HashSet<&str> = kept.iter().map(|file| file.path.as_str()).collect();
+    for path in store.file_paths()? {
+        if !kept_paths.contains(path.as_str()) {
+            store.remove_file(&path)?;
+            report.removed.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn unread_sources<'a>(report: &'a IndexReport, registry: &Registry<'_>) -> Vec<(&'a str, Unread)> {
+    report
+        .skipped
+        .iter()
+        .filter(|skip| registry.is_supported(&skip.path))
+        .map(|skip| (skip.path.as_str(), Unread::Skipped))
+        .chain(
+            report
+                .not_utf8
+                .iter()
+                .map(|path| (path.as_str(), Unread::NotUtf8)),
+        )
+        .collect()
 }
 
 /// True when the store already holds `path` with the blake3 of `source`.
@@ -302,4 +364,98 @@ fn is_unchanged(store: &Store, path: &str, source: &str) -> Result<bool, IndexEr
     Ok(store
         .stored_blake3(path)?
         .is_some_and(|stored| stored.as_slice() == hash.as_bytes()))
+}
+
+struct DynLang<'a>(&'a dyn phantom_fractal_lang::Language);
+
+impl phantom_fractal_lang::Language for DynLang<'_> {
+    fn name(&self) -> &'static str {
+        self.0.name()
+    }
+
+    fn extensions(&self) -> &'static [&'static str] {
+        self.0.extensions()
+    }
+
+    fn extract(
+        &self,
+        source: &str,
+    ) -> Result<phantom_fractal_lang::Extract, phantom_fractal_lang::ExtractError> {
+        self.0.extract(source)
+    }
+
+    fn has_parse_errors(&self, source: &str) -> bool {
+        self.0.has_parse_errors(source)
+    }
+
+    fn qualifier_separator(&self) -> &'static str {
+        self.0.qualifier_separator()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use phantom_fractal_lang::{Language, ResolveInput, Resolver};
+    use phantom_fractal_lang_rust::RustLanguage;
+
+    use super::{DynLang, RustResolver};
+
+    #[test]
+    fn dyn_lang_and_rust_resolver_forward_trait_methods() {
+        let rust = RustLanguage::new().expect("rust");
+        let dyn_lang = DynLang(&rust);
+        assert_eq!(dyn_lang.name(), "rust");
+        assert_eq!(dyn_lang.extensions(), &["rs"]);
+        assert_eq!(dyn_lang.qualifier_separator(), "::");
+        assert!(!dyn_lang.has_parse_errors(
+            "pub fn ok() {}
+"
+        ));
+        assert_eq!(
+            dyn_lang
+                .extract(
+                    "pub fn a() { b(); }
+pub fn b() {}
+"
+                )
+                .unwrap()
+                .items
+                .len(),
+            2
+        );
+
+        struct CustomLang;
+        impl Language for CustomLang {
+            fn name(&self) -> &'static str {
+                "custom"
+            }
+            fn extensions(&self) -> &'static [&'static str] {
+                &["c"]
+            }
+            fn extract(
+                &self,
+                _source: &str,
+            ) -> Result<phantom_fractal_lang::Extract, phantom_fractal_lang::ExtractError>
+            {
+                Ok(Default::default())
+            }
+            fn has_parse_errors(&self, source: &str) -> bool {
+                source.contains("ERR")
+            }
+            fn qualifier_separator(&self) -> &'static str {
+                "."
+            }
+        }
+        let custom = CustomLang;
+        let dyn_custom = DynLang(&custom);
+        assert_eq!(dyn_custom.qualifier_separator(), ".");
+        assert!(dyn_custom.has_parse_errors("ERR"));
+        assert!(!dyn_custom.has_parse_errors("ok"));
+
+        let resolver = RustResolver;
+        assert_eq!(resolver.name(), "rust");
+        let (edges, counts) = resolver.resolve(&ResolveInput::default());
+        assert!(edges.is_empty());
+        assert_eq!(counts.edges, 0);
+    }
 }

@@ -540,3 +540,92 @@ fn a_target_beside_a_nested_manifest_is_pruned_and_one_elsewhere_is_not() {
     );
     assert!(found.files_only.is_empty(), "{:?}", found.files_only);
 }
+
+#[test]
+fn outside_span_changes_catches_same_file_use_and_impl_header_while_preserving_body_only() {
+    let repo = Repo::new();
+    // Case E: multi-line body edit inside a symbol shifts following line numbers, outside spans unchanged.
+    repo.write(
+        "src/a.rs",
+        &A.replace(
+            "pub fn helper() -> u32 {\n    1\n}",
+            "pub fn helper() -> u32 {\n    let x = 1;\n    let y = 2;\n    x + y\n}",
+        ),
+    );
+    let body_only = repo.diff(&Base::Head);
+    assert_eq!(body_only.changed.len(), 1);
+    assert!(body_only.files_only.is_empty());
+    assert_eq!(body_only.outside_span_changes, 0);
+
+    // Case G: same-file outside-span edit (`use` + new `fn extra()`).
+    repo.write(
+        "src/b.rs",
+        &format!("use crate::a::helper;\n{B}\npub fn extra() {{}}\n"),
+    );
+    // Same-file `impl ... for` header change alongside method body edit.
+    repo.write(
+        "src/a.rs",
+        &A.replace(
+            "impl S {\n    pub fn m(&self) {}",
+            "pub trait T { fn m(&self); }\nimpl T for S {\n    pub fn m(&self) { other(); }",
+        ),
+    );
+    // Newly added file with `use` + `fn`: also flags outside_span_changes.
+    repo.write(
+        "src/new_mod.rs",
+        "use crate::a::helper;\npub fn added() { helper(); }\n",
+    );
+    let mixed = repo.diff(&Base::Head);
+    assert!(mixed.files_only.is_empty(), "{:?}", mixed.files_only);
+    assert_eq!(mixed.outside_span_changes, 3);
+}
+
+#[test]
+fn outside_span_changes_catches_inline_mod_use_rebind_and_keeps_body_only_zero() {
+    let repo = Repo::new();
+    repo.write(
+        "src/m.rs",
+        "pub(crate) mod inner {\n    use crate::a::helper;\n    pub fn caller_in() -> u32 { helper() }\n    pub fn other_in() -> u32 { 1 }\n}\n",
+    );
+    repo.commit(
+        "main",
+        T0 + 1,
+        &[
+            ("Cargo.toml", MANIFEST),
+            (".gitignore", "/gen/\n"),
+            ("README.md", "readme\n"),
+            ("src/lib.rs", "pub mod a;\npub mod b;\npub mod m;\n"),
+            ("src/a.rs", A),
+            ("src/b.rs", B),
+            (
+                "src/m.rs",
+                "pub(crate) mod inner {\n    use crate::a::helper;\n    pub fn caller_in() -> u32 { helper() }\n    pub fn other_in() -> u32 { 1 }\n}\n",
+            ),
+        ],
+    );
+    repo.git(&["reset", "-q", "--hard", "main"], None);
+
+    // Pure body edit + blank line inside inline mod -> outside_span_changes == 0.
+    repo.write(
+        "src/m.rs",
+        "pub(crate) mod inner {\n    use crate::a::helper;\n\n    pub fn caller_in() -> u32 { helper() }\n    pub fn other_in() -> u32 {\n        42\n    }\n}\n",
+    );
+    let body_only = repo.diff(&Base::Head);
+    assert_eq!(body_only.outside_span_changes, 0, "{body_only:?}");
+
+    // I0: `use` rebind only inside inline mod -> outside_span_changes == 1.
+    repo.write(
+        "src/m.rs",
+        "pub(crate) mod inner {\n    use crate::b::run as helper;\n    pub fn caller_in() -> u32 { helper() }\n    pub fn other_in() -> u32 { 1 }\n}\n",
+    );
+    let i0 = repo.diff(&Base::Head);
+    assert_eq!(i0.outside_span_changes, 1, "{i0:?}");
+
+    // I: `use` rebind + body edit of `other_in` inside inline mod -> outside_span_changes == 1.
+    repo.write(
+        "src/m.rs",
+        "pub(crate) mod inner {\n    use crate::b::run as helper;\n    pub fn caller_in() -> u32 { helper() }\n    pub fn other_in() -> u32 { 99 }\n}\n",
+    );
+    let i_mixed = repo.diff(&Base::Head);
+    assert_eq!(i_mixed.outside_span_changes, 1, "{i_mixed:?}");
+}

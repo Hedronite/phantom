@@ -13,8 +13,8 @@ use std::error::Error;
 use std::fmt;
 
 pub use resolve::{
-    CallRef, Dep, Edge, Graph, Id, Link, LinkKind, LinkReason, Module, Node, Reason, ResolveCounts,
-    ResolveInput, Symbol, SymbolKind, Target, TargetKind, UseBinding,
+    CallRef, Dep, Edge, FileModule, Graph, Id, Link, LinkKind, LinkReason, Module, Node, Reason,
+    ResolveCounts, ResolveInput, Symbol, SymbolKind, Target, TargetKind, UseBinding,
 };
 
 /// The most chars an [`Item::signature`] keeps before `…`.
@@ -31,12 +31,73 @@ pub trait Language {
     /// File extensions this language claims, without the leading dot.
     fn extensions(&self) -> &'static [&'static str];
 
+    /// Canonical qualifier separator rendered for user-facing names (`"::"` for
+    /// Rust, `"."` for Go).
+    fn qualifier_separator(&self) -> &'static str {
+        "::"
+    }
+
+    /// True when parsing `source` produced syntax errors (`has_error()`), so a
+    /// caller may treat the file as skipped for completeness reporting.
+    fn has_parse_errors(&self, _source: &str) -> bool {
+        false
+    }
+
     /// Extracts items, imports, call references, methods, and module
     /// declarations from one file's source text.
     ///
     /// Syntax errors do not fail extraction. Records outside the broken
     /// region still come back.
     fn extract(&self, source: &str) -> Result<Extract, ExtractError>;
+}
+
+/// Resolves calls, imports, and type/interface links for one language's
+/// extracted package/crate graph (SPEC-w17 G2a).
+pub trait Resolver {
+    /// Short lowercase language identifier matching [`Language::name`].
+    fn name(&self) -> &'static str;
+
+    /// Places call edges and resolution counts over `input`.
+    fn resolve(&self, input: &ResolveInput) -> (Vec<Edge>, ResolveCounts);
+
+    /// Places calls and auxiliary links (`import`, `impl`, `embeds`) over `input`.
+    fn resolve_graph(&self, input: &ResolveInput) -> Graph {
+        let (calls, counts) = self.resolve(input);
+        Graph {
+            calls,
+            counts,
+            links: Vec::new(),
+        }
+    }
+}
+
+/// Renders an internal `::`-delimited qualified name for `lang`.
+///
+/// Stored `qual_name` always uses `::`. Rust keeps `::`; Go renders `.`
+/// (`Type::Method` -> `Type.Method`).
+pub fn format_qual_name(lang: &str, qual: &str) -> String {
+    if lang == "go" {
+        qual.replace("::", ".")
+    } else {
+        qual.to_owned()
+    }
+}
+
+/// Renders a `<file>::<qual>` display string for `lang`.
+///
+/// The delimiter after `<file>` always stays `::` so `internal/x/f.go::Type.Method`
+/// remains unambiguous.
+pub fn format_file_display(lang: &str, file: &str, qual: &str) -> String {
+    format!("{file}::{}", format_qual_name(lang, qual))
+}
+
+/// Normalizes a user-supplied qualified segment for `lang` into internal `::` form.
+pub fn parse_qual_input(lang: &str, input: &str) -> String {
+    if lang == "go" {
+        input.replace('.', "::")
+    } else {
+        input.to_owned()
+    }
 }
 
 /// Everything extracted from one source file, in source order.
@@ -130,6 +191,38 @@ pub enum RefKind {
     /// and a `macro_rules!` body is not scanned. It is resolved by its
     /// shape, and counted only when placed.
     MacroArg,
+    /// A struct or interface embedding edge source (Go).
+    Embed,
+    /// A non-call reference to a function or method value (Go).
+    ValueRef,
+}
+
+impl RefKind {
+    const TEXTS: &[(Self, &str)] = &[
+        (Self::Call, "call"),
+        (Self::MethodCall, "method_call"),
+        (Self::Macro, "macro"),
+        (Self::MacroArg, "macro_arg"),
+        (Self::Embed, "embed"),
+        (Self::ValueRef, "value_ref"),
+    ];
+
+    /// The store's `refs.kind` text.
+    pub fn as_str(self) -> &'static str {
+        Self::TEXTS
+            .iter()
+            .find(|(kind, _)| *kind == self)
+            .expect("all RefKind variants covered")
+            .1
+    }
+
+    /// Parses a stored `refs.kind` text.
+    pub fn from_store_str(text: &str) -> Option<Self> {
+        Self::TEXTS
+            .iter()
+            .find(|(_, name)| *name == text)
+            .map(|(kind, _)| *kind)
+    }
 }
 
 /// The function a [`Reference`] sits in.
@@ -229,18 +322,40 @@ pub enum ItemKind {
     Enum,
     Trait,
     Module,
+    Interface,
+    TypeAlias,
+    Const,
+    Var,
 }
 
 impl ItemKind {
+    const TEXTS: &[(Self, &str)] = &[
+        (Self::Function, "function"),
+        (Self::Struct, "struct"),
+        (Self::Enum, "enum"),
+        (Self::Trait, "trait"),
+        (Self::Module, "module"),
+        (Self::Interface, "interface"),
+        (Self::TypeAlias, "type_alias"),
+        (Self::Const, "const"),
+        (Self::Var, "var"),
+    ];
+
     /// Stable lowercase name, for storage and display.
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Function => "function",
-            Self::Struct => "struct",
-            Self::Enum => "enum",
-            Self::Trait => "trait",
-            Self::Module => "module",
-        }
+        Self::TEXTS
+            .iter()
+            .find(|(kind, _)| *kind == self)
+            .expect("all ItemKind variants covered")
+            .1
+    }
+
+    /// Parses a stored `symbols.kind` item text.
+    pub fn from_store_str(text: &str) -> Option<Self> {
+        Self::TEXTS
+            .iter()
+            .find(|(_, name)| *name == text)
+            .map(|(kind, _)| *kind)
     }
 }
 
@@ -308,6 +423,10 @@ mod tests {
             ItemKind::Enum,
             ItemKind::Trait,
             ItemKind::Module,
+            ItemKind::Interface,
+            ItemKind::TypeAlias,
+            ItemKind::Const,
+            ItemKind::Var,
         ];
         let mut names: Vec<&str> = kinds.iter().map(|kind| kind.as_str()).collect();
         names.sort_unstable();
