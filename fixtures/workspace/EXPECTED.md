@@ -42,7 +42,12 @@ owner before a method's name. A target is its root file's stem: `lib` for
 - `app/main:crate::main -> core-lib/lib:crate::f crate-path`
 - `uses-ws/lib:crate::go -> core-lib/lib:crate::f crate-path`
 - `ws-inline/lib:crate::go -> core-lib/lib:crate::util::helper crate-path`
+- `renamed/lib:crate::go -> core-lib/lib:crate::f crate-path`
 - `shadow/lib:crate::go -> shadow/lib:crate::core_lib::f local`
+- `custom-pkg/main:crate::main -> custom-pkg/lib:crate::api crate-path`
+- `custom-pkg/test-smoke:crate::check -> custom-pkg/lib:crate::api crate-path`
+- `uses-custom/lib:crate::go -> custom-pkg/lib:crate::api crate-path`
+- `ws-renamed/lib:crate::go -> custom-pkg/lib:crate::api crate-path`
 
 ## Cases
 
@@ -67,17 +72,20 @@ owner before a method's name. A target is its root file's stem: `lib` for
 | `core_lib::missing()` | `app` `run` | The path enters `core-lib` but names nothing there: unresolved. |
 | `app::run()` | `app` lib `run` | A lib calling its own crate by name: external. |
 | `core_lib::f()` | `no-dep` `go` | No dependency on `core-lib`: external. |
-| `corelib::f()` | `renamed` `go` | A `package = "core-lib"` rename gives no dependency: external. |
-| `core_lib::f()` | `renamed` `go` | No dependency under that name: external. |
+| `core_lib::f()` | `renamed` `go` | Renamed as `corelib`, so `core_lib` is external. |
 | `core_lib::f()` | `dev-only` `go` | A `[dev-dependencies]` entry gives no dependency: external. |
+| `custom_pkg::api()` | `custom-pkg` `main` | Own lib is named `custom`, so `custom_pkg` is external. |
+| `custom_pkg::api()` | `uses-custom` `go` | Downstream uses `[lib] name` (`custom`), so `custom_pkg` is external. |
+| `custom::api()` | `ws-renamed` `go` | Root `[workspace.dependencies]` renames to `ws_alias`: external. |
+| `custom_pkg::api()` | `ws-renamed` `go` | Root `[workspace.dependencies]` renames to `ws_alias`: external. |
 
 ## Counts
 
-- edges: 14
+- edges: 19
 - unresolved: 1
-- external: 6
+- external: 9
 - no_source: 0
 - method_calls: 0
 - macros: 0
-- modules: 11
+- modules: 16
 - orphans: 0

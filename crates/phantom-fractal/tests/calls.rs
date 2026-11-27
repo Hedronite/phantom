@@ -552,7 +552,7 @@ fn crate_path_edges_cross_packages() {
         ),
         (
             "callees",
-            "main",
+            "app/src/main.rs::main",
             "crate::main",
             "app/src/main.rs",
             &[("crate::run", "crate-path"), ("crate::f", "crate-path")],
@@ -580,9 +580,10 @@ fn crate_path_edges_cross_packages() {
             "crate::f",
             "core-lib/src/lib.rs",
             &[
-                ("crate::run", "crate-path"),
-                ("crate::main", "crate-path"),
                 ("crate::go", "crate-path"),
+                ("crate::go", "crate-path"),
+                ("crate::main", "crate-path"),
+                ("crate::run", "crate-path"),
             ],
             None,
         ),
@@ -622,7 +623,12 @@ fn crate_path_edges_cross_packages() {
     packages.sort_unstable();
     assert_eq!(
         packages,
-        ["app/src/lib.rs", "app/src/main.rs", "uses-ws/src/lib.rs"]
+        [
+            "app/src/lib.rs",
+            "app/src/main.rs",
+            "renamed/src/lib.rs",
+            "uses-ws/src/lib.rs",
+        ]
     );
 }
 
@@ -940,4 +946,42 @@ fn module_qualified_names_name_one_symbol() {
     let (_, symbol) = named(&index, BINS[1], "ledger::open_ledger");
     assert_eq!(symbol["kind"], "function", "{symbol}");
     assert_eq!(symbol["line"], 7, "{symbol}");
+}
+
+#[test]
+fn custom_lib_named_core_stays_external_and_impact_stays_inexact() {
+    let tmp = TempDir::new("core-shadow-e2e");
+    let root = tmp.path();
+    fs::create_dir_all(root.join("my-core/src")).unwrap();
+    fs::create_dir_all(root.join("app/src")).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"3\"\nmembers = [\"my-core\", \"app\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("my-core/Cargo.toml"),
+        "[package]\nname = \"my-core\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[lib]\nname = \"core\"\n",
+    )
+    .unwrap();
+    fs::write(root.join("my-core/src/lib.rs"), "pub fn ping() {}\n").unwrap();
+    fs::write(
+        root.join("app/Cargo.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2024\"\n[dependencies]\nmy-core = { path = \"../my-core\" }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("app/src/lib.rs"),
+        "pub fn run() { core::ping(); }\n",
+    )
+    .unwrap();
+
+    let fx = Fixture::of(root.to_str().unwrap());
+    let (code, callers) = fx.calls(BINS[0], "callers", "my-core/src/lib.rs::ping");
+    assert_eq!(code, Some(0), "{callers}");
+    assert_eq!(callers["data"]["hits"], serde_json::json!([]), "{callers}");
+
+    let (code, impact) = fx.calls(BINS[0], "impact", "my-core/src/lib.rs::ping");
+    assert_eq!(code, Some(0), "{impact}");
+    assert_eq!(impact["data"]["exact"], false, "{impact}");
 }

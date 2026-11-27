@@ -140,6 +140,8 @@ pub struct Meta {
     pub rank_epoch: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<LimitNote>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_cause: Option<String>,
 }
 
 /// A limit above the command's cap: what was asked for, and the cap used
@@ -321,6 +323,7 @@ where
             index_head: Option<String>,
             rank_epoch: Option<u64>,
             limit: Option<LimitNote>,
+            stale_cause: Option<String>,
         }
 
         let raw = Raw::deserialize(deserializer)?;
@@ -331,6 +334,7 @@ where
                 index_head: meta.index_head,
                 rank_epoch: meta.rank_epoch?,
                 limit: meta.limit,
+                stale_cause: meta.stale_cause,
             })
         });
         let meta = if raw.ok { meta } else { None };
@@ -383,6 +387,7 @@ mod tests {
             index_head: None,
             rank_epoch: 3,
             limit: None,
+            stale_cause: None,
         };
         let success = Envelope::success_with_meta(String::from("row"), meta.clone());
         assert_eq!(success.meta(), Some(&meta));
@@ -411,6 +416,7 @@ mod tests {
                 asked: 200,
                 used: 100,
             }),
+            stale_cause: None,
         };
         let success = Envelope::success_with_meta(String::from("row"), meta);
         assert_eq!(round_trip(&success), success);
@@ -527,5 +533,21 @@ mod tests {
         assert_eq!(json["error"]["kind"], "ambiguous");
         assert_eq!(json["error"]["exit"], 6);
         assert_eq!(json["schema"], 1);
+    }
+
+    #[test]
+    fn stale_cause_serializes_when_present_and_omits_when_none() {
+        let meta = Meta {
+            stale: true,
+            head: Some("a".repeat(40)),
+            index_head: Some("a".repeat(40)),
+            rank_epoch: 1,
+            limit: None,
+            stale_cause: Some(String::from("local_dirty")),
+        };
+        let env = Envelope::success_with_meta(String::from("ok"), meta);
+        assert_eq!(round_trip(&env), env);
+        let json = serde_json::to_string(&env).expect("json");
+        assert!(json.contains(r#""stale_cause":"local_dirty""#), "{json}");
     }
 }

@@ -37,7 +37,7 @@ fn a_second_pass_writes_nothing_and_reads_the_same_report_back() {
     // are not counted as external.
     let again = stored_graph(&s.store, s.repo.path()).expect("stored graph");
     assert_eq!(again, first);
-    assert_eq!(again.edges_by_reason.crate_path, 10);
+    assert_eq!(again.edges_by_reason.crate_path, 15);
     assert_eq!(db_digest(&s), before);
 }
 
@@ -56,7 +56,7 @@ fn a_dependency_line_decides_the_edge() {
     let report = run(&mut s);
     assert!(report.written.is_empty(), "{:?}", report.written);
     let graph = graph(&report);
-    assert_eq!(graph.edges_by_reason.crate_path, 9);
+    assert_eq!(graph.edges_by_reason.crate_path, 14);
     assert!(
         !stored_edges(&s.store)
             .iter()

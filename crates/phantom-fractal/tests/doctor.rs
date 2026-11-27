@@ -208,7 +208,7 @@ fn a_new_install_with_no_data_directory_is_ok() {
         check(&data, "network")["detail"],
         "none: Phantom has no network code"
     );
-    assert_eq!(check(&data, "extractor")["detail"], "14");
+    assert_eq!(check(&data, "extractor")["detail"], "15");
     let grammar = check(&data, "grammar")["detail"].as_str().expect("grammar");
     assert!(grammar.starts_with("tree-sitter-rust 0."), "{grammar}");
     // An extra argument is usage.

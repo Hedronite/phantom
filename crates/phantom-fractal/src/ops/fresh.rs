@@ -21,23 +21,71 @@ pub(crate) fn meta(root: &Path, store: &Store) -> Result<Meta, Failure> {
     let rank_epoch = store.rank_epoch()?;
     Ok(match probe(root, store) {
         Ok(freshness) => of(&freshness, rank_epoch),
-        Err(_) => Meta {
+        Err(_) => with_locality_guard(Meta {
             stale: true,
             head: phantom_fractal_git::head(root).ok().flatten(),
             index_head: store.index_head()?,
             rank_epoch,
             limit: None,
-        },
+            stale_cause: None,
+        }),
     })
 }
 
 /// The `meta` a probe's answer gives.
 pub(crate) fn of(freshness: &Freshness, rank_epoch: u64) -> Meta {
-    Meta {
+    with_locality_guard(Meta {
         stale: freshness.stale(),
         head: freshness.head.clone(),
         index_head: freshness.index_head.clone(),
         rank_epoch,
         limit: None,
+        stale_cause: None,
+    })
+}
+
+fn is_valid_expected_head(head: &str) -> bool {
+    (head.len() == 40 || head.len() == 64)
+        && head
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn locality_cause(head: Option<&str>) -> Option<&'static str> {
+    if let Some(expected) = std::env::var_os("PHANTOM_EXPECTED_HEAD") {
+        let valid = expected.to_str().filter(|s| is_valid_expected_head(s));
+        if valid.is_none() || head != valid {
+            return Some("local_head");
+        }
+    }
+    if let Some(dirty) = std::env::var_os("PHANTOM_EXPECTED_DIRTY")
+        && dirty.to_str() != Some("0")
+    {
+        return Some("local_dirty");
+    }
+    None
+}
+
+fn with_locality_guard(mut meta: Meta) -> Meta {
+    if let Some(cause) = locality_cause(meta.head.as_deref()) {
+        meta.stale = true;
+        meta.stale_cause = Some(cause.to_owned());
+    }
+    meta
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validates_expected_head_lengths_and_lowercase_hex() {
+        assert!(is_valid_expected_head(&"a".repeat(40)));
+        assert!(is_valid_expected_head(&"0123456789abcdef".repeat(4)));
+        assert!(!is_valid_expected_head(&"a".repeat(39)));
+        assert!(!is_valid_expected_head(&"a".repeat(41)));
+        assert!(!is_valid_expected_head(&"a".repeat(63)));
+        assert!(!is_valid_expected_head(&"A".repeat(40)));
+        assert!(!is_valid_expected_head(&format!("{}g", "a".repeat(39))));
     }
 }
