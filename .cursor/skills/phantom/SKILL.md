@@ -73,10 +73,18 @@ says so with `meta.limit: {asked, used}` and `data.truncated: true`, even
 when nothing was left out. Keep `--limit` and `--budget` small (20 and 1500
 are enough to start): some harnesses cut output near 10 KB.
 
+One phantom command per shell call: never chain two with `;` or `&&`.
+Harnesses cut combined output near 10 KB, so a later reply is lost.
+
 Trust, per kind of question:
 
-- **Where, path and co-change** (`where`, `show`, `path`, `cochange`):
+- **Where and co-change** (`where`, `show`, `cochange`):
   answer from the envelope. Do not re-grep.
+- **Path** (`path`): a resolved route, not always the shortest real one.
+  Answer from the envelope when `data.found` is true and `data.confidence`
+  >= 0.5. When `found` is false or `confidence` is lower, confirm with one
+  grep. `confidence` is the product of `hops[].confidence`, so check the
+  weakest hop first.
 - **Callers and impact** (`callers`, `callees`, `impact`, `diff-impact`):
   they follow resolved calls only, so a missing caller is unknown, not
   absent, and a call made through a macro may be missing; read
