@@ -308,7 +308,7 @@ pub(crate) fn build_driver_filters(
         excluded_hashes: Vec::new(),
         has_filtered_driver: false,
     };
-    let manifest_files = rebuild::kept_manifest_files_pub(manifests);
+    let manifest_files = rebuild::kept_manifest_files(manifests);
     for driver in registry.drivers() {
         if driver.needs_source_filter() {
             apply_driver_filter(driver, &walk.files, &manifest_files, &mut state)?;
@@ -336,8 +336,10 @@ fn apply_driver_filter(
     if candidates.is_empty() && !has_driver_manifest(manifest_files, driver) {
         return Ok(());
     }
+    let Some(res) = driver.filter_sources(manifest_files, &read_filter_texts(&candidates)?) else {
+        return Ok(());
+    };
     state.has_filtered_driver = true;
-    let res = driver.filter_sources(manifest_files, &read_filter_texts(&candidates)?);
     state.build_excluded_count += res.build_excluded_count;
     append_terms(&mut state.build_excluded_terms, &res.build_excluded_terms);
     state.excluded_hashes.extend(res.excluded_hashes);
@@ -512,6 +514,19 @@ mod tests {
     use phantom_fractal_lang_rust::RustLanguage;
 
     use super::{DynLang, RustResolver};
+
+    #[test]
+    fn append_terms_joins_non_empty_lines_only() {
+        let mut dst = String::new();
+        super::append_terms(&mut dst, "");
+        assert_eq!(dst, "");
+        super::append_terms(&mut dst, "mod_a\tid1");
+        assert_eq!(dst, "mod_a\tid1");
+        super::append_terms(&mut dst, "");
+        assert_eq!(dst, "mod_a\tid1");
+        super::append_terms(&mut dst, "mod_b\tid2");
+        assert_eq!(dst, "mod_a\tid1\nmod_b\tid2");
+    }
 
     #[test]
     fn dyn_lang_and_rust_resolver_forward_trait_methods() {

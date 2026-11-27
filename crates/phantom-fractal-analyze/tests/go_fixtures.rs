@@ -162,3 +162,44 @@ fn go_basic_embed_iface_and_testpkg_fixtures_match_expected() {
     assert_fixture("go-embed-iface");
     assert_fixture("go-testpkg");
 }
+
+#[test]
+fn impact_source_defaults_and_store_impl_expose_target_and_build_excluded() {
+    use phantom_fractal_analyze::ImpactSource;
+    use phantom_fractal_store::{CallHit, StoreError, SymbolFacts};
+
+    struct MinimalSource;
+    impl ImpactSource for MinimalSource {
+        fn callers(&self, _id: i64) -> Result<Vec<CallHit>, StoreError> {
+            Ok(Vec::new())
+        }
+        fn facts(&self, _id: i64) -> Result<Option<SymbolFacts>, StoreError> {
+            Ok(None)
+        }
+        fn unresolved_named(&self, _name: &str) -> Result<i64, StoreError> {
+            Ok(0)
+        }
+        fn macro_args_named(&self, _name: &str) -> Result<i64, StoreError> {
+            Ok(0)
+        }
+        fn rs_skipped(&self) -> Result<Option<u64>, StoreError> {
+            Ok(Some(0))
+        }
+    }
+
+    let minimal = MinimalSource;
+    assert_eq!(minimal.target_name(1).unwrap(), None);
+    assert_eq!(minimal.build_excluded_count().unwrap(), None);
+
+    let (_tmp, store) = index_fixture("go-testpkg");
+    assert_eq!(ImpactSource::build_excluded_count(&store).unwrap(), Some(2));
+    let add = store.symbols_matching("Add").unwrap();
+    assert_eq!(add.len(), 1);
+    assert_eq!(
+        ImpactSource::target_name(&store, add[0].id)
+            .unwrap()
+            .as_deref(),
+        Some("calc")
+    );
+    assert_eq!(ImpactSource::target_name(&store, 999_999).unwrap(), None);
+}

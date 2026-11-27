@@ -974,7 +974,7 @@ fn manifest_match_score(manifest: &str, target_root: &str, want_go: bool) -> (us
     let is_go_manifest = manifest.ends_with("go.mod") || manifest.ends_with("go.work");
     let lang_match = usize::from(want_go == is_go_manifest);
     let dir = manifest.rsplit_once('/').map_or("", |(d, _)| d);
-    let prefix = if dir.is_empty() || target_root.starts_with(dir) {
+    let prefix = if target_root.starts_with(dir) {
         dir.len() + 1
     } else {
         0
@@ -1129,4 +1129,71 @@ fn mark_test_modules(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod resolve_pkg_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_package_id_prefers_matching_language_and_longest_dir() {
+        // Go targets match go.mod/go.work over longer Rust prefixes, and disambiguate nested dirs.
+        assert_eq!(manifest_match_score("go.work", "sub/main.go", true), (1, 1));
+        assert_eq!(
+            manifest_match_score("sub/Cargo.toml", "sub/main.go", true),
+            (0, 4)
+        );
+        assert_eq!(
+            manifest_match_score("sub/Cargo.toml", "sub/lib.rs", false),
+            (1, 4)
+        );
+        assert_eq!(manifest_match_score("a/go.mod", "a/main.go", true), (1, 2));
+        assert_eq!(
+            manifest_match_score("other/go.mod", "a/main.go", true),
+            (1, 0)
+        );
+
+        let mut pkg_ids: PackageIndex = HashMap::new();
+        pkg_ids.insert(
+            "app".to_owned(),
+            vec![
+                ("a/go.mod".to_owned(), 10),
+                ("other/go.mod".to_owned(), 20),
+                ("go.mod".to_owned(), 30),
+                ("sub/Cargo.toml".to_owned(), 40),
+            ],
+        );
+        // Winner is NOT entries[0] ("go.mod" -> 30): catches `entries.len() == 1` mutation.
+        assert_eq!(resolve_package_id(&pkg_ids, "app", "main.go").unwrap(), 30);
+        // Nested dir len=1 ("a/go.mod" -> score 2) beats root ("go.mod" -> score 1): catches `+ 1` -> `* 1`.
+        assert_eq!(
+            resolve_package_id(&pkg_ids, "app", "a/main.go").unwrap(),
+            10
+        );
+        // Non-matching Go root ("sub/Cargo.toml" has longer prefix 4, but Go wants go.mod -> 30).
+        assert_eq!(
+            resolve_package_id(&pkg_ids, "app", "sub/main.go").unwrap(),
+            30
+        );
+        // Rust target in sub/ prefers sub/Cargo.toml -> 40 over go.work/go.mod.
+        assert_eq!(
+            resolve_package_id(&pkg_ids, "app", "sub/lib.rs").unwrap(),
+            40
+        );
+
+        // go.work alone vs Cargo.toml picks go.work for Go and Cargo.toml for Rust.
+        let mut work_ids: PackageIndex = HashMap::new();
+        work_ids.insert(
+            "ws".to_owned(),
+            vec![("sub/Cargo.toml".to_owned(), 1), ("go.work".to_owned(), 2)],
+        );
+        assert_eq!(
+            resolve_package_id(&work_ids, "ws", "sub/main.go").unwrap(),
+            2
+        );
+        assert_eq!(
+            resolve_package_id(&work_ids, "ws", "sub/lib.rs").unwrap(),
+            1
+        );
+    }
 }

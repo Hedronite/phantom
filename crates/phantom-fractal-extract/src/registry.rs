@@ -75,8 +75,8 @@ pub trait LanguageDriver {
         &self,
         _manifests: &[ManifestFile],
         _sources: &[(String, String)],
-    ) -> DriverFilter {
-        DriverFilter::default()
+    ) -> Option<DriverFilter> {
+        None
     }
 
     fn build_graph_with_sources(
@@ -88,8 +88,8 @@ pub trait LanguageDriver {
         self.build_graph(manifests, files)
     }
 
-    fn method_owners(&self, _input: &ResolveInput) -> Vec<(Id, Id)> {
-        Vec::new()
+    fn method_owners(&self, _input: &ResolveInput) -> Option<Vec<(Id, Id)>> {
+        None
     }
 }
 
@@ -172,8 +172,8 @@ impl LanguageDriver for RustDriver<'_> {
         is_rust_target_pruned
     }
 
-    fn method_owners(&self, input: &ResolveInput) -> Vec<(Id, Id)> {
-        rust_method_owners(input)
+    fn method_owners(&self, input: &ResolveInput) -> Option<Vec<(Id, Id)>> {
+        Some(rust_method_owners(input))
     }
 
     fn build_graph(&self, manifests: &[ManifestFile], files: &[SourceFileExtract]) -> PackageGraph {
@@ -351,7 +351,7 @@ impl LanguageDriver for GoDriver {
         &self,
         manifests: &[ManifestFile],
         sources: &[(String, String)],
-    ) -> DriverFilter {
+    ) -> Option<DriverFilter> {
         let mut go_files = collect_go_manifest_inputs(manifests);
         for (path, content) in sources {
             go_files.push(GoSourceFile { path, content });
@@ -380,12 +380,12 @@ impl LanguageDriver for GoDriver {
                 excluded_terms.push(format!("{mod_path}\t{idents}"));
             }
         }
-        DriverFilter {
+        Some(DriverFilter {
             kept_paths: Some(kept_paths),
             build_excluded_count,
             build_excluded_terms: excluded_terms.join("\n"),
             excluded_hashes,
-        }
+        })
     }
 
     fn build_graph(&self, manifests: &[ManifestFile], files: &[SourceFileExtract]) -> PackageGraph {
@@ -411,7 +411,7 @@ impl LanguageDriver for GoDriver {
         convert_go_package_graph(&built, files)
     }
 
-    fn method_owners(&self, input: &ResolveInput) -> Vec<(Id, Id)> {
+    fn method_owners(&self, input: &ResolveInput) -> Option<Vec<(Id, Id)>> {
         let mut types_by_mod: HashMap<(Id, &str), Id> = HashMap::new();
         for sym in &input.symbols {
             if matches!(
@@ -422,15 +422,17 @@ impl LanguageDriver for GoDriver {
                 types_by_mod.insert((mid, sym.name.as_str()), sym.id);
             }
         }
-        input
-            .symbols
-            .iter()
-            .filter(|s| s.kind == SymbolKind::Method)
-            .filter_map(|m| {
-                let (mid, owner) = (m.module?, m.owner.as_deref()?);
-                types_by_mod.get(&(mid, owner)).map(|&oid| (m.id, oid))
-            })
-            .collect()
+        Some(
+            input
+                .symbols
+                .iter()
+                .filter(|s| s.kind == SymbolKind::Method)
+                .filter_map(|m| {
+                    let (mid, owner) = (m.module?, m.owner.as_deref()?);
+                    types_by_mod.get(&(mid, owner)).map(|&oid| (m.id, oid))
+                })
+                .collect(),
+        )
     }
 }
 
@@ -641,7 +643,7 @@ pub(crate) fn scope_input(
     }
 }
 
-fn has_ext(path: &str, exts: &[&str]) -> bool {
+pub(crate) fn has_ext(path: &str, exts: &[&str]) -> bool {
     Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
@@ -750,5 +752,203 @@ func Loose() {}
         assert_eq!(g2.packages[0].manifest_path, "sub/go.mod");
         assert_eq!(g2.packages[0].name, "go-root");
         assert!(!is_go_dir_pruned(Path::new("."), "vendor", 0));
+    }
+
+    #[test]
+    fn language_driver_defaults_and_go_helpers_cover_edge_cases() {
+        use phantom_fractal_lang_go::go_mod::GoModuleSpec;
+        use phantom_fractal_lang_rust::RustLanguage;
+
+        struct MinimalDriver(RustLanguage);
+        impl LanguageDriver for MinimalDriver {
+            fn language(&self) -> &dyn Language {
+                &self.0
+            }
+            fn resolver(&self) -> &dyn Resolver {
+                &RustResolver
+            }
+            fn manifest_names(&self) -> &'static [&'static str] {
+                &[]
+            }
+            fn prune_rule(&self) -> fn(&Path, &str, usize) -> bool {
+                |_, _, _| false
+            }
+            fn build_graph(
+                &self,
+                _manifests: &[ManifestFile],
+                _files: &[SourceFileExtract],
+            ) -> PackageGraph {
+                PackageGraph::default()
+            }
+        }
+        let minimal = MinimalDriver(RustLanguage::new().unwrap());
+        assert!(!minimal.needs_source_filter());
+        assert!(minimal.filter_sources(&[], &[]).is_none());
+        assert!(minimal.method_owners(&ResolveInput::default()).is_none());
+
+        let go = GoDriver::new();
+        assert_eq!(go.manifest_names(), &["go.mod", "go.work"]);
+
+        // Go directory prune rules inside go.mod, go.work, and non-Go dir.
+        let tmp = std::env::temp_dir().join(format!("phantom-go-prune-{}", std::process::id()));
+        let mod_dir = tmp.join("mod_tree");
+        let work_dir = tmp.join("work_tree");
+        let plain_dir = tmp.join("plain_tree");
+        std::fs::create_dir_all(mod_dir.join("sub")).unwrap();
+        std::fs::create_dir_all(&work_dir).unwrap();
+        std::fs::create_dir_all(&plain_dir).unwrap();
+        std::fs::write(mod_dir.join("go.mod"), "module example.com/m\ngo 1.26\n").unwrap();
+        std::fs::write(work_dir.join("go.work"), "go 1.26\n").unwrap();
+        assert!(is_go_dir_pruned(&mod_dir.join("sub"), "vendor", 2));
+        assert!(is_go_dir_pruned(&mod_dir, ".git", 1));
+        assert!(is_go_dir_pruned(&mod_dir, "_gen", 1));
+        assert!(!is_go_dir_pruned(&mod_dir, ".", 1));
+        assert!(!is_go_dir_pruned(&mod_dir, "..", 1));
+        assert!(!is_go_dir_pruned(&mod_dir, "testdata", 1));
+        assert!(!is_go_dir_pruned(&mod_dir, "pkg", 1));
+        assert!(is_go_dir_pruned(&work_dir, "vendor", 1));
+        assert!(!is_go_dir_pruned(&plain_dir, "vendor", 1));
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // enclosing_go_module_path and collect_go_identifiers.
+        let specs = vec![
+            GoModuleSpec {
+                dir: String::new(),
+                module_path: "example.com/root".to_owned(),
+                go_minor: 26,
+                in_workspace: true,
+            },
+            GoModuleSpec {
+                dir: "sub".to_owned(),
+                module_path: "example.com/sub".to_owned(),
+                go_minor: 26,
+                in_workspace: true,
+            },
+            GoModuleSpec {
+                dir: "ext".to_owned(),
+                module_path: "example.com/ext".to_owned(),
+                go_minor: 26,
+                in_workspace: false,
+            },
+        ];
+        assert_eq!(
+            enclosing_go_module_path("main.go", &specs),
+            "example.com/root"
+        );
+        assert_eq!(
+            enclosing_go_module_path("sub/a.go", &specs),
+            "example.com/sub"
+        );
+        assert_eq!(
+            enclosing_go_module_path("sub/deep/b.go", &specs),
+            "example.com/sub"
+        );
+        assert_eq!(
+            enclosing_go_module_path("sub2/c.go", &specs),
+            "example.com/root"
+        );
+        assert_eq!(enclosing_go_module_path("ext/x.go", &specs[2..]), "");
+        assert_eq!(
+            collect_go_identifiers("package p\nvar 9skip = _under + foo_2\n"),
+            "_under foo_2 p package var"
+        );
+
+        // filter_sources builds counts (>1), hashes, and terms for build-excluded files.
+        let man = vec![ManifestFile {
+            path: "go.mod".to_owned(),
+            text: "module example.com/test\ngo 1.26\n".to_owned(),
+        }];
+        let filtered = go.filter_sources(
+            &man,
+            &[
+                ("a.go".to_owned(), "package p\nfunc Keep() {}\n".to_owned()),
+                (
+                    "a_darwin.go".to_owned(),
+                    "package p\nfunc Dar() {}\n".to_owned(),
+                ),
+                (
+                    "tag.go".to_owned(),
+                    "//go:build custom\n\npackage p\nfunc TagFn() {}\n".to_owned(),
+                ),
+            ],
+        );
+        let filtered = filtered.expect("go filter");
+        assert_eq!(filtered.build_excluded_count, 2);
+        assert_eq!(filtered.excluded_hashes.len(), 2);
+        assert!(filtered.build_excluded_terms.contains("example.com/test\t"));
+        assert!(filtered.build_excluded_terms.contains("Dar"));
+        assert!(filtered.build_excluded_terms.contains("TagFn"));
+
+        // method_owners links Method symbols to matching Struct/Interface in same module.
+        let owner_input = ResolveInput {
+            symbols: vec![
+                Symbol {
+                    id: 10,
+                    kind: SymbolKind::Struct,
+                    name: "Srv".to_owned(),
+                    owner: None,
+                    owner_path: None,
+                    trait_name: None,
+                    scope: String::new(),
+                    module: Some(1),
+                    file: "a.go".to_owned(),
+                    signature: None,
+                },
+                Symbol {
+                    id: 11,
+                    kind: SymbolKind::Method,
+                    name: "Run".to_owned(),
+                    owner: Some("Srv".to_owned()),
+                    owner_path: None,
+                    trait_name: None,
+                    scope: String::new(),
+                    module: Some(1),
+                    file: "a.go".to_owned(),
+                    signature: None,
+                },
+                Symbol {
+                    id: 12,
+                    kind: SymbolKind::Function,
+                    name: "Top".to_owned(),
+                    owner: Some("Srv".to_owned()),
+                    owner_path: None,
+                    trait_name: None,
+                    scope: String::new(),
+                    module: Some(1),
+                    file: "a.go".to_owned(),
+                    signature: None,
+                },
+            ],
+            ..ResolveInput::default()
+        };
+        assert_eq!(go.method_owners(&owner_input), Some(vec![(11, 10)]));
+
+        // Multi-package convert_go_package_graph gives 1-based target/module ids and exact orphan count.
+        let g_multi = go.build_graph_with_sources(
+            &man,
+            &[
+                SourceFileExtract {
+                    path: "a.go".to_owned(),
+                    extract: phantom_fractal_lang::Extract::default(),
+                },
+                SourceFileExtract {
+                    path: "sub/b.go".to_owned(),
+                    extract: phantom_fractal_lang::Extract::default(),
+                },
+            ],
+            &HashMap::from([
+                ("a.go".to_owned(), "package p\nfunc F() {}\n".to_owned()),
+                (
+                    "sub/b.go".to_owned(),
+                    "package sub\nfunc G() {}\n".to_owned(),
+                ),
+            ]),
+        );
+        assert_eq!(g_multi.orphans, 0);
+        assert_eq!(g_multi.targets.len(), 2);
+        assert_eq!(g_multi.targets[0].id, 1);
+        assert_eq!(g_multi.targets[1].id, 2);
+        assert_eq!(g_multi.modules[0].id, 1);
+        assert_eq!(g_multi.modules[1].id, 2);
     }
 }

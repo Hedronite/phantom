@@ -13,7 +13,6 @@ use crate::fingerprint::{Contents, ManifestRead, Stamp, read_manifests};
 use crate::graph::Manifest;
 use crate::registry::{
     LanguageDriver, ManifestFile, PackageGraph, Registry, SourceFileExtract, is_named_file,
-    scope_input,
 };
 use crate::walk::{Candidate, walk};
 use crate::{EXTRACTOR_VERSION, GraphReport, IndexError, ReasonCounts};
@@ -35,10 +34,6 @@ struct ExtractedSources {
     raw_sources: HashMap<String, String>,
     own_tests: Vec<(String, Vec<bool>)>,
     parse_errors: u64,
-}
-
-pub(crate) fn kept_manifest_files_pub(manifests: &[ManifestRead]) -> Vec<ManifestFile> {
-    kept_manifest_files(manifests)
 }
 
 pub(crate) fn rebuild_with(
@@ -138,10 +133,7 @@ fn should_persist_excluded(
     store: &Store,
     prefilter: &crate::PrefilterState,
 ) -> Result<bool, IndexError> {
-    if prefilter.has_filtered_driver || prefilter.build_excluded_count > 0 {
-        return Ok(true);
-    }
-    Ok(store.build_excluded_count()?.is_some())
+    Ok(prefilter.has_filtered_driver || store.build_excluded_count()?.is_some())
 }
 
 fn extract_kept_files(
@@ -342,54 +334,32 @@ fn resolve_drivers(
     driver_targets: &[HashSet<Id>],
     input: &ResolveInput,
 ) -> ResolvedGraph {
-    let drivers = registry.drivers();
-    let active: Vec<usize> = drivers
-        .iter()
-        .enumerate()
-        .filter(|(idx, d)| {
-            !driver_targets[*idx].is_empty()
-                || input
-                    .symbols
-                    .iter()
-                    .any(|s| has_driver_ext(&s.file, d.language().extensions()))
-        })
-        .map(|(idx, _)| idx)
-        .collect();
-    if active.len() == 1 || drivers.len() == 1 {
-        let idx = active.first().copied().unwrap_or(0);
-        let g = drivers[idx].resolver().resolve_graph(input);
-        return ResolvedGraph {
-            calls: g.calls,
-            links: g.links,
-            counts: g.counts,
-            owners: drivers[idx].method_owners(input),
-        };
-    }
     let mut out = ResolvedGraph {
         calls: Vec::new(),
         links: Vec::new(),
         counts: ResolveCounts::default(),
         owners: Vec::new(),
     };
-    for (idx, driver) in drivers.iter().enumerate() {
-        if !active.contains(&idx) {
+    for (idx, driver) in registry.drivers().iter().enumerate() {
+        let exts = driver.language().extensions();
+        if driver_targets[idx].is_empty()
+            && !input
+                .symbols
+                .iter()
+                .any(|s| crate::registry::has_ext(&s.file, exts))
+        {
             continue;
         }
-        let scoped = scope_input(input, driver.language().extensions(), &driver_targets[idx]);
+        let scoped = crate::registry::scope_input(input, exts, &driver_targets[idx]);
         let g = driver.resolver().resolve_graph(&scoped);
         out.calls.extend(g.calls);
         out.links.extend(g.links);
         add_counts(&mut out.counts, g.counts);
-        out.owners.extend(driver.method_owners(&scoped));
+        if let Some(owners) = driver.method_owners(&scoped) {
+            out.owners.extend(owners);
+        }
     }
     out
-}
-
-fn has_driver_ext(path: &str, exts: &[&str]) -> bool {
-    Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| exts.contains(&e))
 }
 
 fn add_counts(total: &mut ResolveCounts, part: ResolveCounts) {
@@ -519,7 +489,7 @@ fn resolve_input(store: &Store, manifests: &[Manifest]) -> Result<ResolveInput, 
 }
 
 /// Kept manifest files as UTF-8 text, in walk order.
-fn kept_manifest_files(manifests: &[ManifestRead]) -> Vec<ManifestFile> {
+pub(crate) fn kept_manifest_files(manifests: &[ManifestRead]) -> Vec<ManifestFile> {
     manifests
         .iter()
         .filter_map(|manifest| match &manifest.contents {
