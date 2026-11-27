@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use phantom_fractal_lang::{Extract, Id, Link, ResolveCounts, ResolveInput};
-use phantom_fractal_lang_rust::{links, method_owners};
+use phantom_fractal_lang_rust::links;
 use phantom_fractal_store::{Store, StoreError};
 
 use crate::deps;
@@ -32,14 +32,20 @@ use crate::{EXTRACTOR_VERSION, GraphReport, IndexError, ReasonCounts};
 /// mark behind.
 struct ExtractedSources {
     by_driver: Vec<Vec<SourceFileExtract>>,
+    raw_sources: HashMap<String, String>,
     own_tests: Vec<(String, Vec<bool>)>,
     parse_errors: u64,
+}
+
+pub(crate) fn kept_manifest_files_pub(manifests: &[ManifestRead]) -> Vec<ManifestFile> {
+    kept_manifest_files(manifests)
 }
 
 pub(crate) fn rebuild_with(
     manifests: &[ManifestRead],
     stamp: &Stamp,
     kept: &[&Candidate],
+    prefilter: &crate::PrefilterState,
     store: &mut Store,
     registry: &Registry<'_>,
 ) -> Result<GraphReport, IndexError> {
@@ -48,20 +54,19 @@ pub(crate) fn rebuild_with(
     let (graph, driver_targets) = write_merged_graph(store, registry, &manifest_files, &extracted)?;
     let rust_manifests = cargo_manifests(&manifest_files);
     let input = resolve_input(store, &rust_manifests)?;
-    let (calls, all_links, counts) = resolve_drivers(registry, &driver_targets, &input);
+    let resolved = resolve_drivers(registry, &driver_targets, &input);
     persist_resolved(
         store,
-        &calls,
-        &all_links,
-        &input,
+        &resolved,
+        prefilter,
         stamp.fingerprint,
         stamp.source_skipped + extracted.parse_errors,
     )?;
     Ok(GraphReport {
         modules: graph.modules.len(),
         orphans: graph.orphans,
-        counts,
-        edges_by_reason: ReasonCounts::of(&calls),
+        counts: resolved.counts,
+        edges_by_reason: ReasonCounts::of(&resolved.calls),
     })
 }
 
@@ -74,8 +79,12 @@ fn write_merged_graph(
     for (path, flags) in &extracted.own_tests {
         store.reset_symbol_test_flags(path, flags)?;
     }
-    let (graph, driver_targets) =
-        merge_driver_graphs(registry, manifest_files, &extracted.by_driver);
+    let (graph, driver_targets) = merge_driver_graphs(
+        registry,
+        manifest_files,
+        &extracted.by_driver,
+        &extracted.raw_sources,
+    );
     store.write_crate_graph_with_files(
         &graph.packages,
         &graph.targets,
@@ -86,20 +95,53 @@ fn write_merged_graph(
     Ok((graph, driver_targets))
 }
 
+struct ResolvedGraph {
+    calls: Vec<phantom_fractal_lang::Edge>,
+    links: Vec<Link>,
+    counts: ResolveCounts,
+    owners: Vec<(Id, Id)>,
+}
+
 fn persist_resolved(
     store: &mut Store,
-    calls: &[phantom_fractal_lang::Edge],
-    all_links: &[Link],
-    input: &ResolveInput,
+    resolved: &ResolvedGraph,
+    prefilter: &crate::PrefilterState,
     fingerprint: [u8; 32],
     source_skipped: u64,
 ) -> Result<(), IndexError> {
-    store.replace_edges(calls)?;
-    store.write_links(all_links)?;
-    store.write_method_owners(&method_owners(input))?;
+    persist_graph_rows(store, resolved)?;
+    persist_build_excluded(store, prefilter)?;
     store.set_extractor_version(EXTRACTOR_VERSION)?;
     store.set_workspace_fingerprint(&fingerprint, source_skipped)?;
     Ok(())
+}
+
+fn persist_graph_rows(store: &mut Store, resolved: &ResolvedGraph) -> Result<(), IndexError> {
+    store.replace_edges(&resolved.calls)?;
+    store.write_links(&resolved.links)?;
+    store.write_method_owners(&resolved.owners)?;
+    Ok(())
+}
+
+fn persist_build_excluded(
+    store: &mut Store,
+    prefilter: &crate::PrefilterState,
+) -> Result<(), IndexError> {
+    if should_persist_excluded(store, prefilter)? {
+        store.set_build_excluded_count(prefilter.build_excluded_count)?;
+        store.set_build_excluded_terms(&prefilter.build_excluded_terms)?;
+    }
+    Ok(())
+}
+
+fn should_persist_excluded(
+    store: &Store,
+    prefilter: &crate::PrefilterState,
+) -> Result<bool, IndexError> {
+    if prefilter.has_filtered_driver || prefilter.build_excluded_count > 0 {
+        return Ok(true);
+    }
+    Ok(store.build_excluded_count()?.is_some())
 }
 
 fn extract_kept_files(
@@ -110,6 +152,7 @@ fn extract_kept_files(
     let drivers = registry.drivers();
     let mut out = ExtractedSources {
         by_driver: vec![Vec::new(); drivers.len()],
+        raw_sources: HashMap::with_capacity(kept.len()),
         own_tests: Vec::with_capacity(kept.len()),
         parse_errors: 0,
     };
@@ -130,7 +173,11 @@ fn extract_one_kept(
     };
     let lang = drivers[idx].language();
     let extract = match Contents::read(file)? {
-        Contents::Text(text) => parse_kept_text(&file.path, &text, lang, store, out)?,
+        Contents::Text(text) => {
+            let parsed = parse_kept_text(&file.path, &text, lang, store, out)?;
+            out.raw_sources.insert(file.path.clone(), text);
+            parsed
+        }
         Contents::Unread(_) => Extract::default(),
     };
     out.by_driver[idx].push(SourceFileExtract {
@@ -165,14 +212,42 @@ fn driver_index_for(drivers: &[&dyn LanguageDriver], path: &str) -> Option<usize
         .position(|driver| driver.language().extensions().contains(&ext))
 }
 
+fn driver_is_active(
+    driver: &dyn LanguageDriver,
+    manifests: &[ManifestFile],
+    files: &[SourceFileExtract],
+) -> bool {
+    !files.is_empty()
+        || manifests.iter().any(|m| {
+            Path::new(&m.path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| driver.manifest_names().contains(&n))
+        })
+}
+
 fn merge_driver_graphs(
     registry: &Registry<'_>,
     manifests: &[ManifestFile],
     by_driver: &[Vec<SourceFileExtract>],
+    raw_sources: &HashMap<String, String>,
 ) -> (PackageGraph, Vec<HashSet<Id>>) {
     let drivers = registry.drivers();
+    let active: Vec<usize> = drivers
+        .iter()
+        .enumerate()
+        .filter(|(idx, d)| driver_is_active(**d, manifests, &by_driver[*idx]))
+        .map(|(idx, _)| idx)
+        .collect();
+    if active.len() == 1 {
+        let idx = active[0];
+        let single = drivers[idx].build_graph_with_sources(manifests, &by_driver[idx], raw_sources);
+        let mut target_sets = vec![HashSet::new(); drivers.len()];
+        target_sets[idx] = single.targets.iter().map(|t| t.id).collect();
+        return (single, target_sets);
+    }
     if drivers.len() == 1 {
-        let single = drivers[0].build_graph(manifests, &by_driver[0]);
+        let single = drivers[0].build_graph_with_sources(manifests, &by_driver[0], raw_sources);
         let ids: HashSet<Id> = single.targets.iter().map(|t| t.id).collect();
         return (single, vec![ids]);
     }
@@ -181,17 +256,11 @@ fn merge_driver_graphs(
     let mut next_target: Id = 1;
     let mut next_module: Id = 1;
     for (idx, driver) in drivers.iter().enumerate() {
-        let has_manifests = manifests.iter().any(|m| {
-            Path::new(&m.path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| driver.manifest_names().contains(&n))
-        });
-        if by_driver[idx].is_empty() && !has_manifests {
+        if !active.contains(&idx) {
             target_sets.push(HashSet::new());
             continue;
         }
-        let part = driver.build_graph(manifests, &by_driver[idx]);
+        let part = driver.build_graph_with_sources(manifests, &by_driver[idx], raw_sources);
         let ids = append_package_graph(&mut merged, part, &mut next_target, &mut next_module);
         target_sets.push(ids);
     }
@@ -272,23 +341,55 @@ fn resolve_drivers(
     registry: &Registry<'_>,
     driver_targets: &[HashSet<Id>],
     input: &ResolveInput,
-) -> (Vec<phantom_fractal_lang::Edge>, Vec<Link>, ResolveCounts) {
+) -> ResolvedGraph {
     let drivers = registry.drivers();
-    if drivers.len() == 1 {
-        let g = drivers[0].resolver().resolve_graph(input);
-        return (g.calls, g.links, g.counts);
+    let active: Vec<usize> = drivers
+        .iter()
+        .enumerate()
+        .filter(|(idx, d)| {
+            !driver_targets[*idx].is_empty()
+                || input
+                    .symbols
+                    .iter()
+                    .any(|s| has_driver_ext(&s.file, d.language().extensions()))
+        })
+        .map(|(idx, _)| idx)
+        .collect();
+    if active.len() == 1 || drivers.len() == 1 {
+        let idx = active.first().copied().unwrap_or(0);
+        let g = drivers[idx].resolver().resolve_graph(input);
+        return ResolvedGraph {
+            calls: g.calls,
+            links: g.links,
+            counts: g.counts,
+            owners: drivers[idx].method_owners(input),
+        };
     }
-    let mut calls = Vec::new();
-    let mut links_out = Vec::new();
-    let mut counts = ResolveCounts::default();
+    let mut out = ResolvedGraph {
+        calls: Vec::new(),
+        links: Vec::new(),
+        counts: ResolveCounts::default(),
+        owners: Vec::new(),
+    };
     for (idx, driver) in drivers.iter().enumerate() {
+        if !active.contains(&idx) {
+            continue;
+        }
         let scoped = scope_input(input, driver.language().extensions(), &driver_targets[idx]);
         let g = driver.resolver().resolve_graph(&scoped);
-        calls.extend(g.calls);
-        links_out.extend(g.links);
-        add_counts(&mut counts, g.counts);
+        out.calls.extend(g.calls);
+        out.links.extend(g.links);
+        add_counts(&mut out.counts, g.counts);
+        out.owners.extend(driver.method_owners(&scoped));
     }
-    (calls, links_out, counts)
+    out
+}
+
+fn has_driver_ext(path: &str, exts: &[&str]) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| exts.contains(&e))
 }
 
 fn add_counts(total: &mut ResolveCounts, part: ResolveCounts) {
@@ -322,13 +423,13 @@ pub fn stored_graph_with(
         .iter()
         .map(|d| targets_for_driver(&input, d.language().extensions()))
         .collect();
-    let (edges, _, counts) = resolve_drivers(registry, &driver_targets, &input);
+    let resolved = resolve_drivers(registry, &driver_targets, &input);
     let orphans = count_orphans(store, &input)?;
     Ok(GraphReport {
         modules: input.modules.len(),
         orphans,
-        counts,
-        edges_by_reason: ReasonCounts::of(&edges),
+        counts: resolved.counts,
+        edges_by_reason: ReasonCounts::of(&resolved.calls),
     })
 }
 
@@ -361,8 +462,16 @@ fn count_orphans(store: &Store, _input: &ResolveInput) -> Result<usize, IndexErr
 /// into `store`, read without writing: the pairs [`rebuild`] passes to
 /// `write_method_owners`, from the same resolver input.
 pub fn stored_method_owners(store: &Store, root: &Path) -> Result<Vec<(Id, Id)>, IndexError> {
-    let manifests = kept_manifests(&read_manifests(&walk(root)?)?);
-    Ok(method_owners(&resolve_input(store, &manifests)?))
+    let registry = crate::default_registry().map_err(StoreError::Extract)?;
+    let walk = crate::walk::walk_with(root, &registry)?;
+    let manifests = kept_manifests(&crate::fingerprint::read_manifests_with(&walk, &registry)?);
+    let input = resolve_input(store, &manifests)?;
+    let driver_targets: Vec<HashSet<Id>> = registry
+        .drivers()
+        .iter()
+        .map(|d| targets_for_driver(&input, d.language().extensions()))
+        .collect();
+    Ok(resolve_drivers(&registry, &driver_targets, &input).owners)
 }
 
 /// The resolver input of the tree at `root` as last indexed into `store`,

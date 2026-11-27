@@ -1,14 +1,20 @@
 //! Language driver registry for multi-language extraction, walking,
 //! fingerprinting, diffing, and graph building (SPEC-w17 G2b).
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use phantom_fractal_lang::{
     Edge, Extract, ExtractError, FileModule, Graph, Id, Language, Module, ResolveCounts,
-    ResolveInput, Resolver, Target,
+    ResolveInput, Resolver, SymbolKind, Target, TargetKind,
 };
-use phantom_fractal_lang_rust::{RustLanguage, resolve, resolve_graph};
+use phantom_fractal_lang_go::go_mod::{
+    ExcludeReason, GoPackage, GoSourceFile, build_package_graph,
+};
+use phantom_fractal_lang_go::{GoLanguage, GoResolver};
+use phantom_fractal_lang_rust::{
+    RustLanguage, method_owners as rust_method_owners, resolve, resolve_graph,
+};
 use phantom_fractal_store::Package;
 
 use crate::graph::{self, Manifest, SourceFile};
@@ -39,6 +45,19 @@ pub struct PackageGraph {
     pub orphans: usize,
 }
 
+/// Source-filtering metadata produced before persisting file extracts.
+#[derive(Debug, Clone, Default)]
+pub struct DriverFilter {
+    /// If present, only walked paths in this set enter the store for this driver.
+    pub kept_paths: Option<HashSet<String>>,
+    /// Count of files excluded by language build constraints (for example Go build tags).
+    pub build_excluded_count: u64,
+    /// Encoded `<module_path>\t<ident1> <ident2>...` lines for build-excluded files.
+    pub build_excluded_terms: String,
+    /// Hashes of build-excluded files so build-tag edits trigger graph rebuilds.
+    pub excluded_hashes: Vec<(String, [u8; 32])>,
+}
+
 /// Pluggable language backend pairing extraction, call resolution, manifests,
 /// directory pruning, and package-graph construction.
 pub trait LanguageDriver {
@@ -47,6 +66,31 @@ pub trait LanguageDriver {
     fn manifest_names(&self) -> &'static [&'static str];
     fn prune_rule(&self) -> fn(&Path, &str, usize) -> bool;
     fn build_graph(&self, manifests: &[ManifestFile], files: &[SourceFileExtract]) -> PackageGraph;
+
+    fn needs_source_filter(&self) -> bool {
+        false
+    }
+
+    fn filter_sources(
+        &self,
+        _manifests: &[ManifestFile],
+        _sources: &[(String, String)],
+    ) -> DriverFilter {
+        DriverFilter::default()
+    }
+
+    fn build_graph_with_sources(
+        &self,
+        manifests: &[ManifestFile],
+        files: &[SourceFileExtract],
+        _sources: &HashMap<String, String>,
+    ) -> PackageGraph {
+        self.build_graph(manifests, files)
+    }
+
+    fn method_owners(&self, _input: &ResolveInput) -> Vec<(Id, Id)> {
+        Vec::new()
+    }
 }
 
 /// [`Resolver`] implementation backed by `phantom-fractal-lang-rust`.
@@ -126,6 +170,10 @@ impl LanguageDriver for RustDriver<'_> {
 
     fn prune_rule(&self) -> fn(&Path, &str, usize) -> bool {
         is_rust_target_pruned
+    }
+
+    fn method_owners(&self, input: &ResolveInput) -> Vec<(Id, Id)> {
+        rust_method_owners(input)
     }
 
     fn build_graph(&self, manifests: &[ManifestFile], files: &[SourceFileExtract]) -> PackageGraph {
@@ -236,9 +284,299 @@ impl<'a> Registry<'a> {
     }
 }
 
+/// Default Go [`LanguageDriver`] backed by `phantom-fractal-lang-go`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GoDriver {
+    lang: GoLanguage,
+    resolver: GoResolver,
+}
+
+impl GoDriver {
+    /// Creates a new Go language driver.
+    pub fn new() -> Self {
+        Self {
+            lang: GoLanguage::new(),
+            resolver: GoResolver::new(),
+        }
+    }
+}
+
+/// True when directory `name` should be skipped by Go walk rules inside a Go tree.
+/// Leaves `testdata` walked so `diff` catches unindexed edits in `testdata/`.
+pub(crate) fn is_go_dir_pruned(parent: &Path, name: &str, depth: usize) -> bool {
+    is_go_pruned_name(name) && has_go_manifest_ancestor(parent, depth)
+}
+
+fn is_go_pruned_name(name: &str) -> bool {
+    name == "vendor"
+        || ((name.starts_with('.') || name.starts_with('_')) && name != "." && name != "..")
+}
+
+fn has_go_manifest_ancestor(parent: &Path, depth: usize) -> bool {
+    let mut cur = Some(parent);
+    for _ in 0..depth {
+        let Some(dir) = cur else {
+            break;
+        };
+        if dir.join("go.mod").is_file() || dir.join("go.work").is_file() {
+            return true;
+        }
+        cur = dir.parent();
+    }
+    false
+}
+
+impl LanguageDriver for GoDriver {
+    fn language(&self) -> &dyn Language {
+        &self.lang
+    }
+
+    fn resolver(&self) -> &dyn Resolver {
+        &self.resolver
+    }
+
+    fn manifest_names(&self) -> &'static [&'static str] {
+        &["go.mod", "go.work"]
+    }
+
+    fn prune_rule(&self) -> fn(&Path, &str, usize) -> bool {
+        is_go_dir_pruned
+    }
+
+    fn needs_source_filter(&self) -> bool {
+        true
+    }
+
+    fn filter_sources(
+        &self,
+        manifests: &[ManifestFile],
+        sources: &[(String, String)],
+    ) -> DriverFilter {
+        let mut go_files = collect_go_manifest_inputs(manifests);
+        for (path, content) in sources {
+            go_files.push(GoSourceFile { path, content });
+        }
+        let pkg_graph = build_package_graph(&go_files);
+        let kept_paths: HashSet<String> = pkg_graph.file_to_package.keys().cloned().collect();
+        let src_map: HashMap<&str, &str> = sources
+            .iter()
+            .map(|(p, c)| (p.as_str(), c.as_str()))
+            .collect();
+        let mut excluded_terms = Vec::new();
+        let mut excluded_hashes = Vec::new();
+        let mut build_excluded_count = 0u64;
+        for ex in &pkg_graph.excluded {
+            if ex.reason != ExcludeReason::BuildConstraint {
+                continue;
+            }
+            build_excluded_count += 1;
+            if let Some(&content) = src_map.get(ex.path.as_str()) {
+                excluded_hashes.push((
+                    ex.path.clone(),
+                    *blake3::hash(content.as_bytes()).as_bytes(),
+                ));
+                let mod_path = enclosing_go_module_path(&ex.path, &pkg_graph.modules);
+                let idents = collect_go_identifiers(content);
+                excluded_terms.push(format!("{mod_path}\t{idents}"));
+            }
+        }
+        DriverFilter {
+            kept_paths: Some(kept_paths),
+            build_excluded_count,
+            build_excluded_terms: excluded_terms.join("\n"),
+            excluded_hashes,
+        }
+    }
+
+    fn build_graph(&self, manifests: &[ManifestFile], files: &[SourceFileExtract]) -> PackageGraph {
+        let empty = HashMap::new();
+        self.build_graph_with_sources(manifests, files, &empty)
+    }
+
+    fn build_graph_with_sources(
+        &self,
+        manifests: &[ManifestFile],
+        files: &[SourceFileExtract],
+        sources: &HashMap<String, String>,
+    ) -> PackageGraph {
+        let mut go_files = collect_go_manifest_inputs(manifests);
+        for f in files {
+            let content = sources.get(&f.path).map_or("", String::as_str);
+            go_files.push(GoSourceFile {
+                path: &f.path,
+                content,
+            });
+        }
+        let built = build_package_graph(&go_files);
+        convert_go_package_graph(&built, files)
+    }
+
+    fn method_owners(&self, input: &ResolveInput) -> Vec<(Id, Id)> {
+        let mut types_by_mod: HashMap<(Id, &str), Id> = HashMap::new();
+        for sym in &input.symbols {
+            if matches!(
+                sym.kind,
+                SymbolKind::Struct | SymbolKind::Interface | SymbolKind::TypeAlias
+            ) && let Some(mid) = sym.module
+            {
+                types_by_mod.insert((mid, sym.name.as_str()), sym.id);
+            }
+        }
+        input
+            .symbols
+            .iter()
+            .filter(|s| s.kind == SymbolKind::Method)
+            .filter_map(|m| {
+                let (mid, owner) = (m.module?, m.owner.as_deref()?);
+                types_by_mod.get(&(mid, owner)).map(|&oid| (m.id, oid))
+            })
+            .collect()
+    }
+}
+
+fn collect_go_manifest_inputs(manifests: &[ManifestFile]) -> Vec<GoSourceFile<'_>> {
+    manifests
+        .iter()
+        .filter(|m| is_named_file(&m.path, "go.mod") || is_named_file(&m.path, "go.work"))
+        .map(|m| GoSourceFile {
+            path: &m.path,
+            content: &m.text,
+        })
+        .collect()
+}
+
+fn enclosing_go_module_path<'a>(
+    file_path: &str,
+    modules: &'a [phantom_fractal_lang_go::go_mod::GoModuleSpec],
+) -> &'a str {
+    let dir = file_path.rsplit_once('/').map_or("", |(d, _)| d);
+    modules
+        .iter()
+        .filter(|m| {
+            m.in_workspace
+                && (m.dir.is_empty()
+                    || dir == m.dir
+                    || dir.strip_prefix(&m.dir).is_some_and(|r| r.starts_with('/')))
+        })
+        .max_by_key(|m| m.dir.len())
+        .map_or("", |m| m.module_path.as_str())
+}
+
+fn collect_go_identifiers(content: &str) -> String {
+    let set: BTreeSet<&str> = content
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|tok| !tok.is_empty() && !tok.as_bytes()[0].is_ascii_digit())
+        .collect();
+    set.into_iter().collect::<Vec<_>>().join(" ")
+}
+
+fn convert_go_package_graph(
+    built: &phantom_fractal_lang_go::go_mod::PackageGraph,
+    files: &[SourceFileExtract],
+) -> PackageGraph {
+    let (mut packages, names_by_dir) = build_go_module_packages(built);
+    let mut graph = PackageGraph::default();
+    let needs_rootless = populate_go_targets_and_modules(built, &names_by_dir, &mut graph);
+    if needs_rootless {
+        packages.push(Package {
+            name: "go-rootless".to_owned(),
+            version: None,
+            manifest_path: String::new(),
+        });
+    }
+    graph.packages = packages;
+    graph.orphans = files
+        .iter()
+        .filter(|f| !built.file_to_package.contains_key(&f.path))
+        .count();
+    graph
+}
+
+fn build_go_module_packages(
+    built: &phantom_fractal_lang_go::go_mod::PackageGraph,
+) -> (Vec<Package>, HashMap<String, String>) {
+    let mut packages = Vec::new();
+    let mut names_by_dir = HashMap::new();
+    for m in built.modules.iter().filter(|m| m.in_workspace) {
+        let name = if m.module_path.is_empty() {
+            "go-root".to_owned()
+        } else {
+            m.module_path.clone()
+        };
+        let manifest_path = if m.dir.is_empty() {
+            "go.mod".to_owned()
+        } else {
+            format!("{}/go.mod", m.dir)
+        };
+        names_by_dir.insert(m.dir.clone(), name.clone());
+        packages.push(Package {
+            name,
+            version: None,
+            manifest_path,
+        });
+    }
+    (packages, names_by_dir)
+}
+
+fn populate_go_targets_and_modules(
+    built: &phantom_fractal_lang_go::go_mod::PackageGraph,
+    names_by_dir: &HashMap<String, String>,
+    graph: &mut PackageGraph,
+) -> bool {
+    let mut needs_rootless = false;
+    for (idx, pkg) in built.packages.iter().enumerate() {
+        let pkg_name = match names_by_dir.get(&pkg.module_dir) {
+            Some(name) => name.clone(),
+            None => {
+                needs_rootless = true;
+                "go-rootless".to_owned()
+            }
+        };
+        push_go_package_rows((idx + 1) as Id, &pkg_name, pkg, graph);
+    }
+    needs_rootless
+}
+
+fn push_go_package_rows(id: Id, pkg_name: &str, pkg: &GoPackage, graph: &mut PackageGraph) {
+    let kind = if pkg.is_external_test {
+        TargetKind::Test
+    } else if pkg.is_main {
+        TargetKind::Bin
+    } else {
+        TargetKind::Lib
+    };
+    graph.targets.push(Target {
+        id,
+        package: pkg_name.to_owned(),
+        name: pkg.package_name.clone(),
+        kind,
+        root: pkg.files.first().cloned().unwrap_or_default(),
+    });
+    graph.modules.push(Module {
+        id,
+        target: id,
+        parent: None,
+        path: pkg.import_path.clone(),
+        file: String::new(),
+        scope: String::new(),
+    });
+    if pkg.is_external_test {
+        graph.test_modules.push(id);
+    }
+    for file in &pkg.files {
+        graph.file_modules.push(FileModule {
+            file: file.clone(),
+            module: id,
+        });
+    }
+}
+
 /// Constructs the single default [`Registry`] for CLI and library callers.
 pub fn default_registry() -> Result<Registry<'static>, ExtractError> {
-    Ok(Registry::from_owned(vec![Box::new(RustDriver::owned()?)]))
+    Ok(Registry::from_owned(vec![
+        Box::new(RustDriver::owned()?),
+        Box::new(GoDriver::new()),
+    ]))
 }
 
 /// Lightweight Cargo manifest filter used by internal helpers.
@@ -385,5 +723,32 @@ mod tests {
         assert!(!RustFilter::is_manifest("README.md"));
         assert!(is_named_file("Cargo.toml", "Cargo.toml"));
         assert!(!is_named_file("fooCargo.toml", "Cargo.toml"));
+
+        let go = GoDriver::new();
+        let src = SourceFileExtract {
+            path: "loose.go".to_owned(),
+            extract: phantom_fractal_lang::Extract::default(),
+        };
+        let mut sources = HashMap::new();
+        sources.insert(
+            "loose.go".to_owned(),
+            "package loose
+func Loose() {}
+"
+            .to_owned(),
+        );
+        let g = go.build_graph_with_sources(&[], &[src], &sources);
+        assert_eq!(g.packages[0].name, "go-rootless");
+        assert!(g.targets.len() == 1);
+        let empty_mod = ManifestFile {
+            path: "sub/go.mod".to_owned(),
+            text: "go 1.26
+"
+            .to_owned(),
+        };
+        let g2 = go.build_graph(&[empty_mod], &[]);
+        assert_eq!(g2.packages[0].manifest_path, "sub/go.mod");
+        assert_eq!(g2.packages[0].name, "go-root");
+        assert!(!is_go_dir_pruned(Path::new("."), "vendor", 0));
     }
 }

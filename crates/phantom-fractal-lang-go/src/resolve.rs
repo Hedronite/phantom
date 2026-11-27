@@ -1,6 +1,60 @@
 //! Tiers 1-3 Go call, import, embed, and interface-satisfaction resolver.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
+
+const MAX_EMBED_DEPTH: usize = 16;
+const MAX_HINT_DEPTH: u8 = 8;
+
+const GO_STDLIB_METHODS: &[&str] = &[
+    "AppendBinary",
+    "AppendText",
+    "Close",
+    "Compare",
+    "Deadline",
+    "Done",
+    "Equal",
+    "Err",
+    "Error",
+    "Flush",
+    "Format",
+    "GoString",
+    "Len",
+    "Less",
+    "Lock",
+    "MarshalBinary",
+    "MarshalJSON",
+    "MarshalText",
+    "Next",
+    "Peek",
+    "Pop",
+    "Push",
+    "RLock",
+    "RUnlock",
+    "Read",
+    "ReadByte",
+    "ReadFrom",
+    "Reset",
+    "RoundTrip",
+    "Scan",
+    "Seek",
+    "ServeHTTP",
+    "Signal",
+    "Stat",
+    "String",
+    "Swap",
+    "Text",
+    "Unlock",
+    "UnmarshalBinary",
+    "UnmarshalJSON",
+    "UnmarshalText",
+    "UnreadByte",
+    "Value",
+    "Wait",
+    "Write",
+    "WriteByte",
+    "WriteString",
+    "WriteTo",
+];
 
 use phantom_fractal_lang::{
     CallRef, Edge, Graph, Id, Link, LinkKind, LinkReason, Node, Reason, RefKind, ResolveCounts,
@@ -117,8 +171,10 @@ struct Index<'a> {
     modules_by_path: HashMap<&'a str, Id>,
     callable_by_mod: HashMap<(Id, &'a str), Vec<&'a Symbol>>,
     types_by_mod: HashMap<(Id, &'a str), &'a Symbol>,
+    types_by_id: HashMap<Id, &'a Symbol>,
     methods_by_owner: HashMap<(Id, &'a str, &'a str), &'a Symbol>,
     owner_methods: HashMap<(Id, &'a str), Vec<&'a Symbol>>,
+    unique_methods: HashMap<&'a str, Option<&'a Symbol>>,
     uses_by_file: HashMap<&'a str, Vec<&'a UseBinding>>,
     embeds_adj: HashMap<Id, Vec<Id>>,
 }
@@ -129,8 +185,10 @@ impl<'a> Index<'a> {
             modules_by_path: HashMap::new(),
             callable_by_mod: HashMap::new(),
             types_by_mod: HashMap::new(),
+            types_by_id: HashMap::new(),
             methods_by_owner: HashMap::new(),
             owner_methods: HashMap::new(),
+            unique_methods: HashMap::new(),
             uses_by_file: HashMap::new(),
             embeds_adj: HashMap::new(),
         };
@@ -143,6 +201,7 @@ impl<'a> Index<'a> {
         for sym in &input.symbols {
             idx.insert_symbol(sym);
         }
+        idx.build_unique_methods();
         idx
     }
 
@@ -159,9 +218,28 @@ impl<'a> Index<'a> {
             }
             SymbolKind::Struct | SymbolKind::Interface | SymbolKind::TypeAlias => {
                 self.types_by_mod.insert((mod_id, sym.name.as_str()), sym);
+                self.types_by_id.insert(sym.id, sym);
             }
             SymbolKind::Method => self.insert_method_symbol(mod_id, sym),
             _ => {}
+        }
+    }
+
+    fn build_unique_methods(&mut self) {
+        for (&(mod_id, owner), ms) in &self.owner_methods {
+            let is_iface = self
+                .types_by_mod
+                .get(&(mod_id, owner))
+                .is_some_and(|ty| ty.kind == SymbolKind::Interface);
+            if is_iface {
+                continue;
+            }
+            for &m in ms {
+                self.unique_methods
+                    .entry(m.name.as_str())
+                    .and_modify(|slot| *slot = None)
+                    .or_insert(Some(m));
+            }
         }
     }
 
@@ -205,7 +283,7 @@ fn collect_import_links(input: &ResolveInput, idx: &Index<'_>, links: &mut Vec<L
 
 fn collect_embed_links(input: &ResolveInput, idx: &mut Index<'_>, links: &mut Vec<Link>) {
     for r in &input.refs {
-        if r.kind != RefKind::Embed {
+        if r.kind != RefKind::Embed || r.receiver_type.as_deref() == Some("assert_impl") {
             continue;
         }
         let (Some(mod_id), Some(owner_name)) = (r.module, r.receiver.as_deref()) else {
@@ -231,65 +309,146 @@ fn collect_embed_links(input: &ResolveInput, idx: &mut Index<'_>, links: &mut Ve
 }
 
 fn collect_impl_links(input: &ResolveInput, idx: &Index<'_>, links: &mut Vec<Link>) {
-    let ifaces: Vec<&Symbol> = input
-        .symbols
-        .iter()
-        .filter(|s| s.kind == SymbolKind::Interface)
-        .collect();
-    let structs: Vec<&Symbol> = input
+    let explicit = collect_explicit_impls(input, idx, links);
+    let mut sets: HashMap<Id, HashSet<&str>> = HashMap::new();
+    let mut by_method: HashMap<&str, Vec<Id>> = HashMap::new();
+    for st in input
         .symbols
         .iter()
         .filter(|s| s.kind == SymbolKind::Struct)
-        .collect();
-
-    for iface in &ifaces {
-        let req = collect_method_set(input, idx, iface);
-        if req.is_empty() {
-            continue;
+    {
+        let mset = method_set_memo(idx, st.id, &sets);
+        for &name in &mset {
+            by_method.entry(name).or_default().push(st.id);
         }
-        for st in &structs {
-            let avail = collect_method_set(input, idx, st);
-            if req.iter().all(|name| avail.contains(name)) {
-                links.push(Link {
-                    kind: LinkKind::Impl,
-                    source: Node::Symbol(st.id),
-                    target: Node::Symbol(iface.id),
-                    confidence: 0.85,
-                    reason: LinkReason::StructuralImpl,
-                    ref_id: None,
-                });
-            }
+        sets.insert(st.id, mset);
+    }
+    for iface in input
+        .symbols
+        .iter()
+        .filter(|s| s.kind == SymbolKind::Interface)
+    {
+        let req = method_set_memo(idx, iface.id, &sets);
+        if !req.is_empty() {
+            match_structural_impls(iface.id, &req, &sets, &by_method, &explicit, links);
         }
     }
 }
 
-fn collect_method_set<'a>(
-    input: &'a ResolveInput,
+fn collect_explicit_impls(
+    input: &ResolveInput,
+    idx: &Index<'_>,
+    links: &mut Vec<Link>,
+) -> HashSet<(Id, Id)> {
+    let mut explicit = HashSet::new();
+    for r in &input.refs {
+        let Some((st_id, iface_id)) = explicit_assert_pair(idx, r) else {
+            continue;
+        };
+        if explicit.insert((st_id, iface_id)) {
+            links.push(Link {
+                kind: LinkKind::Impl,
+                source: Node::Symbol(st_id),
+                target: Node::Symbol(iface_id),
+                confidence: 1.0,
+                reason: LinkReason::ImplTrait,
+                ref_id: None,
+            });
+        }
+    }
+    explicit
+}
+
+fn explicit_assert_pair(idx: &Index<'_>, r: &CallRef) -> Option<(Id, Id)> {
+    if r.kind != RefKind::Embed || r.receiver_type.as_deref() != Some("assert_impl") {
+        return None;
+    }
+    let concrete_name = r.receiver.as_deref()?;
+    let (ResolvedType::Workspace(st), ResolvedType::Workspace(iface)) = (
+        resolve_type_name(idx, &r.file, r.module, concrete_name),
+        resolve_type_name(idx, &r.file, r.module, &r.text),
+    ) else {
+        return None;
+    };
+    (st.kind != SymbolKind::Interface && iface.kind == SymbolKind::Interface)
+        .then_some((st.id, iface.id))
+}
+
+fn match_structural_impls(
+    iface_id: Id,
+    req: &HashSet<&str>,
+    sets: &HashMap<Id, HashSet<&str>>,
+    by_method: &HashMap<&str, Vec<Id>>,
+    explicit: &HashSet<(Id, Id)>,
+    links: &mut Vec<Link>,
+) {
+    let Some(rarest) = req
+        .iter()
+        .min_by_key(|m| by_method.get(*m).map_or(0, Vec::len))
+        .and_then(|m| by_method.get(m))
+    else {
+        return;
+    };
+    for &st_id in rarest {
+        if explicit.contains(&(st_id, iface_id)) {
+            continue;
+        }
+        if sets
+            .get(&st_id)
+            .is_some_and(|avail| req.iter().all(|m| avail.contains(m)))
+        {
+            links.push(Link {
+                kind: LinkKind::Impl,
+                source: Node::Symbol(st_id),
+                target: Node::Symbol(iface_id),
+                confidence: 0.85,
+                reason: LinkReason::StructuralImpl,
+                ref_id: None,
+            });
+        }
+    }
+}
+
+fn method_set_memo<'a>(
     idx: &Index<'a>,
-    ty: &'a Symbol,
+    root_id: Id,
+    cache: &HashMap<Id, HashSet<&'a str>>,
 ) -> HashSet<&'a str> {
-    let syms_by_id: HashMap<Id, &'a Symbol> = input.symbols.iter().map(|s| (s.id, s)).collect();
     let mut names = HashSet::new();
     let mut visited = HashSet::new();
-    let mut queue = VecDeque::from([ty.id]);
-    while let Some(id) = queue.pop_front() {
-        if visited.insert(id) {
-            push_type_methods(id, &syms_by_id, idx, &mut names);
-            if let Some(nexts) = idx.embeds_adj.get(&id) {
-                queue.extend(nexts.iter().copied());
-            }
+    let mut frontier = vec![root_id];
+    for _depth in 0..=MAX_EMBED_DEPTH {
+        frontier.retain(|id| visited.insert(*id));
+        if frontier.is_empty() {
+            break;
         }
+        frontier = step_method_set(idx, &frontier, cache, &mut names);
     }
     names
 }
 
-fn push_type_methods<'a>(
-    id: Id,
-    syms_by_id: &HashMap<Id, &'a Symbol>,
+fn step_method_set<'a>(
     idx: &Index<'a>,
+    frontier: &[Id],
+    cache: &HashMap<Id, HashSet<&'a str>>,
     names: &mut HashSet<&'a str>,
-) {
-    let Some(cur) = syms_by_id.get(&id).copied() else {
+) -> Vec<Id> {
+    let mut next = Vec::new();
+    for &id in frontier {
+        if let Some(cached) = cache.get(&id) {
+            names.extend(cached.iter().copied());
+            continue;
+        }
+        push_type_methods(id, idx, names);
+        if let Some(embeds) = idx.embeds_adj.get(&id) {
+            next.extend(embeds.iter().copied());
+        }
+    }
+    next
+}
+
+fn push_type_methods<'a>(id: Id, idx: &Index<'a>, names: &mut HashSet<&'a str>) {
+    let Some(cur) = idx.types_by_id.get(&id).copied() else {
         return;
     };
     let Some(ms) = cur
@@ -419,8 +578,18 @@ fn resolve_method_call(idx: &Index<'_>, call_ref: &CallRef, source: Id, out: &mu
     match resolve_recv_type(idx, call_ref) {
         ResolvedType::Workspace(ty) => resolve_workspace_method(idx, call_ref, source, ty, out),
         ResolvedType::External => out.counts.external += 1,
-        ResolvedType::Unknown => mark_unresolved_method(out),
+        ResolvedType::Unknown => resolve_unknown_method(idx, call_ref, source, out),
     }
+}
+
+fn resolve_unknown_method(idx: &Index<'_>, call_ref: &CallRef, source: Id, out: &mut CallOut) {
+    if !GO_STDLIB_METHODS.contains(&call_ref.text.as_str())
+        && let Some(Some(target)) = idx.unique_methods.get(call_ref.text.as_str()).copied()
+    {
+        out.push(call_ref.id, source, target.id, 0.70, Reason::UniqueMethod);
+        return;
+    }
+    mark_unresolved_method(out);
 }
 
 fn resolve_recv_type<'a>(idx: &Index<'a>, call_ref: &CallRef) -> ResolvedType<'a> {
@@ -474,19 +643,17 @@ fn find_method_bfs<'a>(
     method: &str,
     include_root: bool,
 ) -> Option<&'a Symbol> {
-    let all_types: HashMap<Id, &'a Symbol> =
-        idx.types_by_mod.values().map(|s| (s.id, *s)).collect();
     let mut visited = HashSet::new();
     if !include_root {
         visited.insert(root_ty.id);
     }
     let mut frontier = initial_bfs_frontier(idx, root_ty.id, include_root);
-    loop {
+    for _depth in 0..=MAX_EMBED_DEPTH {
         frontier.retain(|id| visited.insert(*id));
         if frontier.is_empty() {
             return None;
         }
-        let (found, next) = step_method_bfs(idx, &all_types, &frontier, method);
+        let (found, next) = step_method_bfs(idx, &idx.types_by_id, &frontier, method);
         if found.len() == 1 {
             return Some(found[0]);
         }
@@ -495,6 +662,7 @@ fn find_method_bfs<'a>(
         }
         frontier = next;
     }
+    None
 }
 
 fn initial_bfs_frontier(idx: &Index<'_>, root_id: Id, include_root: bool) -> Vec<Id> {
@@ -618,17 +786,128 @@ enum ResolvedType<'a> {
 }
 
 fn resolve_hint_type<'a>(idx: &Index<'a>, call_ref: &CallRef, hint: &str) -> ResolvedType<'a> {
+    resolve_hint_type_d(idx, call_ref, hint, 0)
+}
+
+fn resolve_hint_type_d<'a>(
+    idx: &Index<'a>,
+    call_ref: &CallRef,
+    hint: &str,
+    depth: u8,
+) -> ResolvedType<'a> {
+    if depth >= MAX_HINT_DEPTH {
+        return ResolvedType::Unknown;
+    }
     if let Some(ty_name) = hint.strip_prefix("type:") {
         return resolve_type_name(idx, &call_ref.file, call_ref.module, ty_name);
     }
+    if let Some(mret) = hint.strip_prefix("mret:") {
+        return resolve_method_return_type(idx, call_ref, mret, depth + 1);
+    }
+    if let Some(field) = hint.strip_prefix("field:") {
+        return resolve_embedded_field_type(idx, call_ref, field, depth + 1);
+    }
+    resolve_callee_hint_type(idx, call_ref, hint)
+}
+
+fn resolve_callee_hint_type<'a>(
+    idx: &Index<'a>,
+    call_ref: &CallRef,
+    hint: &str,
+) -> ResolvedType<'a> {
     let (require_generic, rest) = match hint.strip_prefix("inst_") {
         Some(r) => (true, r),
         None => (false, hint),
     };
-    let Some(callee_name) = strip_ret_prefix(rest) else {
+    strip_ret_prefix(rest).map_or(ResolvedType::Unknown, |callee_name| {
+        resolve_callee_return_type(idx, call_ref, callee_name, require_generic)
+    })
+}
+
+fn resolve_method_return_type<'a>(
+    idx: &Index<'a>,
+    call_ref: &CallRef,
+    mret: &str,
+    depth: u8,
+) -> ResolvedType<'a> {
+    let Some((recv_hint, method_name)) = mret.rsplit_once('|') else {
         return ResolvedType::Unknown;
     };
-    resolve_callee_return_type(idx, call_ref, callee_name, require_generic)
+    let ResolvedType::Workspace(owner_ty) = resolve_hint_type_d(idx, call_ref, recv_hint, depth)
+    else {
+        return ResolvedType::Unknown;
+    };
+    let Some(m_sym) = direct_method(idx, owner_ty, method_name)
+        .or_else(|| find_method_bfs(idx, owner_ty, method_name, false))
+    else {
+        return ResolvedType::Unknown;
+    };
+    let Some(ret_type) = m_sym.signature.as_deref().and_then(parse_first_return_type) else {
+        return ResolvedType::Unknown;
+    };
+    resolve_type_name(idx, &m_sym.file, m_sym.module, &ret_type)
+}
+
+fn resolve_embedded_field_type<'a>(
+    idx: &Index<'a>,
+    call_ref: &CallRef,
+    spec: &str,
+    depth: u8,
+) -> ResolvedType<'a> {
+    let Some((owner_hint, field_name)) = spec.rsplit_once('|') else {
+        return ResolvedType::Unknown;
+    };
+    let ResolvedType::Workspace(owner_ty) = resolve_hint_type_d(idx, call_ref, owner_hint, depth)
+    else {
+        return ResolvedType::Unknown;
+    };
+    find_embedded_field_bfs(idx, owner_ty.id, field_name)
+        .map_or(ResolvedType::Unknown, ResolvedType::Workspace)
+}
+
+enum FieldStep<'a> {
+    Found(&'a Symbol),
+    Ambiguous,
+    Next(Vec<Id>),
+}
+
+fn find_embedded_field_bfs<'a>(
+    idx: &Index<'a>,
+    root_id: Id,
+    field_name: &str,
+) -> Option<&'a Symbol> {
+    let mut visited = HashSet::from([root_id]);
+    let mut frontier = idx.embeds_adj.get(&root_id).cloned().unwrap_or_default();
+    for _depth in 0..MAX_EMBED_DEPTH {
+        frontier.retain(|id| visited.insert(*id));
+        match step_embedded_field(idx, &frontier, field_name) {
+            FieldStep::Found(sym) => return Some(sym),
+            FieldStep::Ambiguous => return None,
+            FieldStep::Next(next) => frontier = next,
+        }
+    }
+    None
+}
+
+fn step_embedded_field<'a>(idx: &Index<'a>, frontier: &[Id], field_name: &str) -> FieldStep<'a> {
+    let found: Vec<&Symbol> = frontier
+        .iter()
+        .filter_map(|id| idx.types_by_id.get(id).copied())
+        .filter(|sym| sym.name == field_name)
+        .collect();
+    if found.len() == 1 {
+        return FieldStep::Found(found[0]);
+    }
+    if !found.is_empty() {
+        return FieldStep::Ambiguous;
+    }
+    let next = frontier
+        .iter()
+        .filter_map(|id| idx.embeds_adj.get(id))
+        .flatten()
+        .copied()
+        .collect();
+    FieldStep::Next(next)
 }
 
 fn resolve_callee_return_type<'a>(
@@ -874,5 +1153,186 @@ mod tests {
         let (edges, counts) = GoResolver::new().resolve(&inp);
         assert!(edges.is_empty());
         assert_eq!(counts.unresolved, 2);
+
+        // Cover hint depth cap, explicit_assert_pair guards, interface vs struct method return lookup.
+        let dummy_ref = &inp.refs[0];
+        assert!(matches!(
+            resolve_hint_type_d(&idx_probe(), dummy_ref, "type:X", MAX_HINT_DEPTH),
+            ResolvedType::Unknown
+        ));
+        assert!(matches!(
+            resolve_hint_type_d(&idx_probe(), dummy_ref, "type:X", MAX_HINT_DEPTH - 1),
+            ResolvedType::Unknown
+        ));
+        assert!(matches!(
+            resolve_embedded_field_type(&idx_probe(), dummy_ref, "bad", 0),
+            ResolvedType::Unknown
+        ));
+        assert!(matches!(
+            resolve_method_return_type(&idx_probe(), dummy_ref, "bad", 0),
+            ResolvedType::Unknown
+        ));
+
+        let mut mod_inp = inp.clone();
+        mod_inp.symbols.extend([
+            Symbol {
+                id: 30,
+                kind: SymbolKind::Interface,
+                name: "IfaceA".to_owned(),
+                owner: None,
+                owner_path: None,
+                trait_name: None,
+                scope: String::new(),
+                module: Some(1),
+                file: "p1/p1.go".to_owned(),
+                signature: None,
+            },
+            Symbol {
+                id: 31,
+                kind: SymbolKind::Interface,
+                name: "IfaceB".to_owned(),
+                owner: None,
+                owner_path: None,
+                trait_name: None,
+                scope: String::new(),
+                module: Some(1),
+                file: "p1/p1.go".to_owned(),
+                signature: None,
+            },
+            Symbol {
+                id: 32,
+                kind: SymbolKind::Struct,
+                name: "StructA".to_owned(),
+                owner: None,
+                owner_path: None,
+                trait_name: None,
+                scope: String::new(),
+                module: Some(1),
+                file: "p1/p1.go".to_owned(),
+                signature: None,
+            },
+            Symbol {
+                id: 33,
+                kind: SymbolKind::Method,
+                name: "MakeStruct".to_owned(),
+                owner: Some("IfaceA".to_owned()),
+                owner_path: Some("IfaceA".to_owned()),
+                trait_name: None,
+                scope: String::new(),
+                module: Some(1),
+                file: "p1/p1.go".to_owned(),
+                signature: Some("func MakeStruct() StructA".to_owned()),
+            },
+        ]);
+        mod_inp.refs.extend([
+            CallRef {
+                id: 40,
+                from: None,
+                module: Some(1),
+                scope: String::new(),
+                file: "p1/p1.go".to_owned(),
+                kind: RefKind::Embed,
+                text: "IfaceB".to_owned(),
+                receiver: Some("IfaceA".to_owned()),
+                receiver_type: Some("assert_impl".to_owned()),
+                shadowed: false,
+            },
+            CallRef {
+                id: 41,
+                from: None,
+                module: Some(1),
+                scope: String::new(),
+                file: "p1/p1.go".to_owned(),
+                kind: RefKind::Embed,
+                text: "StructA".to_owned(),
+                receiver: Some("StructA".to_owned()),
+                receiver_type: Some("assert_impl".to_owned()),
+                shadowed: false,
+            },
+            CallRef {
+                id: 42,
+                from: None,
+                module: Some(1),
+                scope: String::new(),
+                file: "p1/p1.go".to_owned(),
+                kind: RefKind::Call,
+                text: "IfaceB".to_owned(),
+                receiver: Some("StructA".to_owned()),
+                receiver_type: Some("assert_impl".to_owned()),
+                shadowed: false,
+            },
+        ]);
+        let g2 = GoResolver::new().resolve_graph(&mod_inp);
+        assert!(
+            !g2.links
+                .iter()
+                .any(|l| l.kind == LinkKind::Impl || l.kind == LinkKind::Embeds)
+        );
+        let idx2 = Index::build(&mod_inp);
+        let iref = CallRef {
+            id: 43,
+            from: Some(20),
+            module: Some(1),
+            scope: String::new(),
+            file: "p1/p1.go".to_owned(),
+            kind: RefKind::MethodCall,
+            text: "X".to_owned(),
+            receiver: Some("i".to_owned()),
+            receiver_type: None,
+            shadowed: false,
+        };
+        assert!(matches!(
+            resolve_method_return_type(&idx2, &iref, "type:IfaceA|MakeStruct", 0),
+            ResolvedType::Workspace(s) if s.id == 32
+        ));
+        let mut h_mret_pass = "type:IfaceA".to_owned();
+        for _ in 0..7 {
+            // 7 hops stay under MAX_HINT_DEPTH = 8 (Wait: use recursive MakeSelf or Chain)
+            h_mret_pass = format!("mret:{h_mret_pass}|MakeStruct");
+        }
+        let _ = h_mret_pass;
+        // Real 8-hop self-referential method return and field embed chains hit MAX_HINT_DEPTH at depth=8:
+        let mut cyc_inp = mod_inp.clone();
+        cyc_inp.symbols.push(Symbol {
+            id: 34,
+            kind: SymbolKind::Method,
+            name: "NextSelf".to_owned(),
+            owner: Some("IfaceA".to_owned()),
+            owner_path: Some("IfaceA".to_owned()),
+            trait_name: None,
+            scope: String::new(),
+            module: Some(1),
+            file: "p1/p1.go".to_owned(),
+            signature: Some("func NextSelf() IfaceA".to_owned()),
+        });
+        let idx3 = Index::build(&cyc_inp);
+        let mut mret8 = "type:IfaceA".to_owned();
+        let mut fld8 = "type:IfaceA".to_owned();
+        for i in 0..8 {
+            mret8 = format!("mret:{mret8}|NextSelf");
+            let next_name = if i % 2 == 0 { "IfaceB" } else { "IfaceA" };
+            fld8 = format!("field:{fld8}|{next_name}");
+        }
+        assert!(matches!(
+            resolve_hint_type_d(&idx3, &iref, &mret8, 0),
+            ResolvedType::Unknown
+        ));
+        let mut cyc_idx = idx3;
+        cyc_idx.embeds_adj.insert(30, vec![31]);
+        cyc_idx.embeds_adj.insert(31, vec![30]);
+        assert!(matches!(
+            resolve_hint_type_d(&cyc_idx, &iref, &fld8, 0),
+            ResolvedType::Unknown
+        ));
+        assert!(matches!(
+            resolve_hint_type_d(&cyc_idx, &iref, "field:type:IfaceA|IfaceB", 0),
+            ResolvedType::Workspace(s) if s.id == 31
+        ));
+    }
+
+    fn idx_probe() -> Index<'static> {
+        static EMPTY: std::sync::OnceLock<ResolveInput> = std::sync::OnceLock::new();
+        let inp = EMPTY.get_or_init(ResolveInput::default);
+        Index::build(inp)
     }
 }

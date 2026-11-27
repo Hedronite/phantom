@@ -3,7 +3,9 @@
 use phantom_fractal_lang::{Caller, Extract, RefKind, Reference};
 use tree_sitter::Node;
 
-use super::detail::{bare_type_name, node_text, start_col, start_line, strip_whitespace};
+use super::detail::{
+    bare_type_name, node_text, start_col, start_line, strip_whitespace, type_hint_from_node,
+};
 use super::items::{FileDecls, collect_param_bindings};
 
 struct ScopeEnv {
@@ -189,9 +191,7 @@ fn scan_local_spec(node: Node<'_>, env: &mut ScopeEnv, ctx: &mut ScanCtx<'_>) {
     scan_field_only(node, "value", env, ctx);
     let explicit = node
         .child_by_field_name("type")
-        .map(|t| bare_type_name(&node_text(t, ctx.src)))
-        .filter(|t| !t.is_empty())
-        .map(|t| format!("type:{t}"));
+        .and_then(|t| type_hint_from_node(t, ctx.src));
     let rhs_exprs = node
         .child_by_field_name("value")
         .map(collect_expr_list)
@@ -212,10 +212,16 @@ fn scan_local_spec(node: Node<'_>, env: &mut ScopeEnv, ctx: &mut ScanCtx<'_>) {
 
 fn scan_range_clause(node: Node<'_>, env: &mut ScopeEnv, ctx: &mut ScanCtx<'_>) {
     scan_field_only(node, "right", env, ctx);
-    if let Some(left) = node.child_by_field_name("left") {
-        for name in collect_ident_list(left, ctx.src) {
-            env.push(name, None);
-        }
+    let elem_hint = node
+        .child_by_field_name("right")
+        .and_then(|r| infer_expr_hint(r, false, env, ctx))
+        .and_then(|h| h.strip_prefix("elem:").map(|t| format!("type:{t}")));
+    let Some(left) = node.child_by_field_name("left") else {
+        return;
+    };
+    for (idx, name) in collect_ident_list(left, ctx.src).into_iter().enumerate() {
+        let hint = (idx == 1).then(|| elem_hint.clone()).flatten();
+        env.push(name, hint);
     }
 }
 
@@ -446,17 +452,42 @@ fn record_ident_value_ref(ident: Node<'_>, env: &ScopeEnv, ctx: &mut ScanCtx<'_>
     });
 }
 
+const MAX_HINT_DEPTH: u8 = 8;
+
 fn infer_expr_hint(
     expr: Node<'_>,
     multi_return: bool,
     env: &ScopeEnv,
     ctx: &ScanCtx<'_>,
 ) -> Option<String> {
+    infer_expr_hint_d(expr, multi_return, env, ctx, 0)
+}
+
+fn infer_expr_hint_d(
+    expr: Node<'_>,
+    multi_return: bool,
+    env: &ScopeEnv,
+    ctx: &ScanCtx<'_>,
+    depth: u8,
+) -> Option<String> {
+    if depth >= MAX_HINT_DEPTH {
+        return None;
+    }
+    infer_expr_hint_inner(expr, multi_return, env, ctx, depth)
+}
+
+fn infer_expr_hint_inner(
+    expr: Node<'_>,
+    multi_return: bool,
+    env: &ScopeEnv,
+    ctx: &ScanCtx<'_>,
+    depth: u8,
+) -> Option<String> {
     match expr.kind() {
         "identifier" => infer_ident_hint(expr, env, ctx),
         "composite_literal" | "type_assertion_expression" => type_field_hint(expr, ctx.src),
-        "call_expression" => infer_call_return_hint(expr, multi_return, env, ctx),
-        _ => infer_compound_hint(expr, multi_return, env, ctx),
+        "call_expression" => infer_call_return_hint(expr, multi_return, env, ctx, depth),
+        _ => infer_compound_hint(expr, multi_return, env, ctx, depth),
     }
 }
 
@@ -465,17 +496,30 @@ fn infer_compound_hint(
     multi_return: bool,
     env: &ScopeEnv,
     ctx: &ScanCtx<'_>,
+    depth: u8,
 ) -> Option<String> {
     match expr.kind() {
         "unary_expression" => expr
             .child_by_field_name("operand")
-            .and_then(|op| infer_expr_hint(op, multi_return, env, ctx)),
+            .and_then(|op| infer_expr_hint_d(op, multi_return, env, ctx, depth + 1)),
         "parenthesized_expression" => expr
             .named_child(0)
-            .and_then(|inner| infer_expr_hint(inner, multi_return, env, ctx)),
-        "selector_expression" => infer_selector_field_hint(expr, env, ctx),
+            .and_then(|inner| infer_expr_hint_d(inner, multi_return, env, ctx, depth + 1)),
+        "index_expression" => infer_index_elem_hint(expr, env, ctx, depth),
+        "selector_expression" => infer_selector_field_hint(expr, env, ctx, depth),
         _ => None,
     }
+}
+
+fn infer_index_elem_hint(
+    expr: Node<'_>,
+    env: &ScopeEnv,
+    ctx: &ScanCtx<'_>,
+    depth: u8,
+) -> Option<String> {
+    let op = expr.child_by_field_name("operand")?;
+    let hint = infer_expr_hint_d(op, false, env, ctx, depth + 1)?;
+    hint.strip_prefix("elem:").map(|t| format!("type:{t}"))
 }
 
 fn infer_ident_hint(expr: Node<'_>, env: &ScopeEnv, ctx: &ScanCtx<'_>) -> Option<String> {
@@ -487,19 +531,27 @@ fn infer_ident_hint(expr: Node<'_>, env: &ScopeEnv, ctx: &ScanCtx<'_>) -> Option
 
 fn type_field_hint(node: Node<'_>, src: &[u8]) -> Option<String> {
     node.child_by_field_name("type")
-        .map(|t| bare_type_name(&node_text(t, src)))
-        .filter(|t| !t.is_empty())
-        .map(|t| format!("type:{t}"))
+        .and_then(|t| type_hint_from_node(t, src))
 }
 
-fn infer_selector_field_hint(sel: Node<'_>, env: &ScopeEnv, ctx: &ScanCtx<'_>) -> Option<String> {
+fn infer_selector_field_hint(
+    sel: Node<'_>,
+    env: &ScopeEnv,
+    ctx: &ScanCtx<'_>,
+    depth: u8,
+) -> Option<String> {
     let op = sel.child_by_field_name("operand")?;
     let field = node_text(sel.child_by_field_name("field")?, ctx.src);
-    let owner = infer_expr_hint(op, false, env, ctx)?
-        .strip_prefix("type:")?
-        .to_owned();
-    let ftype = ctx.decls.struct_fields.get(&(owner, field))?;
-    Some(format!("type:{ftype}"))
+    let owner_hint = infer_expr_hint_d(op, false, env, ctx, depth + 1)?;
+    if let Some(owner) = owner_hint.strip_prefix("type:")
+        && let Some(found) = ctx
+            .decls
+            .struct_fields
+            .get(&(owner.to_owned(), field.clone()))
+    {
+        return Some(found.clone());
+    }
+    Some(format!("field:{owner_hint}|{field}"))
 }
 
 fn infer_call_return_hint(
@@ -507,12 +559,55 @@ fn infer_call_return_hint(
     multi_return: bool,
     env: &ScopeEnv,
     ctx: &ScanCtx<'_>,
+    depth: u8,
 ) -> Option<String> {
-    let prefix = if multi_return { "ret?:" } else { "ret:" };
     let func = call.child_by_field_name("function")?;
+    if let Some(builtin) = infer_new_builtin_hint(call, func, env, ctx.src) {
+        return Some(builtin);
+    }
+    let prefix = if multi_return { "ret?:" } else { "ret:" };
+    infer_static_or_inst_hint(func, prefix, env, ctx)
+        .or_else(|| infer_method_return_hint(func, env, ctx, depth))
+}
+
+fn infer_static_or_inst_hint(
+    func: Node<'_>,
+    prefix: &str,
+    env: &ScopeEnv,
+    ctx: &ScanCtx<'_>,
+) -> Option<String> {
     if func.kind() == "index_expression" {
         let op = func.child_by_field_name("operand")?;
         return static_callable_name(op, env, ctx).map(|(n, _)| format!("inst_{prefix}{n}"));
     }
-    static_callable_name(func, env, ctx).map(|(n, _)| format!("{prefix}{n}"))
+    static_callable_name(func, env, ctx).map(|(n, _)| format!("{prefix}{}", n))
+}
+
+fn infer_new_builtin_hint(
+    call: Node<'_>,
+    func: Node<'_>,
+    env: &ScopeEnv,
+    src: &[u8],
+) -> Option<String> {
+    if func.kind() != "identifier" || node_text(func, src) != "new" || env.is_bound("new") {
+        return None;
+    }
+    let arg = call.child_by_field_name("arguments")?.named_child(0)?;
+    let name = bare_type_name(&node_text(arg, src));
+    (!name.is_empty()).then(|| format!("type:{name}"))
+}
+
+fn infer_method_return_hint(
+    func: Node<'_>,
+    env: &ScopeEnv,
+    ctx: &ScanCtx<'_>,
+    depth: u8,
+) -> Option<String> {
+    if func.kind() != "selector_expression" {
+        return None;
+    }
+    let op = func.child_by_field_name("operand")?;
+    let field = func.child_by_field_name("field")?;
+    let recv_hint = infer_expr_hint_d(op, false, env, ctx, depth + 1)?;
+    Some(format!("mret:{recv_hint}|{}", node_text(field, ctx.src)))
 }

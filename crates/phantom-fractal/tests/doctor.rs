@@ -239,7 +239,7 @@ fn a_healthy_data_directory_passes_every_check() {
         .expect("db")
         .to_owned();
     assert!(
-        databases.contains(&format!("{repo}: schema 4")),
+        databases.contains(&format!("{repo}: schema 5")),
         "{databases}"
     );
     assert_eq!(
@@ -313,7 +313,7 @@ fn a_schema_newer_database_is_flagged_and_never_opened() {
         databases["detail"]
             .as_str()
             .expect("detail")
-            .contains("schema 99, newer than this binary's 4"),
+            .contains("schema 99, newer than this binary's 5"),
         "{databases}"
     );
     let git = check(&data, "git")["detail"]
@@ -444,7 +444,7 @@ fn a_database_that_is_not_sqlite_or_has_an_older_schema_is_reported() {
     let detail = databases["detail"].as_str().expect("detail").to_owned();
     assert!(
         detail.contains(&format!(
-            "{}: schema 2, which index migrates to 4",
+            "{}: schema 2, which index migrates to 5",
             world.key("repo-")
         )),
         "{detail}"
@@ -458,7 +458,7 @@ fn a_database_that_is_not_sqlite_or_has_an_older_schema_is_reported() {
     let detail = databases["detail"].as_str().expect("detail").to_owned();
     assert!(
         detail.contains(&format!(
-            "{}: schema 3, which index migrates to 4",
+            "{}: schema 3, which index migrates to 5",
             world.key("repo-")
         )),
         "{detail}"

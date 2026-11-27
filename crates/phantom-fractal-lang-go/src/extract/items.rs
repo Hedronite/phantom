@@ -9,7 +9,7 @@ use tree_sitter::Node;
 
 use super::detail::{
     bare_type_name, doc_summary, end_line, go_visibility, is_go_test_fn, node_text, signature,
-    start_col, start_line, strip_whitespace, type_last_segment,
+    start_col, start_line, strip_whitespace, type_hint_from_node, type_last_segment,
 };
 
 /// Parsed `//go:linkname <local> [<target>]` directive.
@@ -89,11 +89,42 @@ pub(crate) fn collect_top_level<'t>(
     out: &mut Extract,
 ) -> FileDecls<'t> {
     let mut decls = FileDecls::default();
+    emit_linkname_refs(src, out);
     let mut cursor = root.walk();
     for child in root.children(&mut cursor) {
         dispatch_top_level(child, src, out, &mut decls);
     }
     decls
+}
+
+fn emit_linkname_refs(src: &[u8], out: &mut Extract) {
+    let Ok(text) = std::str::from_utf8(src) else {
+        return;
+    };
+    for dir in parse_linknames(text) {
+        if let Some(target) = dir.target {
+            push_linkname_ref(&target, dir.line, out);
+        }
+    }
+}
+
+fn push_linkname_ref(target: &str, line: u32, out: &mut Extract) {
+    let leaf = type_last_segment(target);
+    if leaf.is_empty() {
+        return;
+    }
+    out.refs.push(Reference {
+        kind: RefKind::ValueRef,
+        text: format!("go:linkname:{target}"),
+        last_segment: leaf,
+        line,
+        col: 1,
+        scope: String::new(),
+        from: None,
+        receiver: None,
+        receiver_type: None,
+        shadowed: false,
+    });
 }
 
 fn dispatch_top_level<'t>(
@@ -233,6 +264,11 @@ fn collect_fn_locals(
     if let Some(params) = node.child_by_field_name("parameters") {
         collect_param_bindings(params, src, &mut locals);
     }
+    if let Some(result) = node.child_by_field_name("result")
+        && result.kind() == "parameter_list"
+    {
+        collect_param_bindings(result, src, &mut locals);
+    }
     locals
 }
 
@@ -311,9 +347,7 @@ pub(crate) fn collect_param_bindings(
 fn push_param_decl_bindings(decl: Node<'_>, src: &[u8], out: &mut Vec<(String, Option<String>)>) {
     let type_hint = decl
         .child_by_field_name("type")
-        .map(|t| bare_type_name(&node_text(t, src)))
-        .filter(|t| !t.is_empty())
-        .map(|t| format!("type:{t}"));
+        .and_then(|t| type_hint_from_node(t, src));
     let mut names_cursor = decl.walk();
     for n in decl.children_by_field_name("name", &mut names_cursor) {
         let ident = node_text(n, src);
@@ -415,14 +449,24 @@ fn record_struct_field(
         .children_by_field_name("name", &mut names_cur)
         .peekable();
     if names.peek().is_none() {
+        if type_text.is_empty() {
+            return;
+        }
         push_embed_ref(struct_name, &type_text, ty, out);
+        decls.struct_fields.insert(
+            (struct_name.to_owned(), type_last_segment(&type_text)),
+            format!("type:{type_text}"),
+        );
         return;
     }
+    let Some(field_hint) = type_hint_from_node(ty, src) else {
+        return;
+    };
     for name_node in names {
         let fname = node_text(name_node, src);
         decls
             .struct_fields
-            .insert((struct_name.to_owned(), fname), type_text.clone());
+            .insert((struct_name.to_owned(), fname), field_hint.clone());
     }
 }
 
@@ -511,32 +555,137 @@ fn record_val_spec<'t>(
     out: &mut Extract,
     decls: &mut FileDecls<'t>,
 ) {
-    let explicit_hint = spec
-        .child_by_field_name("type")
-        .map(|t| format!("type:{}", bare_type_name(&node_text(t, src))));
+    let explicit_ty = spec.child_by_field_name("type");
+    let explicit_hint = explicit_ty.and_then(|t| type_hint_from_node(t, src));
     let mut caller = None;
+    let mut saw_blank = false;
     let mut names_cur = spec.walk();
     for n in spec.children_by_field_name("name", &mut names_cur) {
         let name = node_text(n, src);
-        if name != "_" {
-            if let Some(hint) = explicit_hint.as_deref() {
-                decls.pkg_var_types.insert(name.clone(), hint.to_owned());
-            }
-            push_val_item(spec, kind, &name, src, out);
-            caller.get_or_insert(Caller {
-                name,
-                owner: None,
-                start_line: start_line(spec),
-            });
+        if name == "_" {
+            saw_blank = true;
+        } else {
+            record_named_val(
+                spec,
+                kind,
+                &name,
+                explicit_hint.as_deref(),
+                src,
+                out,
+                decls,
+                &mut caller,
+            );
         }
     }
-    if let Some(val) = spec.child_by_field_name("value") {
-        decls.bodies.push(BodyTask {
-            node: val,
-            caller,
-            locals: Vec::new(),
-        });
+    let Some(val) = spec.child_by_field_name("value") else {
+        return;
+    };
+    if kind == ItemKind::Var && saw_blank {
+        maybe_emit_iface_assert(spec, explicit_ty, val, src, out);
     }
+    decls.bodies.push(BodyTask {
+        node: val,
+        caller,
+        locals: Vec::new(),
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_named_val(
+    spec: Node<'_>,
+    kind: ItemKind,
+    name: &str,
+    explicit_hint: Option<&str>,
+    src: &[u8],
+    out: &mut Extract,
+    decls: &mut FileDecls<'_>,
+    caller: &mut Option<Caller>,
+) {
+    if let Some(hint) = explicit_hint {
+        decls.pkg_var_types.insert(name.to_owned(), hint.to_owned());
+    }
+    push_val_item(spec, kind, name, src, out);
+    caller.get_or_insert(Caller {
+        name: name.to_owned(),
+        owner: None,
+        start_line: start_line(spec),
+    });
+}
+
+fn maybe_emit_iface_assert(
+    spec: Node<'_>,
+    explicit_ty: Option<Node<'_>>,
+    val: Node<'_>,
+    src: &[u8],
+    out: &mut Extract,
+) {
+    let Some(iface_node) = explicit_ty else {
+        return;
+    };
+    let iface = bare_type_name(&node_text(iface_node, src));
+    if iface.is_empty() {
+        return;
+    }
+    let Some(impl_ty) = extract_asserted_type(val, src) else {
+        return;
+    };
+    out.refs.push(Reference {
+        kind: RefKind::Embed,
+        text: iface.clone(),
+        last_segment: type_last_segment(&iface),
+        line: start_line(spec),
+        col: start_col(spec),
+        scope: String::new(),
+        from: None,
+        receiver: Some(impl_ty),
+        receiver_type: Some("assert_impl".to_owned()),
+        shadowed: false,
+    });
+}
+
+fn extract_asserted_type(val: Node<'_>, src: &[u8]) -> Option<String> {
+    let expr = unwrap_assert_expr(val);
+    match expr.kind() {
+        "composite_literal" => expr
+            .child_by_field_name("type")
+            .map(|t| bare_type_name(&node_text(t, src)))
+            .filter(|t| !t.is_empty()),
+        "call_expression" => extract_call_assert_type(expr, src),
+        _ => None,
+    }
+}
+
+fn unwrap_assert_expr(mut node: Node<'_>) -> Node<'_> {
+    while matches!(
+        node.kind(),
+        "expression_list" | "unary_expression" | "parenthesized_expression"
+    ) {
+        let Some(next) = node
+            .child_by_field_name("operand")
+            .or_else(|| node.named_child(0))
+        else {
+            break;
+        };
+        node = next;
+    }
+    node
+}
+
+fn extract_call_assert_type(call: Node<'_>, src: &[u8]) -> Option<String> {
+    let ty_node = assert_call_target_node(call, src)?;
+    let name = bare_type_name(&node_text(ty_node, src));
+    (!name.is_empty()).then_some(name)
+}
+
+fn assert_call_target_node<'a>(call: Node<'a>, src: &[u8]) -> Option<Node<'a>> {
+    let func = call.child_by_field_name("function")?;
+    if func.kind() == "parenthesized_expression" {
+        return Some(func);
+    }
+    if func.kind() == "identifier" && node_text(func, src) == "new" {
+        return call.child_by_field_name("arguments")?.named_child(0);
+    }
+    None
 }
 
 fn push_val_item(spec: Node<'_>, kind: ItemKind, name: &str, src: &[u8], out: &mut Extract) {
@@ -593,5 +742,27 @@ mod tests {
         assert!(!is_simple_type_ref(""));
         assert!(!is_simple_type_ref("int|string"));
         assert!(!is_simple_type_ref("~int"));
+
+        let asserts_src = "package p
+type I interface { M() }
+type A struct{}
+type B struct{}
+const _ I = B{}
+var _ [2]I = makeUnknown(B{})
+var _ I = (*A)(nil)
+var _ I = B{}
+var _ I = new(B)
+var _ I = makeUnknown(B{})
+";
+        let tree2 = parser.parse(asserts_src, None).unwrap();
+        let mut ext2 = Extract::default();
+        collect_top_level(tree2.root_node(), asserts_src.as_bytes(), &mut ext2);
+        let impls: Vec<&str> = ext2
+            .refs
+            .iter()
+            .filter(|r| r.receiver_type.as_deref() == Some("assert_impl"))
+            .filter_map(|r| r.receiver.as_deref())
+            .collect();
+        assert_eq!(impls, vec!["A", "B", "B"]);
     }
 }

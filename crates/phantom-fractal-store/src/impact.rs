@@ -2,6 +2,8 @@
 //! (SPEC-w5 G1b). Every query binds its values; none interpolates user
 //! text.
 
+use rusqlite::OptionalExtension;
+
 use crate::StoreError;
 
 /// What the impact engine reads about one stored symbol.
@@ -164,6 +166,23 @@ impl crate::Store {
     /// True when the `modules` table carries a row for `file_id` —
     /// the file is claimed by some target. A file that answers false
     /// is an orphan at the store level (SPEC-w11 G1a).
+    /// Target name (`targets.name`) owning symbol `id`, or none when unmapped.
+    pub fn target_name(&self, id: i64) -> Result<Option<String>, StoreError> {
+        let mut statement = self.conn.prepare(
+            "SELECT t.name
+             FROM symbols s
+             JOIN modules m ON m.id = s.module_id
+             JOIN targets t ON t.id = m.target_id
+             WHERE s.id = ?1",
+        )?;
+        let queried = statement.query_row([id], |row| row.get(0)).optional();
+        #[cfg(not(test))]
+        let queried = queried.map_err(StoreError::from);
+        #[cfg(test)]
+        let queried = crate::fault::tick(queried);
+        queried
+    }
+
     pub fn file_has_module(&self, file_id: i64) -> Result<bool, StoreError> {
         let claimed: i64 = self.conn.query_row(
             "SELECT EXISTS (

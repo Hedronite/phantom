@@ -128,7 +128,27 @@ pub(crate) fn strip_whitespace(raw: &str) -> String {
 
 /// Returns trailing selector segment of a type name (e.g. `"pkg.Type"` -> `"Type"`).
 pub(crate) fn type_last_segment(type_name: &str) -> String {
-    type_name.rsplit('.').next().unwrap_or(type_name).to_owned()
+    type_name
+        .rsplit(['/', '.'])
+        .next()
+        .unwrap_or(type_name)
+        .to_owned()
+}
+
+/// Extracts `type:<T>` or `elem:<T>` receiver hint from a Go type AST node.
+pub(crate) fn type_hint_from_node(node: Node<'_>, src: &[u8]) -> Option<String> {
+    if matches!(node.kind(), "slice_type" | "array_type") {
+        let elem = node.child_by_field_name("element")?;
+        let name = bare_type_name(&node_text(elem, src));
+        return (!name.is_empty()).then(|| format!("elem:{name}"));
+    }
+    if node.kind() == "map_type" {
+        let val = node.child_by_field_name("value")?;
+        let name = bare_type_name(&node_text(val, src));
+        return (!name.is_empty()).then(|| format!("elem:{name}"));
+    }
+    let name = bare_type_name(&node_text(node, src));
+    (!name.is_empty()).then(|| format!("type:{name}"))
 }
 
 fn clean(text: &str) -> String {
@@ -183,5 +203,21 @@ mod tests {
         assert!(!is_go_test_fn("Helper"));
         let long = "a".repeat(200);
         assert!(cap(&long, 10).ends_with('…'));
+
+        let hint_src = "package p
+func F(a [][2]int, b map[string][2]int, c []Foo) {}
+";
+        let tree2 = parser.parse(hint_src, None).unwrap();
+        let fn_node = tree2.root_node().named_child(1).unwrap();
+        let params = fn_node.child_by_field_name("parameters").unwrap();
+        let mut cur = params.walk();
+        let hints: Vec<Option<String>> = params
+            .children(&mut cur)
+            .filter(|n| n.kind() == "parameter_declaration")
+            .map(|d| {
+                type_hint_from_node(d.child_by_field_name("type").unwrap(), hint_src.as_bytes())
+            })
+            .collect();
+        assert_eq!(hints, vec![None, None, Some("elem:Foo".to_owned())]);
     }
 }

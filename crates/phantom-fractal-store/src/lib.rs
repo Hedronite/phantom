@@ -53,7 +53,7 @@ pub const PRODUCER: &str = "phantom-fractal";
 
 /// Schema this binary creates and will open. A higher `meta.schema_version`
 /// is refused.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Open failure, or a write that could not be stored.
 #[derive(Debug)]

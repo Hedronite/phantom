@@ -871,11 +871,12 @@ func Run(l L2, t TopI) {
     let edges = edge_names(&input, &graph);
     assert!(edges.contains(&("Run", "M2", Reason::EmbeddedMethod)));
     assert!(edges.contains(&("Run", "DeepM", Reason::InterfaceMethod)));
-    assert_eq!(graph.counts.edges, 2);
+    assert!(edges.contains(&("Run", "M2", Reason::UniqueMethod)));
+    assert_eq!(graph.counts.edges, 3);
     assert_eq!(graph.counts.no_source, 1);
     assert_eq!(graph.counts.external, 2);
-    assert_eq!(graph.counts.unresolved, 8);
-    assert_eq!(graph.counts.method_calls, 3);
+    assert_eq!(graph.counts.unresolved, 7);
+    assert_eq!(graph.counts.method_calls, 2);
 
     // Individual single-call external & generic-builtin checks so `0 + 1` vs `0 * 1` diverges on every arm.
     let single_fmt = build_input(&[GoSourceFile {
@@ -903,4 +904,493 @@ func Run(l L2, t TopI) {
     let (_, gb_counts) = GoResolver::new().resolve(&generic_builtin);
     assert_eq!(gb_counts.external, 0);
     assert_eq!(gb_counts.unresolved, 1);
+}
+
+#[test]
+fn resolves_g3b_embedding_tiers_assertions_unique_method_linkname_and_inference() {
+    let files = [
+        GoSourceFile {
+            path: "go.mod",
+            content: "module example.com/g3b
+go 1.26.0
+",
+        },
+        GoSourceFile {
+            path: "iface/iface.go",
+            content: r#"package iface
+
+type Shape interface {
+	Area() int
+}
+
+type Empty interface{}
+
+type Printer interface {
+	Print()
+}
+
+type Base struct{}
+func (Base) Hello() {}
+func (Base) DepthWin() {}
+
+type Left struct{}
+func (Left) Clash() {}
+type Right struct{}
+func (Right) Clash() {}
+type Both struct {
+	Left
+	Right
+}
+
+type Deep struct{}
+func (Deep) DepthWin() {}
+func (Deep) TooDeep() {}
+type MidWrap struct{ Deep }
+type ShallowWin struct {
+	Base
+	MidWrap
+}
+
+type Outer struct {
+	Base
+}
+
+type Rect struct{}
+func (*Rect) Area() int { return 1 }
+func (*Rect) Print() {}
+var _ Shape = (*Rect)(nil)
+
+type ValueImpl struct{}
+func (ValueImpl) Area() int { return 2 }
+var _ Shape = ValueImpl{}
+
+type UniqueWorker struct{}
+func (*UniqueWorker) SpecialCustomWork() {}
+func (*UniqueWorker) String() string { return "" }
+func (*UniqueWorker) SharedOp() {}
+
+type OtherWorker struct{}
+func (*OtherWorker) SharedOp() {}
+
+type Factory struct{}
+func (Factory) MakeRect() *Rect { return &Rect{} }
+
+type Cfg struct {
+	Items []Rect
+}
+
+func LinkTarget() {}
+"#,
+        },
+        GoSourceFile {
+            path: "use/use.go",
+            content: r#"package use
+
+import (
+	_ "unsafe"
+	"example.com/g3b/iface"
+)
+
+//go:linkname localAlias example.com/g3b/iface.LinkTarget
+func localAlias()
+
+type Wrapper struct {
+	iface.Outer
+}
+
+type DupA struct{ iface.Base }
+type DupB struct{ iface.Base }
+type AmbWrap struct {
+	DupA
+	DupB
+}
+
+type DeepSubIface interface { iface.Shape }
+
+type LocalCfg struct {
+	Items []iface.Rect
+}
+
+func Callers(o iface.Outer, w Wrapper, aw AmbWrap, s iface.Shape, b iface.Both, sw iface.ShallowWin, cfg LocalCfg, items []*iface.Rect, unk interface{}) (named *iface.UniqueWorker) {
+	w.Base.Hello()
+	w.MissingPromoted.Hello()
+	aw.Base.Hello()
+	_ = (((((((((&iface.Rect{}))))))))).Area()
+	named.SpecialCustomWork()
+	o.Base.Hello()
+	s.Area()
+	b.Clash()
+	sw.DepthWin()
+
+	p := new(iface.Rect)
+	p.Print()
+
+	var f iface.Factory
+	_ = f.MakeRect().Area()
+
+	for _, item := range cfg.Items {
+		item.Area()
+	}
+	for _, ptr := range items {
+		ptr.Print()
+	}
+	_ = cfg.Items[0].Area()
+
+	if u, ok := unk.(interface{ SpecialCustomWork() }); ok {
+		u.SpecialCustomWork()
+	}
+	if u2, ok := unk.(interface{ String() string; SharedOp() }); ok {
+		_ = u2.String()
+		u2.SharedOp()
+	}
+	return named
+}
+"#,
+        },
+    ];
+    let input = build_input(&files);
+    let graph = GoResolver::new().resolve_graph(&input);
+    let edges = edge_names(&input, &graph);
+
+    // Tier 4 & field embed
+    assert!(edges.contains(&("Callers", "Hello", Reason::TypedMethod)));
+    assert!(edges.contains(&("Callers", "DepthWin", Reason::EmbeddedMethod)));
+    // Ambiguous same-depth b.Clash() must NOT resolve
+    assert!(!edges.iter().any(|(_, dst, _)| *dst == "Clash"));
+    // Tier 5 interface call resolves ONLY to Shape.Area (InterfaceMethod), NOT Rect/ValueImpl unless typed concrete call
+    let iface_edges: Vec<_> = edges
+        .iter()
+        .filter(|(_, dst, r)| *dst == "Area" && *r == Reason::InterfaceMethod)
+        .collect();
+    assert_eq!(iface_edges.len(), 1);
+    // Inference: new(Rect), f.MakeRect().Area(), range cfg.Items, cfg.Items[0].Area(), named return
+    assert!(edges.contains(&("Callers", "Print", Reason::TypedMethod)));
+    assert!(edges.contains(&("Callers", "SpecialCustomWork", Reason::TypedMethod)));
+    // Tier 6 UniqueMethod vs stdlib String & ambiguous SharedOp
+    assert!(edges.contains(&("Callers", "SpecialCustomWork", Reason::UniqueMethod)));
+    assert!(!edges.iter().any(|(_, dst, _)| *dst == "String"));
+    assert!(!edges.iter().any(|(_, dst, _)| *dst == "SharedOp"));
+    // //go:linkname produces ValueRef with last_segment LinkTarget and NO call edge
+    assert!(!edges.iter().any(|(_, dst, _)| *dst == "LinkTarget"));
+    assert!(
+        input.refs.iter().any(|r| r.kind == RefKind::ValueRef
+            && r.text == "go:linkname:example.com/g3b/iface.LinkTarget")
+    );
+
+    // Tier 5 links: Rect -> Shape is ImplTrait (1.0), ValueImpl -> Shape is ImplTrait (1.0), Rect -> Printer is StructuralImpl (0.85), no Empty impls
+    let shape_id = input.symbols.iter().find(|s| s.name == "Shape").unwrap().id;
+    let empty_id = input.symbols.iter().find(|s| s.name == "Empty").unwrap().id;
+    let rect_id = input.symbols.iter().find(|s| s.name == "Rect").unwrap().id;
+    let printer_id = input
+        .symbols
+        .iter()
+        .find(|s| s.name == "Printer")
+        .unwrap()
+        .id;
+    assert!(graph.links.iter().any(|l| {
+        l.kind == phantom_fractal_lang::LinkKind::Impl
+            && l.source == phantom_fractal_lang::Node::Symbol(rect_id)
+            && l.target == phantom_fractal_lang::Node::Symbol(shape_id)
+            && l.reason == phantom_fractal_lang::LinkReason::ImplTrait
+            && (l.confidence - 1.0).abs() < 1e-6
+    }));
+    assert!(!graph.links.iter().any(|l| {
+        l.kind == phantom_fractal_lang::LinkKind::Impl
+            && l.source == phantom_fractal_lang::Node::Symbol(rect_id)
+            && l.target == phantom_fractal_lang::Node::Symbol(shape_id)
+            && l.reason == phantom_fractal_lang::LinkReason::StructuralImpl
+    }));
+    assert!(graph.links.iter().any(|l| {
+        l.kind == phantom_fractal_lang::LinkKind::Impl
+            && l.source == phantom_fractal_lang::Node::Symbol(rect_id)
+            && l.target == phantom_fractal_lang::Node::Symbol(printer_id)
+            && l.reason == phantom_fractal_lang::LinkReason::StructuralImpl
+            && (l.confidence - 0.85).abs() < 1e-6
+    }));
+    assert!(
+        !graph
+            .links
+            .iter()
+            .any(|l| l.target == phantom_fractal_lang::Node::Symbol(empty_id))
+    );
+    assert!(
+        !graph
+            .links
+            .iter()
+            .any(|l| l.kind == phantom_fractal_lang::LinkKind::Embeds
+                && l.source == phantom_fractal_lang::Node::Symbol(rect_id))
+    );
+}
+
+#[test]
+fn bounds_embed_depth_and_handles_one_mb_chained_embed_promptly() {
+    // 18-hop embed exceeds MAX_EMBED_DEPTH = 16, while 16-hop succeeds.
+    let mut chain = String::from(
+        "package chain
+type T0 struct{}
+func (T0) BaseM() {}
+",
+    );
+    for i in 1..=20 {
+        chain.push_str(&format!(
+            "type T{i} struct{{ T{} }}
+",
+            i - 1
+        ));
+    }
+    chain.push_str(
+        "func Use(a T16, b T18) { a.BaseM(); b.BaseM() }
+",
+    );
+    let files = [
+        GoSourceFile {
+            path: "go.mod",
+            content: "module example.com/chain
+go 1.26.0
+",
+        },
+        GoSourceFile {
+            path: "chain.go",
+            content: &chain,
+        },
+    ];
+    let inp = build_input(&files);
+    let (edges, _) = GoResolver::new().resolve(&inp);
+    assert_eq!(
+        edges
+            .iter()
+            .filter(|e| e.reason == Reason::EmbeddedMethod)
+            .count(),
+        1
+    );
+
+    // >1 MB tree of deep embeds + interfaces resolves quickly (<2s).
+    let mut big = String::from(
+        "package big
+type Root struct{}
+func (Root) RMethod() {}
+type RIface interface { RMethod() }
+",
+    );
+    for i in 0..800 {
+        let prev = if i == 0 {
+            "Root".to_owned()
+        } else {
+            format!("S{}", i - 1)
+        };
+        big.push_str(&format!(
+            "type S{i} struct {{ {prev} }}
+func (S{i}) M{i}() {{}}
+"
+        ));
+    }
+    big.push_str("// ");
+    while big.len() < 1_050_000 {
+        big.push_str("padding ");
+    }
+    big.push('\n');
+    let big_files = [
+        GoSourceFile {
+            path: "go.mod",
+            content: "module example.com/big
+go 1.26.0
+",
+        },
+        GoSourceFile {
+            path: "big.go",
+            content: &big,
+        },
+    ];
+    let start = std::time::Instant::now();
+    let big_inp = build_input(&big_files);
+    let g = GoResolver::new().resolve_graph(&big_inp);
+    assert!(start.elapsed().as_secs_f64() < 5.0);
+    assert!(!g.links.is_empty());
+}
+
+#[test]
+fn isolates_inference_and_depth_cap_mutants_with_ambiguous_method_names() {
+    let files = [
+        GoSourceFile {
+            path: "go.mod",
+            content: "module example.com/infmut\ngo 1.26.0\n",
+        },
+        GoSourceFile {
+            path: "m/m.go",
+            content: r#"package m
+
+type TwoA struct{}
+func (*TwoA) Shared() *TwoB { return &TwoB{} }
+func (*TwoA) LeafM() {}
+
+type TwoB struct{}
+func (*TwoB) Shared() *TwoA { return &TwoA{} }
+func (*TwoB) LeafM() {}
+
+type BaseX struct{}
+func (*BaseX) Shared() {}
+type MidX struct{ BaseX }
+type TopX struct{ MidX }
+
+type Chain struct{ F *Chain }
+func (*Chain) Self() *Chain { return &Chain{} }
+func (*Chain) LeafM() {}
+
+func UseNew() {
+	p := new(TwoA)
+	p.Shared()
+}
+
+func UseShadowedNew() {
+	new := func(_ TwoA) TwoB { return TwoB{} }
+	p := new(TwoA{})
+	p.LeafM()
+}
+
+func UseOtherIdentCall() {
+	q := notNew(TwoA)
+	q.LeafM()
+}
+
+func UseIndex(xs []*TwoA) {
+	xs[0].Shared()
+}
+
+func UseRange(xs []*TwoA) {
+	for i, x := range xs {
+		_ = i
+		x.Shared()
+	}
+}
+
+func UseRangeIdxOnly(xs []*TwoA) {
+	for i := range xs {
+		_ = i
+	}
+}
+
+func UseChain(a *TwoA) {
+	a.Shared().Shared().LeafM()
+}
+
+func UseDeepParens(a *TwoA, c *Chain, xs []*Chain) {
+	_ = (&(&(&(&a)))).LeafM
+	((((a)))).Shared()
+	// Exceed MAX_HINT_DEPTH = 8 on EVERY compound kind (paren, unary, index, selector, mret):
+	((((((((a)))))))).LeafM()
+	(&(&(&(&(&(&(&(&a)))))))).LeafM()
+	(((((((xs)))))))[0].LeafM()
+	c.F.F.F.F.F.F.F.F.LeafM()
+	c.Self().Self().Self().Self().Self().Self().Self().Self().LeafM()
+}
+
+func UseField(t TopX) {
+	t.BaseX.Shared()
+}
+"#,
+        },
+    ];
+    let input = build_input(&files);
+    let graph = GoResolver::new().resolve_graph(&input);
+    let edges = edge_names(&input, &graph);
+
+    let two_a_shared = input
+        .symbols
+        .iter()
+        .find(|s| s.owner.as_deref() == Some("TwoA") && s.name == "Shared")
+        .unwrap()
+        .id;
+    let two_a_leaf = input
+        .symbols
+        .iter()
+        .find(|s| s.owner.as_deref() == Some("TwoA") && s.name == "LeafM")
+        .unwrap()
+        .id;
+    let base_shared = input
+        .symbols
+        .iter()
+        .find(|s| s.owner.as_deref() == Some("BaseX") && s.name == "Shared")
+        .unwrap()
+        .id;
+
+    let caller_hits = |caller: &str| -> Vec<(phantom_fractal_lang::Id, Reason)> {
+        let cid = input.symbols.iter().find(|s| s.name == caller).unwrap().id;
+        graph
+            .calls
+            .iter()
+            .filter(|e| e.source == cid)
+            .map(|e| (e.target, e.reason))
+            .collect()
+    };
+
+    assert_eq!(
+        caller_hits("UseNew"),
+        vec![(two_a_shared, Reason::TypedMethod)]
+    );
+    assert!(caller_hits("UseShadowedNew").is_empty());
+    assert!(caller_hits("UseOtherIdentCall").is_empty());
+    assert_eq!(
+        caller_hits("UseIndex"),
+        vec![(two_a_shared, Reason::TypedMethod)]
+    );
+    assert_eq!(
+        caller_hits("UseRange"),
+        vec![(two_a_shared, Reason::TypedMethod)]
+    );
+    assert!(caller_hits("UseRangeIdxOnly").is_empty());
+    assert!(edges.contains(&("UseChain", "LeafM", Reason::TypedMethod)));
+    assert_eq!(
+        caller_hits("UseField"),
+        vec![(base_shared, Reason::TypedMethod)]
+    );
+
+    let parens_hits = caller_hits("UseDeepParens");
+    assert!(parens_hits.contains(&(two_a_shared, Reason::TypedMethod)));
+    let chain_leaf = input
+        .symbols
+        .iter()
+        .find(|s| s.owner.as_deref() == Some("Chain") && s.name == "LeafM")
+        .unwrap()
+        .id;
+    assert!(
+        !parens_hits
+            .iter()
+            .any(|(t, _)| *t == two_a_leaf || *t == chain_leaf)
+    );
+
+    let lang = GoLanguage::new();
+    let mut unary8 = String::from(
+        "package d
+type C struct{}
+func (C) M() {}
+func (C) Self() C { return C{} }
+func D(a ********C, c C) {
+	(********a).M()
+	c",
+    );
+    for _ in 0..8 {
+        unary8.push_str(".Self()");
+    }
+    unary8.push_str(
+        ".M()
+}
+",
+    );
+    let ext = lang.extract(&unary8).unwrap();
+    let m_calls: Vec<_> = ext
+        .refs
+        .iter()
+        .filter(|r| r.kind == RefKind::MethodCall && r.text == "M")
+        .collect();
+    assert_eq!(m_calls.len(), 2);
+    assert!(
+        m_calls[0].receiver_type.is_none(),
+        "unary8: {:?}",
+        m_calls[0]
+    );
+    assert!(
+        m_calls[1].receiver_type.is_none(),
+        "mret8: {:?}",
+        m_calls[1]
+    );
 }

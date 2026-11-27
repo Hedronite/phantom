@@ -48,6 +48,7 @@ CREATE TABLE modules(
     scope TEXT NOT NULL DEFAULT '',
     UNIQUE(target_id, path)
 ) STRICT;
+CREATE INDEX modules_file_scope ON modules(file_id, scope);
 
 CREATE TABLE symbols(
     id INTEGER PRIMARY KEY,
@@ -430,6 +431,18 @@ pub(crate) fn migrate_v3_to_v4(conn: &mut Connection) -> Result<(), StoreError> 
     crate::open_trace::record("migrate_v3_to_v4");
     let tx = conn.transaction()?;
     add_columns(&tx, V4_COLUMNS)?;
+    stamp_version(&tx, 4)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Moves a version-4 database to [`SCHEMA_VERSION`] in one transaction,
+/// adding the `modules(file_id, scope)` lookup index without touching rows.
+pub(crate) fn migrate_v4_to_v5(conn: &mut Connection) -> Result<(), StoreError> {
+    #[cfg(test)]
+    crate::open_trace::record("migrate_v4_to_v5");
+    let tx = conn.transaction()?;
+    tx.execute_batch("CREATE INDEX IF NOT EXISTS modules_file_scope ON modules(file_id, scope);")?;
     stamp_version(&tx, SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
@@ -444,6 +457,7 @@ const STEPS: &[Step] = &[
     (1, migrate_v1_to_v2),
     (2, migrate_v2_to_v3),
     (3, migrate_v3_to_v4),
+    (4, migrate_v4_to_v5),
 ];
 
 /// Brings a database stamped `version` up to [`SCHEMA_VERSION`].

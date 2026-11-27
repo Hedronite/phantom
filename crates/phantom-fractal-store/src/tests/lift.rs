@@ -169,7 +169,7 @@ fn a_user_version_that_disagrees_with_the_stamp_is_refused() {
 
 #[test]
 fn a_version_one_database_migrates_through_two_and_three_to_four() {
-    assert_eq!(SCHEMA_VERSION, 4);
+    assert_eq!(SCHEMA_VERSION, 5);
     let db = TempDb::new("v1");
     assert_outside_workspace(db.path());
     drop(Store::open(db.path()).expect("create"));
@@ -180,6 +180,7 @@ fn a_version_one_database_migrates_through_two_and_three_to_four() {
              ALTER TABLE symbols DROP COLUMN owner;
              ALTER TABLE symbols DROP COLUMN owner_path;
              ALTER TABLE symbols DROP COLUMN trait_name;
+             DROP INDEX IF EXISTS modules_file_scope;
              ALTER TABLE modules DROP COLUMN scope;
              ALTER TABLE refs DROP COLUMN scope;
              ALTER TABLE refs DROP COLUMN receiver;
@@ -194,8 +195,8 @@ fn a_version_one_database_migrates_through_two_and_three_to_four() {
     }
     let before = file_bytes_before(db.path());
     let store = Store::open(db.path()).expect("open migrates");
-    assert_eq!(store.schema_version().expect("version"), 4);
-    assert_eq!(store.user_version().expect("user_version"), 4);
+    assert_eq!(store.schema_version().expect("version"), 5);
+    assert_eq!(store.user_version().expect("user_version"), 5);
     drop(store);
     // The migration wrote the database, unlike the refusal cases.
     assert_ne!(file_bytes_before(db.path()), before);

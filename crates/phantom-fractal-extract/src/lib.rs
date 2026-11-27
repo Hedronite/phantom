@@ -17,7 +17,7 @@ mod rebuild;
 pub mod registry;
 mod walk;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
 
@@ -26,7 +26,7 @@ use phantom_fractal_lang::{Edge, Reason, ResolveCounts};
 use phantom_fractal_lang_rust::RustLanguage;
 use phantom_fractal_store::{IndexState, Store, StoreError, SymbolMatch, parse_path_line};
 
-use fingerprint::{Unread, read_manifests_with, stamp};
+use fingerprint::{Unread, read_manifests_with, stamp_with_extra};
 
 pub use diff::{ChangedSymbol, Diff, DiffError, FileOnly, diff, diff_with, symbol_keys};
 pub use fresh::{Freshness, probe, probe_with};
@@ -36,8 +36,8 @@ pub use rebuild::{
     stored_graph, stored_graph_with, stored_input, stored_links, stored_method_owners,
 };
 pub use registry::{
-    LanguageDriver, ManifestFile, PackageGraph, Registry, RustDriver, RustResolver,
-    SourceFileExtract, default_registry,
+    DriverFilter, GoDriver, LanguageDriver, ManifestFile, PackageGraph, Registry, RustDriver,
+    RustResolver, SourceFileExtract, default_registry,
 };
 pub use walk::{Candidate, MAX_FILE_BYTES, SkipReason, Skipped, Walk, is_secret, walk, walk_with};
 
@@ -255,33 +255,138 @@ pub fn index_with(
             skipped: walk.skipped.clone(),
             ..IndexReport::default()
         };
-        let kept = index_sources(&walk, store, registry, reextract, &mut report)?;
+        let manifests = read_manifests_with(&walk, registry)?;
+        let prefilter = build_driver_filters(&walk, &manifests, registry)?;
+        let kept = index_sources(
+            &walk,
+            store,
+            registry,
+            &prefilter.filters,
+            reextract,
+            &mut report,
+        )?;
         remove_stale_files(store, &kept, &mut report)?;
         let unread = unread_sources(&report, registry);
-        let manifests = read_manifests_with(&walk, registry)?;
-        let stamp = stamp(&manifests, &unread);
+        let stamp = stamp_with_extra(&manifests, &unread, &prefilter.excluded_hashes);
         let stale = store.workspace_fingerprint()? != Some(stamp.fingerprint);
         if reextract || !report.written.is_empty() || !report.removed.is_empty() || stale {
             report.graph = Some(rebuild::rebuild_with(
-                &manifests, &stamp, &kept, store, registry,
+                &manifests, &stamp, &kept, &prefilter, store, registry,
             )?);
         }
         Ok(report)
     })
 }
 
+pub(crate) struct PrefilterState {
+    pub(crate) filters: HashMap<String, Option<HashSet<String>>>,
+    pub(crate) build_excluded_count: u64,
+    pub(crate) build_excluded_terms: String,
+    pub(crate) excluded_hashes: Vec<(String, [u8; 32])>,
+    pub(crate) has_filtered_driver: bool,
+}
+
+fn build_driver_filters(
+    walk: &Walk,
+    manifests: &[fingerprint::ManifestRead],
+    registry: &Registry<'_>,
+) -> Result<PrefilterState, IndexError> {
+    let mut state = PrefilterState {
+        filters: HashMap::new(),
+        build_excluded_count: 0,
+        build_excluded_terms: String::new(),
+        excluded_hashes: Vec::new(),
+        has_filtered_driver: false,
+    };
+    let manifest_files = rebuild::kept_manifest_files_pub(manifests);
+    for driver in registry.drivers() {
+        if driver.needs_source_filter() {
+            apply_driver_filter(driver, &walk.files, &manifest_files, &mut state)?;
+        }
+    }
+    Ok(state)
+}
+
+fn apply_driver_filter(
+    driver: &dyn LanguageDriver,
+    files: &[Candidate],
+    manifest_files: &[ManifestFile],
+    state: &mut PrefilterState,
+) -> Result<(), IndexError> {
+    let exts = driver.language().extensions();
+    let candidates: Vec<&Candidate> = files
+        .iter()
+        .filter(|f| {
+            Path::new(&f.path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| exts.contains(&e))
+        })
+        .collect();
+    if candidates.is_empty() && !has_driver_manifest(manifest_files, driver) {
+        return Ok(());
+    }
+    state.has_filtered_driver = true;
+    let res = driver.filter_sources(manifest_files, &read_filter_texts(&candidates)?);
+    state.build_excluded_count += res.build_excluded_count;
+    append_terms(&mut state.build_excluded_terms, &res.build_excluded_terms);
+    state.excluded_hashes.extend(res.excluded_hashes);
+    state
+        .filters
+        .insert(driver.language().name().to_owned(), res.kept_paths);
+    Ok(())
+}
+
+fn append_terms(dst: &mut String, part: &str) {
+    if part.is_empty() {
+        return;
+    }
+    if !dst.is_empty() {
+        dst.push('\n');
+    }
+    dst.push_str(part);
+}
+
+fn has_driver_manifest(manifests: &[ManifestFile], driver: &dyn LanguageDriver) -> bool {
+    manifests.iter().any(|m| {
+        Path::new(&m.path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| driver.manifest_names().contains(&n))
+    })
+}
+
+fn read_filter_texts(candidates: &[&Candidate]) -> Result<Vec<(String, String)>, IndexError> {
+    let mut out = Vec::with_capacity(candidates.len());
+    for file in candidates {
+        if let Source::Bytes { bytes, .. } = read_source(&file.abs_path)?
+            && let Ok(text) = String::from_utf8(bytes)
+        {
+            out.push((file.path.clone(), text));
+        }
+    }
+    Ok(out)
+}
+
 fn index_sources<'a>(
     walk: &'a Walk,
     store: &mut Store,
     registry: &Registry<'_>,
+    filters: &std::collections::HashMap<String, Option<HashSet<String>>>,
     reextract: bool,
     report: &mut IndexReport,
 ) -> Result<Vec<&'a Candidate>, IndexError> {
     let mut kept = Vec::new();
     for file in &walk.files {
-        if let Some(driver) = registry.language_for(&file.path) {
-            index_one_source(file, driver.language(), store, reextract, report, &mut kept)?;
+        let Some(driver) = registry.language_for(&file.path) else {
+            continue;
+        };
+        if let Some(Some(allowed)) = filters.get(driver.language().name())
+            && !allowed.contains(&file.path)
+        {
+            continue;
         }
+        index_one_source(file, driver.language(), store, reextract, report, &mut kept)?;
     }
     Ok(kept)
 }

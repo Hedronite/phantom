@@ -380,7 +380,7 @@ fn status_has_the_spec_keys_and_no_path() {
         );
         assert_eq!(
             data["versions"],
-            json!({ "schema": 4, "extractor": 15, "envelope": 1 })
+            json!({ "schema": 5, "extractor": 15, "envelope": 1 })
         );
         assert_eq!(
             data["epochs"],
@@ -550,7 +550,7 @@ fn status_gives_the_stored_versions_where_reads_refuse_the_index() {
     let status = world.ok(&["status"]);
     assert_eq!(
         status["data"]["versions"],
-        json!({ "schema": 4, "extractor": 6, "envelope": 1 })
+        json!({ "schema": 5, "extractor": 6, "envelope": 1 })
     );
     let (code, line) = world.line(&["callers", "deep"]);
     assert_eq!(code, Some(2), "{line}");

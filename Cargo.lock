@@ -1355,6 +1355,7 @@ dependencies = [
  "libc",
  "phantom-fractal-git",
  "phantom-fractal-lang",
+ "phantom-fractal-lang-go",
  "phantom-fractal-lang-rust",
  "phantom-fractal-store",
 ]

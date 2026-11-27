@@ -274,20 +274,60 @@ fn multilang_interface_value_build_manifest_and_go_external_rules() {
 
     // Go ExternalUsersPossible = false for package main and internal/... paths,
     // while normal Go libs and Rust internal/ paths stay true.
-    for (file, pkg, lang, expected_external) in [
-        ("pkg/a.go", "example.com/app", None, true),
-        ("internal_helper/a.go", "example.com/app", None, true),
-        ("internal/a.go", "example.com/app", None, false),
-        ("pkg/internal/a.go", "example.com/app", None, false),
-        ("cmd/main.go", "main", None, false),
-        ("custom/ext", "example.com/app", Some("go"), true),
-        ("internal/custom.ext", "example.com/app", Some("go"), false),
-        ("internal/a.rs", "rust_pkg", Some("rust"), true),
+    for (file, pkg, target_name, lang, expected_external) in [
+        ("pkg/a.go", "example.com/app", Some("pkg"), None, true),
+        (
+            "internal_helper/a.go",
+            "example.com/app",
+            Some("internal_helper"),
+            None,
+            true,
+        ),
+        ("internal/a.go", "example.com/app", Some("pkg"), None, false),
+        (
+            "pkg/internal/a.go",
+            "example.com/app",
+            Some("pkg"),
+            None,
+            false,
+        ),
+        (
+            "cmd/main.go",
+            "example.com/app/cmd/main",
+            Some("main"),
+            None,
+            false,
+        ),
+        ("pkg/a.go", "main", Some("pkg"), None, true),
+        (
+            "custom/ext",
+            "example.com/app",
+            Some("pkg"),
+            Some("go"),
+            true,
+        ),
+        (
+            "internal/custom.ext",
+            "example.com/app",
+            Some("pkg"),
+            Some("go"),
+            false,
+        ),
+        (
+            "internal/a.rs",
+            "rust_pkg",
+            Some("rust_pkg"),
+            Some("rust"),
+            true,
+        ),
     ] {
         let mut gx = target();
         gx.facts_mut(1).file = file.to_owned();
         gx.facts_mut(1).visibility = "public".to_owned();
         gx.facts_mut(1).package = Some(pkg.to_owned());
+        if let Some(tname) = target_name {
+            gx.target_names.insert(1, tname.to_owned());
+        }
         gx.facts_mut(1).target_kind = Some("lib".to_owned());
         if let Some(l) = lang {
             gx.set_lang(file, l);

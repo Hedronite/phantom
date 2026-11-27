@@ -908,17 +908,22 @@ fn clear_crate_graph(tx: &rusqlite::Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
+type PackageIndex = HashMap<String, Vec<(String, i64)>>;
+
 fn insert_packages(
     tx: &rusqlite::Connection,
     packages: &[Package],
-) -> Result<HashMap<String, i64>, StoreError> {
-    let mut package_ids = HashMap::new();
+) -> Result<PackageIndex, StoreError> {
+    let mut package_ids: PackageIndex = HashMap::new();
     for package in packages {
         tx.execute(
             "INSERT INTO packages(name, version, manifest_path) VALUES (?1, ?2, ?3)",
             (&package.name, &package.version, &package.manifest_path),
         )?;
-        package_ids.insert(package.name.clone(), tx.last_insert_rowid());
+        package_ids
+            .entry(package.name.clone())
+            .or_default()
+            .push((package.manifest_path.clone(), tx.last_insert_rowid()));
     }
     Ok(package_ids)
 }
@@ -926,13 +931,11 @@ fn insert_packages(
 fn insert_targets(
     tx: &rusqlite::Connection,
     targets: &[Target],
-    package_ids: &HashMap<String, i64>,
+    package_ids: &PackageIndex,
 ) -> Result<HashMap<i64, i64>, StoreError> {
     let mut target_ids = HashMap::new();
     for target in targets {
-        let package_id = *package_ids
-            .get(&target.package)
-            .ok_or_else(|| StoreError::UnknownPackage(target.package.clone()))?;
+        let package_id = resolve_package_id(package_ids, &target.package, &target.root)?;
         tx.execute(
             "INSERT INTO targets(package_id, kind, name, root_file) VALUES (?1, ?2, ?3, ?4)",
             (
@@ -945,6 +948,38 @@ fn insert_targets(
         target_ids.insert(target.id, tx.last_insert_rowid());
     }
     Ok(target_ids)
+}
+
+fn resolve_package_id(
+    package_ids: &PackageIndex,
+    package_name: &str,
+    target_root: &str,
+) -> Result<i64, StoreError> {
+    let entries = package_ids
+        .get(package_name)
+        .filter(|list| !list.is_empty())
+        .ok_or_else(|| StoreError::UnknownPackage(package_name.to_owned()))?;
+    if entries.len() == 1 {
+        return Ok(entries[0].1);
+    }
+    let want_go = target_root.ends_with(".go");
+    entries
+        .iter()
+        .max_by_key(|(manifest, _)| manifest_match_score(manifest, target_root, want_go))
+        .map(|(_, id)| *id)
+        .ok_or_else(|| StoreError::UnknownPackage(package_name.to_owned()))
+}
+
+fn manifest_match_score(manifest: &str, target_root: &str, want_go: bool) -> (usize, usize) {
+    let is_go_manifest = manifest.ends_with("go.mod") || manifest.ends_with("go.work");
+    let lang_match = usize::from(want_go == is_go_manifest);
+    let dir = manifest.rsplit_once('/').map_or("", |(d, _)| d);
+    let prefix = if dir.is_empty() || target_root.starts_with(dir) {
+        dir.len() + 1
+    } else {
+        0
+    };
+    (lang_match, prefix)
 }
 
 fn file_ids_map(tx: &rusqlite::Connection) -> Result<HashMap<String, i64>, StoreError> {
