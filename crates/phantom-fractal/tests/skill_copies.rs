@@ -59,6 +59,9 @@ const SHARED: &[&str] = &[
     "one grep",
     "confirm_with_grep",
     "Phantom's own data directory, never the repo",
+    "command per shell call",
+    "10 KB",
+    ">= 0.5",
 ];
 
 const COPIES: &[&str] = &[".claude/skills", ".cursor/skills", ".grok/skills"];
@@ -194,7 +197,7 @@ const W15_TEXT: &[&str] = &[
     "Use `where NAME` first when a\n`Type::method` may exist in more than one crate, then pass its `display`.",
     "Flags: `--repo`, `--limit` and `--depth` may come before or after the\ncommand",
     "nu phantom.nu impact NAME [--depth 1..5] [--limit N] [--no-tests]",
-    "- **Where, path and co-change** (`where`, `show`, `path`, `cochange`):\n  answer from the envelope. Do not re-grep.",
+    "- **Where and co-change** (`where`, `show`, `cochange`):\n  answer from the envelope. Do not re-grep.",
     "Confirm with one grep of the bare name\n  and compare counts. Search further only when the reply sets\n  `confirm_with_grep: true`",
     "- **Tests and orientation** (`impact`'s `tests`, `map`, `rank`, `status`):\n  at most one confirming read.",
 ];
@@ -205,6 +208,113 @@ fn skill_states_the_trust_rule_flags_and_harness_note() {
     for text in W15_TEXT {
         assert!(skill.contains(text), "SKILL.md lacks {text:?}");
     }
+}
+
+/// SPEC-w17 G1b: one command per shell call, and the `path` trust rule, as
+/// SKILL.md and `phantom.nu`'s help word them.
+const SKILL_RULES: &[&str] = &[
+    "One phantom command per shell call: never chain two with `;` or `&&`.",
+    "Harnesses cut combined output near 10 KB",
+    "(`where`, `show`, `cochange`): answer from the envelope.",
+    "a resolved route, not always the shortest real one.",
+    "when `data.found` is true and `data.confidence` >= 0.5.",
+    "When `found` is false or `confidence` is lower, confirm with one grep.",
+    "`hops[].confidence`",
+];
+const HELP_RULES: &[&str] = &[
+    "calls: \"one phantomq command per shell call, never chained with ; or &&:",
+    "where, show, cochange: answer from the reply; path too when found is true and confidence >= 0.5.",
+    "When found is false or confidence is lower, confirm with one grep.",
+];
+
+#[test]
+fn every_copy_and_the_pointer_state_the_one_call_and_path_rules() {
+    for tree in std::iter::once(&".agents/skills").chain(COPIES) {
+        let read = |file: &str| {
+            let path = root().join(tree).join("phantom").join(file);
+            fs::read_to_string(&path).unwrap_or_else(|err| panic!("{}: {err}", path.display()))
+        };
+        let (skill, body) = (flat(&read("SKILL.md")), read("phantom.nu"));
+        for rule in SKILL_RULES {
+            assert!(skill.contains(rule), "{tree} SKILL.md lacks {rule:?}");
+        }
+        for rule in HELP_RULES {
+            assert!(body.contains(rule), "{tree} phantom.nu lacks {rule:?}");
+        }
+        // `path` is no longer trusted whatever it says.
+        assert!(!skill.contains("`show`, `path`, `cochange`"), "{tree}");
+        assert!(!body.contains("where, show, path, cochange:"), "{tree}");
+    }
+    let pointer = pointer();
+    for rule in [
+        "One `phantomq` command per shell call, never chained with `;` or `&&`",
+        "and `path` with `found` true and `confidence` >= 0.5, from the reply",
+        "Confirm any other `path` with one grep.",
+    ] {
+        assert!(pointer.contains(rule), "pointer lacks {rule:?}");
+    }
+    assert!(
+        !pointer.contains("`show`, `path` and `cochange`"),
+        "{pointer}"
+    );
+}
+
+/// The README names the `ssh` shim that `scripts/` ships, and no other.
+#[test]
+fn the_readme_names_the_shipped_ssh_shim() {
+    const SHIM: &str = "phantom-fractal-ssh";
+    let shipped: Vec<String> = fs::read_dir(root().join("scripts"))
+        .expect("scripts")
+        .map(|entry| entry.expect("entry").file_name().into_string())
+        .map(|name| name.expect("utf-8 name"))
+        .filter(|name| name.starts_with("phantom-fractal"))
+        .collect();
+    assert_eq!(shipped, [SHIM]);
+    let readme = fs::read_to_string(root().join("README.md")).expect("README.md");
+    assert!(
+        readme.contains(&format!("](scripts/{SHIM})")),
+        "no shim link"
+    );
+    let mut texts = vec![("README.md".to_owned(), readme)];
+    for tree in std::iter::once(&".agents/skills").chain(COPIES) {
+        for file in ["phantom/SKILL.md", "phantom/phantom.nu"] {
+            let rel = format!("{tree}/{file}");
+            let text = fs::read_to_string(root().join(&rel)).expect("skill file");
+            texts.push((rel, text));
+        }
+    }
+    for (rel, text) in &texts {
+        let mut after = text.split("scripts/phantom-fractal").skip(1);
+        assert!(
+            after.all(|rest| rest.starts_with("-ssh")),
+            "{rel} names another shim"
+        );
+    }
+}
+
+/// The `path` rule cites `found`, `confidence` and `hops[].confidence`:
+/// each is a field the reply has, and `confidence` is the hops' product.
+#[test]
+fn the_path_rule_cites_fields_the_reply_has() {
+    let Some(nu) = nu() else { return };
+    let skill = Skill::new(nu);
+
+    let reply = skill.run(&["path", "entry", "build"]);
+    let data = &reply["data"];
+    assert_eq!(data["found"], true, "{reply}");
+    let hops = data["hops"].as_array().expect("hops");
+    assert!(!hops.is_empty(), "{reply}");
+    let product: f64 = hops
+        .iter()
+        .map(|hop| hop["confidence"].as_f64().expect("hop confidence"))
+        .product();
+    let confidence = data["confidence"].as_f64().expect("confidence");
+    assert!((confidence - product).abs() < 1e-9, "{reply}");
+
+    let none = skill.run(&["path", "build", "entry"]);
+    assert_eq!(none["ok"], true, "{none}");
+    assert_eq!(none["data"]["found"], false, "{none}");
+    assert!(none["data"]["confidence"].is_null(), "{none}");
 }
 
 /// `help` prints a usage for every command SKILL.md lists, and its table

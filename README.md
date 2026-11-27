@@ -841,7 +841,7 @@ exec nu "$HOME/.agents/skills/phantom/phantom.nu" "$@"
 
 Then `phantomq callers app::watch_dir` is the whole call. A harness's allow list can name `phantomq` instead of a whole MCP server.
 
-**`$PHANTOM_FRACTAL_BIN`** names the program the skill runs instead of `phantom-fractal` on `PATH`. On a machine that should not hold the binary or the index, point it at [`scripts/phantom-fractal-tower`](scripts/phantom-fractal-tower), which single-quotes every argument over `ssh` so shell metacharacters never execute remotely and refuses unmapped local absolute or `..` `--repo` paths before invoking `ssh`. Configure it via environment variables:
+**`$PHANTOM_FRACTAL_BIN`** names the program the skill runs instead of `phantom-fractal` on `PATH`. On a machine that should not hold the binary or the index, point it at [`scripts/phantom-fractal-ssh`](scripts/phantom-fractal-ssh), which single-quotes every argument over `ssh` so shell metacharacters never execute remotely and refuses unmapped local absolute or `..` `--repo` paths before invoking `ssh`. Configure it via environment variables:
 
 - `PHANTOM_SSH_HOST` (required): remote SSH target host (its remote login shell must be POSIX: `sh`, `bash`, `zsh`, `dash`, or `ksh`; backslashes are refused so `fish` cannot reopen single quotes).
 - `PHANTOM_REMOTE_BIN`: remote `phantom-fractal` binary (default: `phantom-fractal`).
@@ -856,9 +856,9 @@ This tree has a Phantom index. For code structure, run these before grep; nothin
 - Symbols: `phantomq where NAME`, `phantomq show NAME`, `phantomq callers NAME`, `phantomq callees NAME`, `phantomq impact NAME`, `phantomq path FROM TO`
 - Tree: `phantomq map --budget 1500`, `phantomq cochange FILE`, `phantomq diff-impact`, `phantomq status`, `phantomq index`
 - NAME: a bare name, `Type::method`, `module::name`, `<crate>::item`, a reply's `display`, or `path:line` of a definition (fresh index only).
-- Keep output small (a harness may cut it near 10 KB): `--limit 20` on callers, callees, impact and cochange. Above 100, `--limit` is cut to 100 and `meta.limit` says so.
+- One `phantomq` command per shell call, never chained with `;` or `&&`: harnesses cut combined output near 10 KB. Use `--limit 20` on callers, callees, impact and cochange. Above 100, `--limit` is cut to 100 and `meta.limit` says so.
 - A miss is never guessed at: on `not_found` pick from `did_you_mean`, or run `retry` if its symbol is the one you meant. On `ambiguous` rerun with a `matches[].display`.
-- Trust: answer `where`, `show`, `path` and `cochange` from the reply, with no grep or file read. `callers`, `callees`, `impact` and `diff-impact` follow resolved calls only: confirm with one grep of the bare name, and search further only on `confirm_with_grep: true`.
+- Trust: answer `where`, `show`, `cochange`, and `path` with `found` true and `confidence` >= 0.5, from the reply, with no grep or file read. Confirm any other `path` with one grep. `callers`, `callees`, `impact` and `diff-impact` follow resolved calls only: confirm with one grep of the bare name, and search further only on `confirm_with_grep: true`.
 - No index, or `meta.stale: true`: run `phantomq index`. It writes only to Phantom's own data directory, never the repo.
 ```
 

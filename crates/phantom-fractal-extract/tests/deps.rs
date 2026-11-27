@@ -72,9 +72,9 @@ fn other_dependency_forms_give_no_dependency() {
         // A version-only line, and a version-only table.
         "core-lib = \"0.1\"",
         "core-lib = { version = \"0.1\" }",
-        // A rename, a git source, and a quoted key.
-        "core = { path = \"../core-lib\", package = \"core-lib\" }",
-        "core-lib = { path = \"../core-lib\", package = \"core-lib\" }",
+        // A git source, empty package rename, and a quoted key.
+        "core-lib = { package = \"\", path = \"../core-lib\" }",
+        "core-lib = { package = \"core-lib\", workspace = true }",
         "core-lib = { git = \"https://example.invalid/core\", path = \"../core-lib\" }",
         "\"core-lib\" = { path = \"../core-lib\" }",
         // An inline table over several lines.
@@ -224,7 +224,7 @@ fn a_dev_dependency_counts_in_the_same_forms_marked_dev() {
     }
     for line in [
         "core-lib = \"0.1\"",
-        "core = { path = \"../core-lib\", package = \"core-lib\" }",
+        "core-lib = { package = \"\", path = \"../core-lib\" }",
         "core-lib = { git = \"https://example.invalid/core\", path = \"../core-lib\" }",
         "\"core-lib\" = { path = \"../core-lib\" }",
         "core-lib = {\n    path = \"../core-lib\",\n}",
@@ -243,4 +243,129 @@ fn a_package_both_tables_name_gives_two_entries() {
     let mut want = on_core();
     want.extend(dev_on_core());
     assert_eq!(scan(&manifests), want);
+}
+
+#[test]
+fn member_and_workspace_renames_use_real_package_for_paths_and_alias_for_crate_name() {
+    let root = "[workspace]\nmembers = [\"core-lib\", \"other\", \"app\"]\n\n\
+                [workspace.dependencies]\n\
+                ws-core = { package = \"core-lib\", path = \"core-lib\", version = \"0.1\" }\n";
+    assert_eq!(
+        scan(&workspace(
+            root,
+            "corelib = { package = \"core-lib\", path = \"../core-lib\" }"
+        )),
+        [Dep {
+            package: "app".to_owned(),
+            on: "core-lib".to_owned(),
+            crate_name: "corelib".to_owned(),
+            dev: false,
+        }]
+    );
+    assert_eq!(
+        scan(&workspace(root, "ws-core.workspace = true")),
+        [Dep {
+            package: "app".to_owned(),
+            on: "core-lib".to_owned(),
+            crate_name: "ws_core".to_owned(),
+            dev: false,
+        }]
+    );
+    assert_eq!(
+        scan(&workspace(
+            root,
+            "[dev-dependencies]\nws-core = { workspace = true }"
+        )),
+        [Dep {
+            package: "app".to_owned(),
+            on: "core-lib".to_owned(),
+            crate_name: "ws_core".to_owned(),
+            dev: true,
+        }]
+    );
+    // Self-dep through an alias is rejected, as is a mismatched directory.
+    assert_eq!(
+        scan(&workspace(
+            root,
+            "my-self = { package = \"app\", path = \".\" }"
+        )),
+        []
+    );
+    assert_eq!(
+        scan(&workspace(
+            root,
+            "corelib = { package = \"other\", path = \"../core-lib\" }"
+        )),
+        []
+    );
+}
+
+#[test]
+fn dependencies_use_target_custom_lib_name_when_not_renamed() {
+    let root = "[workspace]\nmembers = [\"facet-lattice\", \"vendor\", \"app\"]\n";
+    let manifests = vec![
+        manifest("Cargo.toml", root),
+        manifest(
+            "facet-lattice/Cargo.toml",
+            "[package]\nname = \"facet-lattice\"\n[lib]\nname = \"lattice-core\"\n",
+        ),
+        manifest(
+            "vendor/Cargo.toml",
+            "[package]\nname = \"nickel-lang-vector\"\n[lib]\nname = \"nickel_lang_vector\"\n",
+        ),
+        manifest(
+            "app/Cargo.toml",
+            "[package]\nname = \"app\"\n[dependencies]\n\
+             facet-lattice = { path = \"../facet-lattice\" }\n\
+             nickel-lang-vector = { path = \"../vendor\" }\n",
+        ),
+    ];
+    assert_eq!(
+        scan(&manifests),
+        [
+            Dep {
+                package: "app".to_owned(),
+                on: "facet-lattice".to_owned(),
+                crate_name: "lattice_core".to_owned(),
+                dev: false,
+            },
+            Dep {
+                package: "app".to_owned(),
+                on: "nickel-lang-vector".to_owned(),
+                crate_name: "nickel_lang_vector".to_owned(),
+                dev: false,
+            },
+        ]
+    );
+}
+
+#[test]
+fn lib_names_ignore_empty_and_duplicate_packages() {
+    let manifests = vec![
+        manifest(
+            "Cargo.toml",
+            "[package]\nname = \"\"\n[lib]\nname = \"bad\"\n",
+        ),
+        manifest(
+            "first/Cargo.toml",
+            "[package]\nname = \"dup\"\n[lib]\nname = \"first_lib\"\n",
+        ),
+        manifest(
+            "second/Cargo.toml",
+            "[package]\nname = \"dup\"\n[lib]\nname = \"second_lib\"\n",
+        ),
+        manifest(
+            "app/Cargo.toml",
+            "[package]\nname = \"app\"\n[dependencies]\ndup = { path = \"../first\" }\n",
+        ),
+    ];
+    assert_eq!(
+        scan(&manifests),
+        [Dep {
+            package: "app".to_owned(),
+            on: "dup".to_owned(),
+            crate_name: "first_lib".to_owned(),
+            dev: false,
+        }]
+    );
 }

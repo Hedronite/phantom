@@ -228,12 +228,12 @@ impl<'a> Index<'a> {
     /// dev entry counts for a test only (SPEC-w11 G1b). A lib never names
     /// itself.
     fn crate_names(&self, input: &ResolveInput) -> HashMap<Id, HashMap<String, Option<Id>>> {
-        let lib_root = |package: &str| {
+        let lib_target = |package: &str| {
             input
                 .targets
                 .iter()
                 .find(|t| t.kind == TargetKind::Lib && t.package == package)
-                .and_then(|t| self.roots.get(&t.id).copied())
+                .and_then(|t| self.roots.get(&t.id).map(|root| (t.name.as_str(), *root)))
         };
         let mut out: HashMap<Id, HashMap<String, Option<Id>>> = HashMap::new();
         for target in &input.targets {
@@ -242,12 +242,12 @@ impl<'a> Index<'a> {
                 .iter()
                 .filter(|dep| dep.package == target.package && dep.on != target.package)
                 .filter(|dep| !dep.dev || target.kind == TargetKind::Test)
-                .filter_map(|dep| Some((dep.crate_name.clone(), lib_root(&dep.on)?)))
+                .filter_map(|dep| Some((dep.crate_name.clone(), lib_target(&dep.on)?.1)))
                 .collect();
             if matches!(target.kind, TargetKind::Bin | TargetKind::Test)
-                && let Some(root) = lib_root(&target.package)
+                && let Some((lib_name, root)) = lib_target(&target.package)
             {
-                callable.push((target.package.replace('-', "_"), root));
+                callable.push((lib_name.replace('-', "_"), root));
             }
             let names = out.entry(target.id).or_default();
             for (name, root) in callable {

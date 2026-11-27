@@ -647,6 +647,21 @@ fn help_prints_the_command_table_and_runs_nothing() {
     for key in ["flags", "names", "envelope", "read"] {
         assert!(table["data"][key].as_str().is_some(), "{key}: {table}");
     }
+    // SPEC-w17 G1b: one command per shell call, and when `path` is trusted.
+    assert_eq!(
+        table["data"]["calls"],
+        "one phantomq command per shell call, never chained with ; or &&: \
+         a harness may cut combined output near 10 KB",
+        "{table}"
+    );
+    let trust = table["data"]["trust"].as_str().expect("trust");
+    for rule in [
+        "where, show, cochange: answer from the reply; \
+         path too when found is true and confidence >= 0.5.",
+        "When found is false or confidence is lower, confirm with one grep.",
+    ] {
+        assert!(trust.contains(rule), "{rule:?}: {table}");
+    }
     // One line a harness raised to 8192 columns shows whole.
     assert!(table.to_string().len() < 8192, "{table}");
 

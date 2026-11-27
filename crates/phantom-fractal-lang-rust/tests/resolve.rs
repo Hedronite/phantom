@@ -459,3 +459,53 @@ fn a_name_two_failing_uses_bind_is_unresolved_when_either_names_the_workspace() 
         );
     }
 }
+
+#[test]
+fn bin_and_test_call_own_lib_by_custom_lib_name_not_package_name() {
+    use phantom_fractal_lang::TargetKind;
+    let mut i = Input::new();
+    i.input.targets.clear();
+    i.input.modules.clear();
+    i.target("facet-lattice", TargetKind::Lib, "src/lib.rs");
+    i.input.targets[0].name = "lattice".to_owned();
+    i.target("facet-lattice", TargetKind::Bin, "src/main.rs");
+    i.target("facet-lattice", TargetKind::Test, "tests/it.rs");
+    let api = i.symbol(SymbolKind::Function, "now_ms", "src/lib.rs", "");
+    let bin_main = i.symbol(SymbolKind::Function, "main", "src/main.rs", "");
+    let test_fn = i.symbol(SymbolKind::Function, "smoke", "tests/it.rs", "");
+    let c1 = i.call_from(bin_main, "src/main.rs", "lattice::now_ms");
+    let _c2 = i.call_from(bin_main, "src/main.rs", "facet_lattice::now_ms");
+    let c3 = i.call_from(test_fn, "tests/it.rs", "lattice::now_ms");
+    let (edges, counts) = i.resolve();
+    assert_eq!(
+        edges,
+        [
+            edge(c1, bin_main, api, Reason::CratePath),
+            edge(c3, test_fn, api, Reason::CratePath),
+        ]
+    );
+    assert_eq!(counts.external, 1);
+}
+
+#[test]
+fn standard_crates_precedence_keeps_core_external() {
+    use phantom_fractal_lang::TargetKind;
+    let mut i = Input::new();
+    i.input.targets.clear();
+    i.input.modules.clear();
+    i.target("my-core", TargetKind::Lib, "core/src/lib.rs");
+    i.input.targets[0].name = "core".to_owned();
+    i.target("app", TargetKind::Lib, "app/src/lib.rs");
+    i.input.deps.push(phantom_fractal_lang::Dep {
+        package: "app".to_owned(),
+        on: "my-core".to_owned(),
+        crate_name: "core".to_owned(),
+        dev: false,
+    });
+    let _helper = i.symbol(SymbolKind::Function, "helper", "core/src/lib.rs", "");
+    let caller = i.symbol(SymbolKind::Function, "go", "app/src/lib.rs", "");
+    i.call_from(caller, "app/src/lib.rs", "core::helper");
+    let (edges, counts) = i.resolve();
+    assert!(edges.is_empty(), "{edges:?}");
+    assert_eq!(counts.external, 1);
+}

@@ -12,13 +12,13 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 
-use phantom_fractal_extract::{EXTRACTOR_VERSION, resolve_query};
+use phantom_fractal_extract::EXTRACTOR_VERSION;
 use phantom_fractal_lang::{Id, ResolveInput, Symbol, SymbolKind};
 use phantom_fractal_proto::ErrorKind;
 use phantom_fractal_store::{Store, SymbolMatch, parse_path_line};
 use serde::Serialize;
 
-use super::{Failure, budget, canonical_repo, open_index};
+use super::{Failure, budget, canonical_repo, fresh, open_index};
 
 /// Most candidates an `Ambiguous` failure lists.
 const CANDIDATE_CAP: usize = 10;
@@ -258,7 +258,12 @@ fn find_one(
 /// checked against the tree first, and refused when the index is stale.
 fn resolved(store: &Store, query: &Query) -> Result<Vec<SymbolMatch>, Failure> {
     let root = canonical_repo(query.repo)?;
-    let mut matches = resolve_query(&root, store, query.text)?;
+    let mut matches = if parse_path_line(query.text).is_some() {
+        let state = fresh::index_state(&root, store)?;
+        store.symbols_matching_for(query.text, state)?
+    } else {
+        store.symbols_matching(query.text)?
+    };
     matches.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
     Ok(matches)
 }

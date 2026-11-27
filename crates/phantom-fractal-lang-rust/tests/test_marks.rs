@@ -114,3 +114,21 @@ fn a_mod_declaration_records_cfg_test_exactly() {
         ]
     );
 }
+
+#[test]
+fn non_identifier_attribute_paths_do_not_mark_tests() {
+    let source = "#[unsafe(no_mangle)]
+pub extern \"C\" fn exported() {}
+                  #[crate]
+fn plain() {}
+";
+    let items: Vec<(String, bool)> = extract(source)
+        .items
+        .into_iter()
+        .map(|item| (item.name, item.is_test))
+        .collect();
+    assert_eq!(
+        items,
+        [("exported".to_owned(), false), ("plain".to_owned(), false)]
+    );
+}

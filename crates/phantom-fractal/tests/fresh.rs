@@ -380,7 +380,7 @@ fn status_has_the_spec_keys_and_no_path() {
         );
         assert_eq!(
             data["versions"],
-            json!({ "schema": 4, "extractor": 14, "envelope": 1 })
+            json!({ "schema": 4, "extractor": 15, "envelope": 1 })
         );
         assert_eq!(
             data["epochs"],
@@ -618,11 +618,11 @@ fn status_flags_an_index_from_another_extractor_version() {
                 .filter(|check| check["name"] == "extractor" || check["name"] == "databases")
                 .collect::<Vec<_>>()
         };
-        status(false, 14);
+        status(false, 15);
         let fresh = doctor();
         let extractor = fresh.iter().find(|check| check["name"] == "extractor");
-        assert_eq!(extractor.expect("extractor")["detail"], "14", "git {git}");
-        for stamp in [7, 8, 9, 10, 11, 12, 13] {
+        assert_eq!(extractor.expect("extractor")["detail"], "15", "git {git}");
+        for stamp in [7, 8, 9, 10, 11, 12, 13, 14] {
             world.store().set_extractor_version(stamp).expect("stamp");
             let db = world.db();
             status(true, stamp);
@@ -636,7 +636,7 @@ fn status_flags_an_index_from_another_extractor_version() {
             assert_eq!(doctor(), fresh, "git {git} stamp {stamp}");
             assert_eq!(world.db(), db, "git {git} stamp {stamp}: a read wrote");
             world.index();
-            status(false, 14);
+            status(false, 15);
         }
     }
 }
@@ -653,4 +653,147 @@ fn status_names_a_tree_with_no_stored_root_by_its_key() {
     let (slug, hash) = key.rsplit_once('-').expect("a hashed key");
     assert_eq!(hash.len(), 8, "{key}");
     assert_eq!(env["data"]["name"], slug, "{env}");
+}
+
+#[test]
+fn locality_guard_env_vars_are_monotone_and_fail_closed() {
+    let world = World::git();
+    let head = world.repo().rev("HEAD");
+    let idx = world.index();
+    assert_eq!(idx["ok"], true, "{idx}");
+    let rank_epoch = world.store().rank_epoch().expect("rank epoch");
+
+    let run_with_env = |envs: &[(&str, &str)]| -> (Option<i32>, String) {
+        let mut cmd = Command::new(BINS[0]);
+        cmd.args(["status"])
+            .current_dir(&world.root)
+            .env("PHANTOM_FRACTAL_DATA", world.data.path());
+        for (k, v) in envs {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().expect("run cli");
+        let s = String::from_utf8(out.stdout).expect("utf-8");
+        (out.status.code(), s.trim_end_matches('\n').to_owned())
+    };
+
+    // Matching 40-hex HEAD and clean expected_dirty=0 stays fresh without stale_cause.
+    let (code, line) = run_with_env(&[
+        ("PHANTOM_EXPECTED_HEAD", &head),
+        ("PHANTOM_EXPECTED_DIRTY", "0"),
+    ]);
+    assert_eq!(code, Some(0), "{line}");
+    assert_meta(&line, &meta(false, Some(&head), Some(&head), rank_epoch));
+
+    // Mismatched or invalid PHANTOM_EXPECTED_HEAD (including 64-hex against 40-hex) -> stale local_head.
+    let other_40 = "0".repeat(40);
+    let sha256_64 = "a".repeat(64);
+    for bad_head in [
+        other_40.as_str(),
+        sha256_64.as_str(),
+        "BAD",
+        "g".repeat(40).as_str(),
+    ] {
+        let (code, line) = run_with_env(&[
+            ("PHANTOM_EXPECTED_HEAD", bad_head),
+            ("PHANTOM_EXPECTED_DIRTY", "0"),
+        ]);
+        assert_eq!(code, Some(0), "{bad_head}: {line}");
+        let v: Value = serde_json::from_str(&line).expect("json");
+        assert_eq!(v["data"]["stale"], true, "{bad_head}: {line}");
+        assert_eq!(v["meta"]["stale"], true, "{bad_head}: {line}");
+        assert_eq!(v["meta"]["stale_cause"], "local_head", "{bad_head}: {line}");
+    }
+
+    // Matching HEAD + dirty or invalid PHANTOM_EXPECTED_DIRTY -> stale local_dirty.
+    for dirty in ["1", "invalid", ""] {
+        let (code, line) = run_with_env(&[
+            ("PHANTOM_EXPECTED_HEAD", &head),
+            ("PHANTOM_EXPECTED_DIRTY", dirty),
+        ]);
+        assert_eq!(code, Some(0), "{dirty}: {line}");
+        let v: Value = serde_json::from_str(&line).expect("json");
+        assert_eq!(v["data"]["stale"], true, "{dirty}: {line}");
+        assert_eq!(v["meta"]["stale"], true, "{dirty}: {line}");
+        assert_eq!(v["meta"]["stale_cause"], "local_dirty", "{dirty}: {line}");
+    }
+
+    // path:line resolves under matching clean guard, but is refused under local_dirty or local_head.
+    let sym = world.ok(&["show", "fa"]);
+    let line_num = sym["data"]["symbol"]["line"].as_u64().expect("line");
+    let at = format!("src/a.rs:{line_num}");
+    let ok_line = Command::new(BINS[0])
+        .args(["show", &at])
+        .current_dir(&world.root)
+        .env("PHANTOM_FRACTAL_DATA", world.data.path())
+        .env("PHANTOM_EXPECTED_HEAD", &head)
+        .env("PHANTOM_EXPECTED_DIRTY", "0")
+        .output()
+        .expect("show path:line");
+    assert_eq!(
+        ok_line.status.code(),
+        Some(0),
+        "{:?}",
+        String::from_utf8_lossy(&ok_line.stdout)
+    );
+    let ok_v: Value = serde_json::from_slice(&ok_line.stdout).expect("ok json");
+    assert_eq!(ok_v["meta"]["stale"], false, "{ok_v}");
+
+    for envs in [
+        [
+            ("PHANTOM_EXPECTED_HEAD", head.as_str()),
+            ("PHANTOM_EXPECTED_DIRTY", "1"),
+        ],
+        [
+            ("PHANTOM_EXPECTED_HEAD", other_40.as_str()),
+            ("PHANTOM_EXPECTED_DIRTY", "0"),
+        ],
+    ] {
+        let refused = Command::new(BINS[0])
+            .args(["show", &at])
+            .current_dir(&world.root)
+            .env("PHANTOM_FRACTAL_DATA", world.data.path())
+            .envs(envs)
+            .output()
+            .expect("show path:line stale");
+        assert_eq!(refused.status.code(), Some(1), "{envs:?}");
+        let err_v: Value = serde_json::from_slice(&refused.stdout).expect("err json");
+        assert_eq!(err_v["ok"], false, "{err_v}");
+        assert_eq!(err_v["error"]["kind"], "usage", "{err_v}");
+    }
+
+    // `impact --diff` receives meta.stale -> stale_index reason when local_dirty is set.
+    let diff_out = Command::new(BINS[0])
+        .args(["impact", "--diff"])
+        .current_dir(&world.root)
+        .env("PHANTOM_FRACTAL_DATA", world.data.path())
+        .env("PHANTOM_EXPECTED_HEAD", &head)
+        .env("PHANTOM_EXPECTED_DIRTY", "1")
+        .output()
+        .expect("impact --diff");
+    assert!(
+        diff_out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&diff_out.stderr)
+    );
+    let diff_v: Value = serde_json::from_slice(&diff_out.stdout).expect("diff json");
+    assert_eq!(diff_v["meta"]["stale"], true, "{diff_v}");
+    assert_eq!(diff_v["meta"]["stale_cause"], "local_dirty", "{diff_v}");
+    assert_eq!(diff_v["data"]["impact"]["exact"], false, "{diff_v}");
+    let has_stale = diff_v["data"]["impact"]["reasons"]
+        .as_array()
+        .expect("reasons")
+        .iter()
+        .any(|r| r["reason"] == "stale_index");
+    assert!(has_stale, "{diff_v}");
+
+    // Monotone: dirty remote remains stale even when PHANTOM_EXPECTED_HEAD matches and DIRTY=0.
+    std::fs::write(world.root.join("untracked.rs"), "pub fn extra() {}\n").unwrap();
+    let (code, line) = run_with_env(&[
+        ("PHANTOM_EXPECTED_HEAD", &head),
+        ("PHANTOM_EXPECTED_DIRTY", "0"),
+    ]);
+    assert_eq!(code, Some(0), "{line}");
+    let v: Value = serde_json::from_str(&line).expect("json");
+    assert_eq!(v["meta"]["stale"], true, "{line}");
+    assert!(v["meta"].get("stale_cause").is_none(), "{line}");
 }

@@ -29,18 +29,31 @@ use crate::graph::{self, Manifest, join, normalize, parent_dir};
 /// Packages are named as [`graph::build`] names them.
 pub fn scan(manifests: &[Manifest]) -> Vec<Dep> {
     let packages = graph::build(manifests, &[]).packages;
+    let libs = graph::lib_names(manifests);
     let dirs: HashMap<&str, &str> = packages
         .iter()
         .map(|package| (package.name.as_str(), parent_dir(&package.manifest_path)))
         .collect();
-    let workspace: HashMap<String, String> = manifests
+    let workspace: HashMap<String, TargetSpec> = manifests
         .iter()
         .find(|manifest| manifest.path == "Cargo.toml")
         .map(|root| entries(&root.text, "[workspace.dependencies]"))
         .into_iter()
         .flatten()
         .filter_map(|(key, form)| match form {
-            Form::Path(path) => Some((key, inside("", &path)?)),
+            Form::Path { path, package } => {
+                let target = inside("", &path)?;
+                let renamed = package.is_some();
+                let real = package.unwrap_or_else(|| key.clone());
+                Some((
+                    key,
+                    TargetSpec {
+                        target,
+                        real,
+                        renamed,
+                    },
+                ))
+            }
             Form::Workspace => None,
         })
         .collect();
@@ -59,20 +72,19 @@ pub fn scan(manifests: &[Manifest]) -> Vec<Dep> {
                 .into_iter()
                 .map(move |entry| (dev, entry))
         }) {
-            let named = match form {
-                Form::Path(path) => inside(dir, &path),
-                Form::Workspace => workspace.get(&key).cloned(),
-            };
-            let Some(named) = named else {
+            let Some(spec) = resolve_target(&key, dir, form, &workspace) else {
                 continue;
             };
-            if key == package.name || dirs.get(key.as_str()) != Some(&named.as_str()) {
+            if spec.real == package.name
+                || dirs.get(spec.real.as_str()) != Some(&spec.target.as_str())
+            {
                 continue;
             }
+            let crate_name = crate_name_for(&key, &spec, &libs);
             let dep = Dep {
                 package: package.name.clone(),
-                crate_name: key.replace('-', "_"),
-                on: key,
+                crate_name,
+                on: spec.real,
                 dev,
             };
             if !deps.contains(&dep) {
@@ -83,11 +95,46 @@ pub fn scan(manifests: &[Manifest]) -> Vec<Dep> {
     deps
 }
 
+#[derive(Clone)]
+struct TargetSpec {
+    target: String,
+    real: String,
+    renamed: bool,
+}
+
+fn crate_name_for(key: &str, spec: &TargetSpec, libs: &HashMap<String, String>) -> String {
+    if spec.renamed {
+        return key.replace('-', "_");
+    }
+    libs.get(spec.real.as_str())
+        .cloned()
+        .unwrap_or_else(|| key.replace('-', "_"))
+}
+
+fn resolve_target(
+    key: &str,
+    dir: &str,
+    form: Form,
+    workspace: &HashMap<String, TargetSpec>,
+) -> Option<TargetSpec> {
+    match form {
+        Form::Path { path, package } => Some(TargetSpec {
+            target: inside(dir, &path)?,
+            renamed: package.is_some(),
+            real: package.unwrap_or_else(|| key.to_owned()),
+        }),
+        Form::Workspace => workspace.get(key).cloned(),
+    }
+}
+
 /// How one accepted dependency line names its package.
 #[derive(Debug, PartialEq, Eq)]
 enum Form {
-    /// `path = "…"`, as written.
-    Path(String),
+    /// `path = "…"`, with optional `package = "…"` rename.
+    Path {
+        path: String,
+        package: Option<String>,
+    },
     /// `workspace = true`.
     Workspace,
 }
@@ -109,6 +156,13 @@ fn entries(text: &str, header: &str) -> Vec<(String, Form)> {
     out
 }
 
+#[derive(Default)]
+struct InlineFields {
+    path: Option<String>,
+    package: Option<String>,
+    workspace: bool,
+}
+
 /// One `B.workspace = true` or single-line `B = { … }` line.
 fn entry(line: &str) -> Option<(String, Form)> {
     let (key, value) = line.split_once('=')?;
@@ -116,25 +170,53 @@ fn entry(line: &str) -> Option<(String, Form)> {
     if let Some(name) = key.strip_suffix(".workspace") {
         return (is_bare_key(name) && value == "true").then(|| (name.to_owned(), Form::Workspace));
     }
+    inline_entry(key, value)
+}
+
+fn inline_entry(key: &str, value: &str) -> Option<(String, Form)> {
     if !is_bare_key(key) {
         return None;
     }
     let body = value.strip_prefix('{')?.strip_suffix('}')?;
-    let mut path = None;
-    let mut workspace = false;
+    let parsed = parse_inline_fields(body)?;
+    form_from_fields(key, parsed)
+}
+
+fn form_from_fields(key: &str, parsed: InlineFields) -> Option<(String, Form)> {
+    match (parsed.path, parsed.package, parsed.workspace) {
+        (Some(path), package, false) => Some((key.to_owned(), Form::Path { path, package })),
+        (None, None, true) => Some((key.to_owned(), Form::Workspace)),
+        _ => None,
+    }
+}
+
+fn parse_inline_fields(body: &str) -> Option<InlineFields> {
+    let mut parsed = InlineFields::default();
     for field in fields(body)? {
         let (name, value) = field.split_once('=')?;
-        match (name.trim(), value.trim()) {
-            ("path", value) => path = Some(unquote(value)?.to_owned()),
-            ("workspace", "true") => workspace = true,
-            ("workspace" | "package" | "git", _) => return None,
-            _ => {}
+        if !apply_inline_field(&mut parsed, name.trim(), value.trim()) {
+            return None;
         }
     }
-    match (path, workspace) {
-        (Some(path), false) => Some((key.to_owned(), Form::Path(path))),
-        (None, true) => Some((key.to_owned(), Form::Workspace)),
-        _ => None,
+    Some(parsed)
+}
+
+fn apply_inline_field(parsed: &mut InlineFields, name: &str, value: &str) -> bool {
+    match name {
+        "path" => {
+            parsed.path = unquote(value).map(str::to_owned);
+            parsed.path.is_some()
+        }
+        "package" => {
+            parsed.package = non_empty_unquote(value);
+            parsed.package.is_some()
+        }
+        "workspace" => {
+            parsed.workspace = value == "true";
+            parsed.workspace
+        }
+        "git" => false,
+        _ => true,
     }
 }
 
@@ -168,6 +250,10 @@ fn fields(body: &str) -> Option<Vec<&str>> {
             .filter(|field| !field.trim().is_empty())
             .collect(),
     )
+}
+
+fn non_empty_unquote(value: &str) -> Option<String> {
+    unquote(value).filter(|s| !s.is_empty()).map(str::to_owned)
 }
 
 /// The text of a `"…"` or `'…'` string with no quote inside.

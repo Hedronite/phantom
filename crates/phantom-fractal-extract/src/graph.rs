@@ -70,7 +70,7 @@ pub fn build(manifests: &[Manifest], files: &[SourceFile]) -> Graph {
         if name.is_empty() || !names.insert(name.clone()) {
             continue;
         }
-        for (kind, target_name, root) in targets_of(dir, &name, files) {
+        for (kind, target_name, root) in targets_of(dir, &name, scan.lib_name.as_deref(), files) {
             if !kept.contains_key(root.as_str()) {
                 continue;
             }
@@ -141,38 +141,71 @@ pub fn build(manifests: &[Manifest], files: &[SourceFile]) -> Graph {
 }
 
 /// What a manifest's `[package]` table says.
+#[derive(Default)]
 struct ManifestScan {
+    has_package: bool,
     name: Option<String>,
     version: Option<String>,
+    lib_name: Option<String>,
 }
 
-/// Scans for a `[package]` table and its `name` and `version` strings.
+/// Custom `[lib]` crate names (normalized) keyed by package name, for
+/// manifests whose `[lib] name` differs from the normalized package name.
+pub(crate) fn lib_names(manifests: &[Manifest]) -> HashMap<String, String> {
+    let mut names = HashSet::new();
+    let mut out = HashMap::new();
+    for manifest in manifests {
+        let Some(scan) = scan_manifest(&manifest.text) else {
+            continue;
+        };
+        let dir = parent_dir(&manifest.path);
+        let package = scan.name.unwrap_or_else(|| file_name(dir).to_owned());
+        if package.is_empty() || !names.insert(package.clone()) {
+            continue;
+        }
+        if let Some(lib) = custom_lib_name(&package, scan.lib_name.as_deref()) {
+            out.insert(package, lib.replace('-', "_"));
+        }
+    }
+    out
+}
+
+fn custom_lib_name(package: &str, lib_name: Option<&str>) -> Option<String> {
+    let lib = lib_name.filter(|name| !name.is_empty())?;
+    (lib.replace('-', "_") != package.replace('-', "_")).then(|| lib.to_owned())
+}
+
+/// Scans for a `[package]` table and an optional `[lib]` table's `name`.
 fn scan_manifest(text: &str) -> Option<ManifestScan> {
-    let mut in_package = false;
-    let mut found = None;
+    let mut section = "";
+    let mut scan = ManifestScan::default();
     for line in text.lines() {
         let line = line.split('#').next().unwrap_or_default().trim();
         if line.starts_with('[') {
-            in_package = line == "[package]";
-            if in_package {
-                found.get_or_insert(ManifestScan {
-                    name: None,
-                    version: None,
-                });
-            }
+            section = line;
+            scan.has_package |= line == "[package]";
             continue;
         }
-        let Some(scan) = found.as_mut().filter(|_| in_package) else {
-            continue;
-        };
-        if scan.name.is_none() {
-            scan.name = string_value(line, "name");
-        }
-        if scan.version.is_none() {
-            scan.version = string_value(line, "version");
-        }
+        scan_line(&mut scan, section, line);
     }
-    found
+    scan.has_package.then_some(scan)
+}
+
+fn set_field(slot: &mut Option<String>, line: &str, key: &str) {
+    if slot.is_none() {
+        *slot = string_value(line, key);
+    }
+}
+
+fn scan_line(scan: &mut ManifestScan, section: &str, line: &str) {
+    match section {
+        "[package]" => {
+            set_field(&mut scan.name, line, "name");
+            set_field(&mut scan.version, line, "version");
+        }
+        "[lib]" => set_field(&mut scan.lib_name, line, "name"),
+        _ => {}
+    }
 }
 
 /// The string value of `key = "value"`, with either quote character.
@@ -190,10 +223,16 @@ fn string_value(line: &str, key: &str) -> Option<String> {
 
 /// The candidate targets of the package in `dir`: lib, bin, the `src/bin`
 /// bins, then the `tests` targets, each group in walk order.
-fn targets_of(dir: &str, package: &str, files: &[SourceFile]) -> Vec<(TargetKind, String, String)> {
+fn targets_of(
+    dir: &str,
+    package: &str,
+    lib_name: Option<&str>,
+    files: &[SourceFile],
+) -> Vec<(TargetKind, String, String)> {
     let src = join(dir, "src");
+    let lib = custom_lib_name(package, lib_name).unwrap_or_else(|| package.to_owned());
     let mut out = vec![
-        (TargetKind::Lib, package.to_owned(), join(&src, "lib.rs")),
+        (TargetKind::Lib, lib, join(&src, "lib.rs")),
         (TargetKind::Bin, package.to_owned(), join(&src, "main.rs")),
     ];
     let bin_dir = join(&src, "bin");

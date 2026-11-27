@@ -68,8 +68,12 @@ has_parent_traversal() {
   esac
 }
 
+probe_local_dir=""
+_mapped_repo=""
+
 validate_and_map_repo() {
   _repo=$1
+  _mapped_repo=""
   if [ -z "$_repo" ]; then
     die "refused empty --repo path"
   fi
@@ -88,24 +92,32 @@ validate_and_map_repo() {
       fi
       if [ -n "$_local" ] && [ -n "$_remote" ]; then
         if [ "$_repo" = "$_local" ]; then
-          printf '%s' "$_remote"
+          probe_local_dir=$_local
+          _mapped_repo=$_remote
           return 0
         fi
         case $_repo in
           "$_local"/*)
-            printf '%s' "$_remote/${_repo#"$_local"/}"
+            probe_local_dir=$_local
+            _mapped_repo="$_remote/${_repo#"$_local"/}"
             return 0
             ;;
         esac
       fi
       if [ -n "$_remote" ]; then
         if [ "$_repo" = "$_remote" ]; then
-          printf '%s' "$_repo"
+          if [ -n "$_local" ]; then
+            probe_local_dir=$_local
+          fi
+          _mapped_repo=$_repo
           return 0
         fi
         case $_repo in
           "$_remote"/*)
-            printf '%s' "$_repo"
+            if [ -n "$_local" ]; then
+              probe_local_dir=$_local
+            fi
+            _mapped_repo=$_repo
             return 0
             ;;
         esac
@@ -113,9 +125,48 @@ validate_and_map_repo() {
       die "refused unmapped local absolute --repo path; set PHANTOM_REMOTE_REPO or pass a remote path"
       ;;
     *)
-      printf '%s' "$_repo"
+      _mapped_repo=$_repo
       ;;
   esac
+}
+
+expected_head=""
+expected_dirty=""
+
+probe_local_repo() {
+  _dir=$1
+  expected_head=""
+  expected_dirty="1"
+  if ! command -v git >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! _head=$(
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR \
+      GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+    git -C "$_dir" -c core.fsmonitor=false -c core.hooksPath=/dev/null rev-parse HEAD 2>/dev/null
+  ); then
+    return 0
+  fi
+  case $_head in
+    *[!0-9a-f]*)
+      return 0
+      ;;
+  esac
+  if [ "${#_head}" -ne 40 ] && [ "${#_head}" -ne 64 ]; then
+    return 0
+  fi
+  if ! _status=$(
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR \
+      GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+    git -C "$_dir" -c core.fsmonitor=false -c core.hooksPath=/dev/null status --porcelain=v1 --untracked-files=normal 2>/dev/null
+  ); then
+    expected_head=$_head
+    return 0
+  fi
+  expected_head=$_head
+  if [ -z "$_status" ]; then
+    expected_dirty="0"
+  fi
 }
 
 ssh_host=${PHANTOM_SSH_HOST-}
@@ -129,21 +180,15 @@ if [ -z "$remote_bin" ]; then
 fi
 reject_backslash "$remote_bin" "PHANTOM_REMOTE_BIN"
 
-remote_cmd=""
-if [ -n "${PHANTOM_REMOTE_DATA_DIR-}" ]; then
-  reject_backslash "$PHANTOM_REMOTE_DATA_DIR" "PHANTOM_REMOTE_DATA_DIR"
-  remote_cmd="PHANTOM_FRACTAL_DATA=$(sh_quote "$PHANTOM_REMOTE_DATA_DIR") "
-fi
-remote_cmd="${remote_cmd}exec $(sh_quote "$remote_bin")"
-
+args_cmd=""
 after_double_dash=0
 expect_repo_val=0
 for arg in "$@"; do
   reject_backslash "$arg" "argument"
   if [ "$expect_repo_val" -eq 1 ]; then
-    mapped=$(validate_and_map_repo "$arg")
-    reject_backslash "$mapped" "--repo path"
-    remote_cmd="$remote_cmd $(sh_quote "$mapped")"
+    validate_and_map_repo "$arg"
+    reject_backslash "$_mapped_repo" "--repo path"
+    args_cmd="$args_cmd $(sh_quote "$_mapped_repo")"
     expect_repo_val=0
     continue
   fi
@@ -151,28 +196,42 @@ for arg in "$@"; do
     case $arg in
       --)
         after_double_dash=1
-        remote_cmd="$remote_cmd '--'"
+        args_cmd="$args_cmd '--'"
         continue
         ;;
       --repo)
         expect_repo_val=1
-        remote_cmd="$remote_cmd '--repo'"
+        args_cmd="$args_cmd '--repo'"
         continue
         ;;
       --repo=*)
         _val=${arg#--repo=}
-        mapped=$(validate_and_map_repo "$_val")
-        reject_backslash "$mapped" "--repo path"
-        remote_cmd="$remote_cmd $(sh_quote "--repo=$mapped")"
+        validate_and_map_repo "$_val"
+        reject_backslash "$_mapped_repo" "--repo path"
+        args_cmd="$args_cmd $(sh_quote "--repo=$_mapped_repo")"
         continue
         ;;
     esac
   fi
-  remote_cmd="$remote_cmd $(sh_quote "$arg")"
+  args_cmd="$args_cmd $(sh_quote "$arg")"
 done
 
 if [ "$expect_repo_val" -eq 1 ]; then
   die "missing path after --repo"
 fi
 
+env_prefix=""
+if [ -n "${PHANTOM_REMOTE_DATA_DIR-}" ]; then
+  reject_backslash "$PHANTOM_REMOTE_DATA_DIR" "PHANTOM_REMOTE_DATA_DIR"
+  env_prefix="PHANTOM_FRACTAL_DATA=$(sh_quote "$PHANTOM_REMOTE_DATA_DIR") "
+fi
+if [ -n "$probe_local_dir" ]; then
+  probe_local_repo "$probe_local_dir"
+  if [ -n "$expected_head" ]; then
+    env_prefix="${env_prefix}PHANTOM_EXPECTED_HEAD=$(sh_quote "$expected_head") "
+  fi
+  env_prefix="${env_prefix}PHANTOM_EXPECTED_DIRTY=$(sh_quote "$expected_dirty") "
+fi
+
+remote_cmd="${env_prefix}exec $(sh_quote "$remote_bin")$args_cmd"
 exec ssh -o BatchMode=yes -- "$ssh_host" "$remote_cmd"

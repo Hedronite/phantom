@@ -432,3 +432,47 @@ fn a_test_root_looks_beside_itself_and_every_module_of_it_is_a_test_module() {
     );
     assert!(graph.orphans.is_empty(), "{:?}", graph.orphans);
 }
+
+#[test]
+fn lib_target_uses_custom_lib_name_only_when_it_differs_after_normalization() {
+    let manifests = [
+        manifest(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"a\", \"b\", \"c\", \"d\"]\n",
+        ),
+        manifest(
+            "a/Cargo.toml",
+            "[package]\nname = \"facet-lattice\"\n[lib]\nname = \"lattice\"\n",
+        ),
+        manifest(
+            "b/Cargo.toml",
+            "[lib]\nname = \"nickel_lang_vector\"\n[package]\nname = \"nickel-lang-vector\"\n",
+        ),
+        manifest(
+            "c/Cargo.toml",
+            "[package]\nname = \"ignored-bin\"\n[lib]\nname = \"\"\n[[bin]]\nname = \"custom-bin\"\n",
+        ),
+        manifest("d/Cargo.toml", "[lib]\nname = \"orphan-lib\"\n"),
+    ];
+    let files = [
+        file("a/src/lib.rs", vec![]),
+        file("a/src/main.rs", vec![]),
+        file("b/src/lib.rs", vec![]),
+        file("c/src/lib.rs", vec![]),
+    ];
+    let graph = build(&manifests, &files);
+    let targets: Vec<(&str, &str, &str)> = graph
+        .targets
+        .iter()
+        .map(|t| (t.package.as_str(), t.name.as_str(), t.root.as_str()))
+        .collect();
+    assert_eq!(
+        targets,
+        [
+            ("facet-lattice", "lattice", "a/src/lib.rs"),
+            ("facet-lattice", "facet-lattice", "a/src/main.rs"),
+            ("nickel-lang-vector", "nickel-lang-vector", "b/src/lib.rs"),
+            ("ignored-bin", "ignored-bin", "c/src/lib.rs"),
+        ]
+    );
+}

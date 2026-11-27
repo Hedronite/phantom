@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Fails when a banned name appears in crates/ or README.md (clean-room rule §3.3–3.5),
-# or a fleet agent name appears in any tracked file.
+# or a fleet agent or private host name appears in any tracked path or file.
 #
-# The fleet names are not in the repo. They come from the BANNED_NAMES
+# The fleet and host names are not in the repo. They come from the BANNED_NAMES
 # environment variable (the CI secret of that name), separated by commas or
 # newlines. An empty list fails closed, except on a fork PR, where secrets
 # are not available: BANNED_NAMES_FORK_PR=true skips the fleet check with a
@@ -53,6 +53,20 @@ if git grep -n -I -i -w -E "$words" -- "${scope[@]}"; then
 fi
 
 if [[ ${#fleet[@]} -gt 0 ]]; then
+  # Check tracked paths without printing the secret patterns.
+  paths=0
+  git ls-files -z | grep -z -i -w -E "${fleet[@]}" >/dev/null 2>&1 || paths=$?
+  if [[ $paths -gt 1 ]]; then
+    echo "fleet-name path check failed to run" >&2
+    exit 2
+  fi
+  if [[ $paths -eq 0 ]]; then
+    while IFS= read -r -d '' path; do
+      echo "$path"
+    done < <(git ls-files -z | grep -z -i -w -E "${fleet[@]}" 2>/dev/null)
+    echo "fleet or host name in tracked path" >&2
+    status=1
+  fi
   # git grep exits 1 when nothing matches and above 1 on an error. Its
   # stderr is dropped so that no message can echo a pattern.
   files=0
