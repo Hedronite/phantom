@@ -187,6 +187,7 @@ fn compute_diff_impact(
     let state = build_diff_state(
         &changed,
         &changes.files_only,
+        changes.outside_span_changes,
         changes.manifest_changed,
         meta.stale,
         registry,
@@ -313,6 +314,7 @@ fn format_diff_hits(
 fn build_diff_state(
     changed: &[ChangedOut],
     files_only: &[phantom_fractal_extract::FileOnly],
+    outside_span_changes: usize,
     manifest_changed: bool,
     stale_index: bool,
     registry: &Registry<'_>,
@@ -324,7 +326,8 @@ fn build_diff_state(
         .count();
     DiffState {
         stale_index,
-        unindexed_changes: u64::try_from(unindexed + supported_only).unwrap_or(u64::MAX),
+        unindexed_changes: u64::try_from(unindexed + supported_only + outside_span_changes)
+            .unwrap_or(u64::MAX),
         manifest_changed,
     }
 }
@@ -363,6 +366,7 @@ mod tests {
                     change: FileChange::Modified,
                 },
             ],
+            0,
             false,
             false,
             &registry,
@@ -377,6 +381,7 @@ mod tests {
                 path: "Cargo.toml".to_owned(),
                 change: FileChange::Modified,
             }],
+            0,
             true,
             false,
             &registry,
@@ -384,7 +389,7 @@ mod tests {
         assert!(man.manifest_changed);
         assert_eq!(man.unindexed_changes, 0);
 
-        // Non-empty changed symbols MUST still propagate supported files_only and manifest_changed.
+        // Non-empty changed symbols MUST still propagate supported files_only, outside_span_changes, and manifest_changed.
         let with_sources = build_diff_state(
             &[ChangedOut {
                 path: "src/a.rs".to_owned(),
@@ -397,13 +402,14 @@ mod tests {
                 path: "src/c.rs".to_owned(),
                 change: FileChange::Modified,
             }],
+            2,
             true,
             true,
             &registry,
         );
         assert!(with_sources.stale_index);
         assert!(with_sources.manifest_changed);
-        assert_eq!(with_sources.unindexed_changes, 1);
+        assert_eq!(with_sources.unindexed_changes, 3);
 
         let bad_depth = super::DiffRequest {
             against: None,

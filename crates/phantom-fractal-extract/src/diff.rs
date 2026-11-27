@@ -56,6 +56,10 @@ pub struct Diff {
     pub files_only: Vec<FileOnly>,
     /// A `Cargo.toml` is among the changed files.
     pub manifest_changed: bool,
+    /// Modified supported-language files whose bytes outside symbol spans
+    /// also changed (F5: e.g. `use`/`mod`/`#[path]`/`impl` headers alongside a
+    /// symbol edit in the same file).
+    pub outside_span_changes: usize,
 }
 
 /// Why [`diff`] stopped.
@@ -164,6 +168,7 @@ fn classify_all_changes(
         changed: Vec::new(),
         files_only: Vec::new(),
         manifest_changed: false,
+        outside_span_changes: 0,
     };
     for file in found.files {
         classify_diff_file(file, worktree, registry, &mut out)?;
@@ -216,14 +221,19 @@ fn classify_diff_file(
         out.manifest_changed = true;
     }
     let before = out.changed.len();
-    if let Some(driver) = registry.language_for(&file.path) {
-        compare_supported_file(&file, worktree, driver.language(), &mut out.changed)?;
-    }
+    let outside_changed = match registry.language_for(&file.path) {
+        Some(driver) => {
+            compare_supported_file(&file, worktree, driver.language(), &mut out.changed)?
+        }
+        None => false,
+    };
     if out.changed.len() == before {
         out.files_only.push(FileOnly {
             path: file.path,
             change: file.change,
         });
+    } else {
+        out.outside_span_changes += usize::from(outside_changed);
     }
     Ok(())
 }
@@ -233,32 +243,60 @@ fn compare_supported_file(
     worktree: &BTreeMap<String, Vec<u8>>,
     lang: &dyn Language,
     changed: &mut Vec<ChangedSymbol>,
-) -> Result<(), DiffError> {
-    let old = spans(&file.path, file.base.as_deref(), lang)?;
-    let new = spans(
+) -> Result<bool, DiffError> {
+    let (old, old_out) = spans_and_outside(&file.path, file.base.as_deref(), lang)?;
+    let (new, new_out) = spans_and_outside(
         &file.path,
         worktree.get(&file.path).map(Vec::as_slice),
         lang,
     )?;
     changed.extend(compare(&file.path, &old, &new));
-    Ok(())
+    Ok(match (&old_out, &new_out) {
+        (Some(a), Some(b)) => a != b,
+        (None, Some(b)) => !b.is_empty(),
+        _ => false,
+    })
 }
 
 /// A symbol's name and the bytes of its lines, by stable key.
 type Spans = BTreeMap<String, (String, Vec<u8>)>;
 
-/// The symbols of `bytes` as the file at `path`, or none for no bytes or
-/// bytes that are not UTF-8.
-fn spans(path: &str, bytes: Option<&[u8]>, language: &dyn Language) -> Result<Spans, DiffError> {
+/// Symbols of `bytes` plus collapsed non-whitespace text outside symbol spans.
+fn spans_and_outside(
+    path: &str,
+    bytes: Option<&[u8]>,
+    language: &dyn Language,
+) -> Result<(Spans, Option<String>), DiffError> {
     let Some(text) = bytes.and_then(|bytes| std::str::from_utf8(bytes).ok()) else {
-        return Ok(Spans::new());
+        return Ok((Spans::new(), None));
     };
     let extract = language.extract(text)?;
     let lines: Vec<&str> = text.split_inclusive('\n').collect();
-    Ok(symbol_keys(path, &extract)
+    let keys = symbol_keys(path, &extract);
+    let outside = outside_signature(&lines, &keys);
+    let map = keys
         .into_iter()
         .map(|(key, name, start, end)| (key, (name, span(&lines, start, end))))
-        .collect())
+        .collect();
+    Ok((map, Some(outside)))
+}
+
+fn outside_signature(lines: &[&str], ranges: &[(String, String, u32, u32)]) -> String {
+    let mut covered = vec![false; lines.len()];
+    for &(_, _, start, end) in ranges {
+        let lo = (start as usize).saturating_sub(1);
+        let hi = (end as usize).min(lines.len());
+        for slot in covered.get_mut(lo..hi).into_iter().flatten() {
+            *slot = true;
+        }
+    }
+    lines
+        .iter()
+        .zip(covered)
+        .filter(|&(_, is_sym)| !is_sym)
+        .flat_map(|(line, _)| line.split_whitespace())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The changes between two files' symbols, in key order.

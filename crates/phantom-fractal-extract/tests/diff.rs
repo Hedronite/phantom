@@ -540,3 +540,42 @@ fn a_target_beside_a_nested_manifest_is_pruned_and_one_elsewhere_is_not() {
     );
     assert!(found.files_only.is_empty(), "{:?}", found.files_only);
 }
+
+#[test]
+fn outside_span_changes_catches_same_file_use_and_impl_header_while_preserving_body_only() {
+    let repo = Repo::new();
+    // Case E: multi-line body edit inside a symbol shifts following line numbers, outside spans unchanged.
+    repo.write(
+        "src/a.rs",
+        &A.replace(
+            "pub fn helper() -> u32 {\n    1\n}",
+            "pub fn helper() -> u32 {\n    let x = 1;\n    let y = 2;\n    x + y\n}",
+        ),
+    );
+    let body_only = repo.diff(&Base::Head);
+    assert_eq!(body_only.changed.len(), 1);
+    assert!(body_only.files_only.is_empty());
+    assert_eq!(body_only.outside_span_changes, 0);
+
+    // Case G: same-file outside-span edit (`use` + new `fn extra()`).
+    repo.write(
+        "src/b.rs",
+        &format!("use crate::a::helper;\n{B}\npub fn extra() {{}}\n"),
+    );
+    // Same-file `impl ... for` header change alongside method body edit.
+    repo.write(
+        "src/a.rs",
+        &A.replace(
+            "impl S {\n    pub fn m(&self) {}",
+            "pub trait T { fn m(&self); }\nimpl T for S {\n    pub fn m(&self) { other(); }",
+        ),
+    );
+    // Newly added file with `use` + `fn`: also flags outside_span_changes.
+    repo.write(
+        "src/new_mod.rs",
+        "use crate::a::helper;\npub fn added() { helper(); }\n",
+    );
+    let mixed = repo.diff(&Base::Head);
+    assert!(mixed.files_only.is_empty(), "{:?}", mixed.files_only);
+    assert_eq!(mixed.outside_span_changes, 3);
+}

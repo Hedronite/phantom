@@ -221,10 +221,10 @@ fn a_clean_tree_changes_nothing_and_the_keys_are_in_spec_order() {
 #[test]
 fn changed_symbols_files_and_their_impact() {
     let world = World::new();
-    world.write(
-        "src/b.rs",
-        "/// b's function.\npub fn fb() { let _ = 1; }\n",
-    );
+    let b_body = fs::read_to_string(world.root().join("src/b.rs"))
+        .expect("read b")
+        .replace("pub fn fb() {}", "pub fn fb() { let _ = 1; }");
+    world.write("src/b.rs", &b_body);
     world.write("src/z.rs", "pub fn fz() {}\n");
     fs::remove_file(world.root().join("src/g.rs")).expect("remove g");
     world.write("README.md", "notes\n");
@@ -287,10 +287,10 @@ fn changed_symbols_files_and_their_impact() {
 #[test]
 fn the_reasons_appear_only_when_they_apply() {
     let world = World::new();
-    world.write(
-        "src/b.rs",
-        "/// b's function.\npub fn fb() { let _ = 1; }\n",
-    );
+    let b_body = fs::read_to_string(world.root().join("src/b.rs"))
+        .expect("read b")
+        .replace("pub fn fb() {}", "pub fn fb() { let _ = 1; }");
+    world.write("src/b.rs", &b_body);
     let data = world.ok(&["impact", "--diff"])["data"].clone();
     assert_eq!(reasons(&data), ["external_users_possible", "stale_index"]);
     world.ok(&["index", "."]);
@@ -416,10 +416,10 @@ fn staged_unstaged_no_git_and_no_index_are_refused() {
 #[test]
 fn diff_impact_is_the_cli_line_and_keeps_to_the_roots() {
     let world = World::new();
-    world.write(
-        "src/b.rs",
-        "/// b's function.\npub fn fb() { let _ = 1; }\n",
-    );
+    let b_body = fs::read_to_string(world.root().join("src/b.rs"))
+        .expect("read b")
+        .replace("pub fn fb() {}", "pub fn fb() { let _ = 1; }");
+    world.write("src/b.rs", &b_body);
     world.write("README.md", "notes\n");
     let old = world.repo.rev("HEAD~2");
     let pairs: Vec<(Value, Vec<&str>)> = vec![
@@ -535,10 +535,10 @@ fn diff_impact_is_the_cli_line_and_keeps_to_the_roots() {
 #[test]
 fn no_reply_holds_an_absolute_path() {
     let world = World::new();
-    world.write(
-        "src/b.rs",
-        "/// b's function.\npub fn fb() { let _ = 1; }\n",
-    );
+    let b_body = fs::read_to_string(world.root().join("src/b.rs"))
+        .expect("read b")
+        .replace("pub fn fb() {}", "pub fn fb() { let _ = 1; }");
+    world.write("src/b.rs", &b_body);
     let root = world.root().to_str().expect("utf-8").to_owned();
     let data = world.data.path().to_str().expect("utf-8").to_owned();
     let mut script = Script::after_main();
@@ -562,10 +562,10 @@ fn no_reply_holds_an_absolute_path() {
 #[test]
 fn summary_and_no_tests_leave_out_their_keys() {
     let world = World::new();
-    world.write(
-        "src/b.rs",
-        "/// b's function.\npub fn fb() { let _ = 1; }\n",
-    );
+    let b_body = fs::read_to_string(world.root().join("src/b.rs"))
+        .expect("read b")
+        .replace("pub fn fb() {}", "pub fn fb() { let _ = 1; }");
+    world.write("src/b.rs", &b_body);
     for (args, want) in [
         (
             &["impact", "--diff"][..],
@@ -767,5 +767,110 @@ fn diff_impact_never_returns_exact_when_use_rebind_or_manifest_joins_body_edit()
     assert!(
         reasons(&manifest_and_body["data"]).contains(&"manifest_changed".to_owned()),
         "{manifest_and_body}"
+    );
+}
+
+#[test]
+fn diff_impact_same_file_case_g_is_inexact_and_case_e_body_only_is_exact() {
+    let dir = TempDir::new("diff-f5-probe");
+    let data = TempDir::new("diff-f5-data");
+    let repo = dir.path();
+    fs::write(
+        repo.join("Cargo.toml"),
+        "[package]\nname = \"f5_probe\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join("src")).unwrap();
+    fs::write(repo.join("src/a.rs"), "pub fn target() -> i32 { 1 }\n").unwrap();
+    fs::write(repo.join("src/c.rs"), "pub fn target() -> i32 { 10 }\n").unwrap();
+    fs::write(
+        repo.join("src/b.rs"),
+        "use crate::a::target;\npub fn caller() -> i32 { target() }\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/main.rs"),
+        "mod a;\nmod b;\nmod c;\nfn main() { let _ = b::caller(); }\n",
+    )
+    .unwrap();
+
+    let run_git = |args: &[&str]| {
+        let st = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .env("HOME", data.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "T")
+            .env("GIT_AUTHOR_EMAIL", "t@e.com")
+            .env("GIT_COMMITTER_NAME", "T")
+            .env("GIT_COMMITTER_EMAIL", "t@e.com")
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {args:?}");
+    };
+    run_git(&["init", "-q", "-b", "main"]);
+    run_git(&["add", "."]);
+    run_git(&["commit", "-q", "-m", "init"]);
+
+    let run_bin = |args: &[&str]| -> Value {
+        let out = Command::new(BINS[0])
+            .args(args)
+            .current_dir(repo)
+            .env("PHANTOM_FRACTAL_DATA_DIR", data.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "cmd {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_slice(&out.stdout).unwrap()
+    };
+
+    run_bin(&["index", "."]);
+
+    // Case E: pure multi-line body edit inside b::caller (fresh index) -> exact: true.
+    fs::write(
+        repo.join("src/b.rs"),
+        "use crate::a::target;\npub fn caller() -> i32 {\n    let _x = 1;\n    target()\n}\n",
+    )
+    .unwrap();
+    run_bin(&["index", "."]);
+    let case_e = run_bin(&["impact", "--diff"]);
+    assert_eq!(case_e["meta"]["stale"], false, "{case_e}");
+    assert_eq!(case_e["data"]["impact"]["exact"], true, "{case_e}");
+
+    // Case G (exact QA probe): same-file `use` rebind + adding `pub fn extra() {}` in b.rs, fresh index -> exact: false.
+    fs::write(
+        repo.join("src/b.rs"),
+        "use crate::c::target;\npub fn caller() -> i32 { target() }\npub fn extra() {}\n",
+    )
+    .unwrap();
+    run_bin(&["index", "."]);
+    let case_g_add = run_bin(&["impact", "--diff"]);
+    assert_eq!(case_g_add["meta"]["stale"], false, "{case_g_add}");
+    assert_eq!(case_g_add["data"]["impact"]["exact"], false, "{case_g_add}");
+    assert!(
+        reasons(&case_g_add["data"]).contains(&"unindexed_changes".to_owned()),
+        "{case_g_add}"
+    );
+
+    // Case G2: same-file `use` rebind + body edit of existing `caller()` only (no added fn), fresh index -> exact: false.
+    fs::write(
+        repo.join("src/b.rs"),
+        "use crate::c::target;\npub fn caller() -> i32 {\n    target() + 1\n}\n",
+    )
+    .unwrap();
+    run_bin(&["index", "."]);
+    let case_g_edit = run_bin(&["impact", "--diff"]);
+    assert_eq!(case_g_edit["meta"]["stale"], false, "{case_g_edit}");
+    assert_eq!(
+        case_g_edit["data"]["impact"]["exact"], false,
+        "{case_g_edit}"
+    );
+    assert!(
+        reasons(&case_g_edit["data"]).contains(&"unindexed_changes".to_owned()),
+        "{case_g_edit}"
     );
 }
