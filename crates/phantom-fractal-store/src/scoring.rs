@@ -67,7 +67,7 @@ impl crate::Store {
                     EXISTS (SELECT 1 FROM edges e WHERE e.ref_id = r.id)
              FROM refs r
              WHERE r.from_symbol = ?1
-               AND r.kind IN ('call', 'method_call', 'macro', 'macro_arg')
+               AND r.kind IN ('call', 'method_call', 'macro', 'macro_arg', 'value_ref')
              ORDER BY r.id",
         )?;
         let queried = statement.query([id]);

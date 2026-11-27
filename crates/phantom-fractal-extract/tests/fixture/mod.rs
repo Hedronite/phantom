@@ -75,6 +75,9 @@ pub fn reason_text(reason: Reason) -> (&'static str, f64) {
         Reason::TypedMethod => ("typed-method", 0.8),
         Reason::UniqueMethod => ("unique-method", 0.5),
         Reason::UseGlob => ("use-glob", 0.85),
+        Reason::PackageImport => ("package-import", 0.95),
+        Reason::EmbeddedMethod => ("embedded-method", 0.85),
+        Reason::InterfaceMethod => ("interface-method", 0.8),
     }
 }
 

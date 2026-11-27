@@ -56,6 +56,15 @@ fn links(s: &Setup) -> Vec<String> {
                 assert_eq!(link.ref_id, None, "{link:?}");
                 assert_eq!(link.reason, LinkReason::ImplTrait, "{link:?}");
             }
+            LinkKind::Embeds => {
+                assert!(
+                    matches!(
+                        link.reason,
+                        LinkReason::StructuralImpl | LinkReason::EmbeddedType
+                    ),
+                    "{link:?}"
+                );
+            }
         }
         out.push(format!(
             "{} {} -> {} {} {:.2}",

@@ -857,3 +857,448 @@ fn reset_symbol_test_flags_restores_own_flags() {
     drop(store);
     drop(language);
 }
+
+pub(super) struct GoFixtureLang {
+    entries: std::collections::BTreeMap<&'static str, phantom_fractal_lang::Extract>,
+}
+
+impl GoFixtureLang {
+    pub(super) fn new(entries: Vec<(&'static str, phantom_fractal_lang::Extract)>) -> Self {
+        Self {
+            entries: entries.into_iter().collect(),
+        }
+    }
+}
+
+impl phantom_fractal_lang::Language for GoFixtureLang {
+    fn name(&self) -> &'static str {
+        "go"
+    }
+    fn extensions(&self) -> &'static [&'static str] {
+        &["go"]
+    }
+    fn qualifier_separator(&self) -> &'static str {
+        "."
+    }
+    fn extract(
+        &self,
+        source: &str,
+    ) -> Result<phantom_fractal_lang::Extract, phantom_fractal_lang::ExtractError> {
+        Ok(self.entries.get(source).cloned().unwrap_or_default())
+    }
+}
+
+pub(super) fn go_item(
+    kind: phantom_fractal_lang::ItemKind,
+    name: &str,
+    line: u32,
+) -> phantom_fractal_lang::Item {
+    phantom_fractal_lang::Item {
+        kind,
+        name: name.to_owned(),
+        visibility: phantom_fractal_lang::Visibility::Public,
+        start_line: line,
+        end_line: line,
+        signature: String::new(),
+        doc_summary: None,
+        is_test: false,
+    }
+}
+
+pub(super) fn go_use(path: &str, alias: Option<&str>, line: u32) -> phantom_fractal_lang::Import {
+    phantom_fractal_lang::Import {
+        path: path.to_owned(),
+        alias: alias.map(str::to_owned),
+        glob: false,
+        start_line: line,
+        visibility: phantom_fractal_lang::Visibility::Private,
+    }
+}
+
+pub(super) fn go_ref(
+    kind: phantom_fractal_lang::RefKind,
+    text: &str,
+    last: &str,
+    line: u32,
+    caller: &str,
+    caller_line: u32,
+) -> phantom_fractal_lang::Reference {
+    phantom_fractal_lang::Reference {
+        kind,
+        text: text.to_owned(),
+        last_segment: last.to_owned(),
+        line,
+        col: 1,
+        scope: String::new(),
+        from: Some(phantom_fractal_lang::Caller {
+            name: caller.to_owned(),
+            owner: None,
+            start_line: caller_line,
+        }),
+        receiver: None,
+        receiver_type: None,
+        shadowed: false,
+    }
+}
+
+#[test]
+fn source_skipped_mirrors_rs_skipped_meta_key() {
+    let db = TempDb::new("srcskip");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    assert_eq!(store.source_skipped().expect("unset"), None);
+    store
+        .set_workspace_fingerprint(&[0xabu8; 32], 11)
+        .expect("set");
+    assert_eq!(store.source_skipped().expect("set"), Some(11));
+    assert_eq!(store.rs_skipped().expect("compat"), Some(11));
+}
+
+#[test]
+fn multi_file_go_package_populates_file_and_symbol_module_ids_and_display() {
+    use phantom_fractal_lang::{
+        Extract, FileModule, ItemKind, Module, RefKind, Target, TargetKind,
+    };
+
+    let db = TempDb::new("gomod");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+
+    let src_a = "// pkg/a.go";
+    let src_b = "// pkg/b.go";
+    let go = GoFixtureLang::new(vec![
+        (
+            src_a,
+            Extract {
+                items: vec![
+                    go_item(ItemKind::Struct, "Decoder", 2),
+                    go_item(ItemKind::Function, "Decode", 5),
+                ],
+                item_scopes: vec![String::new(), String::new()],
+                item_owners: vec![None, Some("Decoder".to_owned())],
+                imports: vec![go_use("fmt", None, 1)],
+                import_scopes: vec![String::new()],
+                refs: vec![go_ref(RefKind::Call, "Helper", "Helper", 6, "Decode", 5)],
+                ..Extract::default()
+            },
+        ),
+        (
+            src_b,
+            Extract {
+                items: vec![go_item(ItemKind::Function, "Helper", 2)],
+                item_scopes: vec![String::new()],
+                item_owners: vec![None],
+                ..Extract::default()
+            },
+        ),
+    ]);
+    store.put_source("pkg/a.go", src_a, 1, &go).expect("put a");
+    store.put_source("pkg/b.go", src_b, 2, &go).expect("put b");
+
+    let targets = vec![Target {
+        id: 1,
+        package: "example.com/app".to_owned(),
+        name: "pkg".to_owned(),
+        kind: TargetKind::Lib,
+        root: String::new(),
+    }];
+    let modules = vec![Module {
+        id: 100,
+        target: 1,
+        parent: None,
+        path: "example.com/app/pkg".to_owned(),
+        file: String::new(),
+        scope: String::new(),
+    }];
+    let file_modules = vec![
+        FileModule {
+            file: "pkg/a.go".to_owned(),
+            module: 100,
+        },
+        FileModule {
+            file: "pkg/b.go".to_owned(),
+            module: 100,
+        },
+        FileModule {
+            file: "pkg/unindexed.go".to_owned(),
+            module: 100,
+        },
+    ];
+    store
+        .write_crate_graph_with_files(
+            &[Package {
+                name: "example.com/app".to_owned(),
+                version: None,
+                manifest_path: "go.mod".to_owned(),
+            }],
+            &targets,
+            &modules,
+            &file_modules,
+            &[100],
+        )
+        .expect("write go graph");
+
+    // Bad FileModule module id must error atomically.
+    assert!(matches!(
+        store.write_crate_graph_with_files(
+            &[],
+            &[],
+            &[],
+            &[FileModule {
+                file: "pkg/a.go".to_owned(),
+                module: 999,
+            }],
+            &[],
+        ),
+        Err(StoreError::UnknownTarget(999))
+    ));
+
+    let resolve = store.resolve_input().expect("resolve");
+    assert_eq!(resolve.modules.len(), 1);
+    assert_eq!(resolve.modules[0].file, "");
+    assert!(resolve.uses.iter().all(|u| u.module == Some(1)));
+    assert!(resolve.refs.iter().all(|r| r.module == Some(1)));
+
+    // Both pkg/a.go and pkg/b.go files + symbols carry module_id = 1 and is_test = 1.
+    let conn = rusqlite::Connection::open(db.path()).expect("sqlite");
+    let file_mods: Vec<(String, Option<i64>)> = conn
+        .prepare("SELECT path, module_id FROM files ORDER BY path")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        file_mods,
+        vec![
+            ("pkg/a.go".to_owned(), Some(1)),
+            ("pkg/b.go".to_owned(), Some(1))
+        ]
+    );
+    let file_id_a: i64 = conn
+        .query_row("SELECT id FROM files WHERE path = 'pkg/a.go'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(store.file_has_module(file_id_a).expect("has module"));
+
+    for item in store
+        .read_items("pkg/a.go")
+        .unwrap()
+        .into_iter()
+        .chain(store.read_items("pkg/b.go").unwrap())
+    {
+        assert!(
+            item.is_test,
+            "test_modules marks all files in package: {item:?}"
+        );
+    }
+
+    let decode_hits = store.symbols_matching("Decode").expect("decode");
+    assert_eq!(decode_hits.len(), 1);
+    assert_eq!(
+        store
+            .format_symbol_display(&decode_hits[0])
+            .expect("go display"),
+        "pkg/a.go::Decoder.Decode"
+    );
+
+    let mut missing_hit = decode_hits[0].clone();
+    missing_hit.file = "missing.rs".to_owned();
+    assert_eq!(
+        store
+            .format_symbol_display(&missing_hit)
+            .expect("fallback display"),
+        "missing.rs::Decoder::Decode"
+    );
+}
+
+#[test]
+fn rust_module_ids_match_legacy_write_crate_graph() {
+    let db1 = TempDb::new("rustid1");
+    let db2 = TempDb::new("rustid2");
+    assert_outside_workspace(db1.path());
+    assert_outside_workspace(db2.path());
+    let mut s1 = Store::open(db1.path()).expect("s1");
+    let mut s2 = Store::open(db2.path()).expect("s2");
+    let lang = language();
+    let lib = "pub fn root_item() {}
+#[cfg(test)]
+mod tests { pub fn probe() {} }
+";
+    let ledger = "pub fn open_ledger() {}
+#[cfg(test)]
+mod tests { pub fn check() {} }
+";
+    for store in [&mut s1, &mut s2] {
+        put(store, &lang, "src/lib.rs", lib);
+        put(store, &lang, "src/ledger.rs", ledger);
+    }
+    let packages = vec![Package {
+        name: "sample".to_owned(),
+        version: None,
+        manifest_path: "Cargo.toml".to_owned(),
+    }];
+    let targets = vec![phantom_fractal_lang::Target {
+        id: 1,
+        package: "sample".to_owned(),
+        name: "sample".to_owned(),
+        kind: phantom_fractal_lang::TargetKind::Lib,
+        root: "src/lib.rs".to_owned(),
+    }];
+    let modules = vec![
+        phantom_fractal_lang::Module {
+            id: 10,
+            target: 1,
+            parent: None,
+            path: "crate".to_owned(),
+            file: "src/lib.rs".to_owned(),
+            scope: String::new(),
+        },
+        phantom_fractal_lang::Module {
+            id: 11,
+            target: 1,
+            parent: None,
+            path: "crate::ledger".to_owned(),
+            file: "src/ledger.rs".to_owned(),
+            scope: String::new(),
+        },
+        phantom_fractal_lang::Module {
+            id: 12,
+            target: 1,
+            parent: Some(11),
+            path: "crate::ledger::tests".to_owned(),
+            file: "src/ledger.rs".to_owned(),
+            scope: "tests".to_owned(),
+        },
+    ];
+    s1.write_crate_graph(&packages, &targets, &modules, &[12])
+        .expect("s1 graph");
+    s2.write_crate_graph_with_files(&packages, &targets, &modules, &[], &[12])
+        .expect("s2 graph");
+
+    for q in [
+        "root_item",
+        "crate::root_item",
+        "tests::probe",
+        "crate::tests::probe",
+        "ledger::tests::check",
+        "crate::ledger::tests::check",
+    ] {
+        assert_eq!(
+            s1.symbols_matching(q).unwrap(),
+            s2.symbols_matching(q).unwrap()
+        );
+    }
+    let c1 = rusqlite::Connection::open(db1.path()).unwrap();
+    let c2 = rusqlite::Connection::open(db2.path()).unwrap();
+    let f1: Vec<(String, Option<i64>)> = c1
+        .prepare("SELECT path, module_id FROM files ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let f2: Vec<(String, Option<i64>)> = c2
+        .prepare("SELECT path, module_id FROM files ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(f1, f2);
+    let sy1: Vec<(String, Option<i64>, i64)> = c1
+        .prepare("SELECT qual_name, module_id, is_test FROM symbols ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let sy2: Vec<(String, Option<i64>, i64)> = c2
+        .prepare("SELECT qual_name, module_id, is_test FROM symbols ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(sy1, sy2);
+}
+
+#[test]
+fn did_you_mean_handles_go_dots_and_excludes_init_and_blank() {
+    use phantom_fractal_lang::{Extract, FileModule, ItemKind, Module, Target, TargetKind};
+
+    let db = TempDb::new("dymgo");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+
+    let go_src = "// pkg/helper.go";
+    let go = GoFixtureLang::new(vec![(
+        go_src,
+        Extract {
+            items: vec![
+                go_item(ItemKind::Function, "Helper", 2),
+                go_item(ItemKind::Function, "init", 4),
+                go_item(ItemKind::Function, "_", 6),
+            ],
+            item_scopes: vec![String::new(); 3],
+            item_owners: vec![None, None, None],
+            ..Extract::default()
+        },
+    )]);
+    store
+        .put_source("pkg/helper.go", go_src, 0, &go)
+        .expect("put go");
+    put(
+        &mut store,
+        &language(),
+        "src/init.rs",
+        "pub fn init() {}
+",
+    );
+
+    store
+        .write_crate_graph_with_files(
+            &[Package {
+                name: "example.com/mod".to_owned(),
+                version: None,
+                manifest_path: "go.mod".to_owned(),
+            }],
+            &[Target {
+                id: 1,
+                package: "example.com/mod".to_owned(),
+                name: "pkg".to_owned(),
+                kind: TargetKind::Lib,
+                root: String::new(),
+            }],
+            &[Module {
+                id: 1,
+                target: 1,
+                parent: None,
+                path: "example.com/mod/pkg".to_owned(),
+                file: String::new(),
+                scope: String::new(),
+            }],
+            &[FileModule {
+                file: "pkg/helper.go".to_owned(),
+                module: 1,
+            }],
+            &[],
+        )
+        .expect("graph");
+
+    let dot_hits = store.did_you_mean("pkg.Helper").expect("dot");
+    assert_eq!(dot_hits.len(), 1);
+    assert_eq!(dot_hits[0].file, "pkg/helper.go");
+
+    let mixed_hits = store
+        .did_you_mean("example.com/mod/pkg::Type.Helper")
+        .expect("mixed");
+    assert_eq!(mixed_hits.len(), 1);
+
+    // Go init and _ are excluded from did_you_mean, while Rust init remains.
+    let init_hits = store.did_you_mean("pkg.init").expect("init");
+    assert_eq!(init_hits.len(), 1);
+    assert_eq!(init_hits[0].file, "src/init.rs");
+    assert!(store.did_you_mean("_").expect("blank").is_empty());
+}

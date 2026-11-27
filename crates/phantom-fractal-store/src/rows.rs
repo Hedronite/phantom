@@ -340,23 +340,12 @@ pub(crate) fn symbol_text(kind: ItemKind) -> &'static str {
 
 /// Stored ref-kind text.
 pub(crate) fn ref_kind_text(kind: RefKind) -> &'static str {
-    match kind {
-        RefKind::Call => "call",
-        RefKind::MethodCall => "method_call",
-        RefKind::Macro => "macro",
-        RefKind::MacroArg => "macro_arg",
-    }
+    kind.as_str()
 }
 
 /// Stored ref-kind from text.
 pub(crate) fn ref_kind_from_text(kind: &str) -> Result<RefKind, StoreError> {
-    match kind {
-        "call" => Ok(RefKind::Call),
-        "method_call" => Ok(RefKind::MethodCall),
-        "macro" => Ok(RefKind::Macro),
-        "macro_arg" => Ok(RefKind::MacroArg),
-        other => Err(StoreError::UnknownKind(other.to_owned())),
-    }
+    RefKind::from_store_str(kind).ok_or_else(|| StoreError::UnknownKind(kind.to_owned()))
 }
 
 /// Stored visibility text.
@@ -415,12 +404,5 @@ pub(crate) fn item_from_row(row: ItemColumns) -> Result<Item, StoreError> {
 
 /// Stored item kind from text.
 pub(crate) fn item_kind_from_text(kind: &str) -> Result<ItemKind, StoreError> {
-    match kind {
-        "function" => Ok(ItemKind::Function),
-        "struct" => Ok(ItemKind::Struct),
-        "enum" => Ok(ItemKind::Enum),
-        "trait" => Ok(ItemKind::Trait),
-        "module" => Ok(ItemKind::Module),
-        other => Err(StoreError::UnknownKind(other.to_owned())),
-    }
+    ItemKind::from_store_str(kind).ok_or_else(|| StoreError::UnknownKind(kind.to_owned()))
 }

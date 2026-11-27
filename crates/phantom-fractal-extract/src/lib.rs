@@ -112,7 +112,9 @@ impl ReasonCounts {
     pub fn of(edges: &[Edge]) -> Self {
         let mut counts = Self::default();
         for edge in edges {
-            *counts.slot(edge.reason) += 1;
+            if let Some(slot) = counts.slot(edge.reason) {
+                *slot += 1;
+            }
         }
         counts
     }
@@ -120,21 +122,22 @@ impl ReasonCounts {
     /// The count for `reason`.
     pub fn get(&self, reason: Reason) -> u64 {
         let mut copy = *self;
-        *copy.slot(reason)
+        copy.slot(reason).copied().unwrap_or(0)
     }
 
-    fn slot(&mut self, reason: Reason) -> &mut u64 {
+    fn slot(&mut self, reason: Reason) -> Option<&mut u64> {
         match reason {
-            Reason::PathExact => &mut self.path_exact,
-            Reason::Local => &mut self.local,
-            Reason::UseAlias => &mut self.use_alias,
-            Reason::Assoc => &mut self.assoc,
-            Reason::SelfMethod => &mut self.self_method,
-            Reason::SelfAssoc => &mut self.self_assoc,
-            Reason::CratePath => &mut self.crate_path,
-            Reason::TypedMethod => &mut self.typed_method,
-            Reason::UniqueMethod => &mut self.unique_method,
-            Reason::UseGlob => &mut self.use_glob,
+            Reason::PathExact => Some(&mut self.path_exact),
+            Reason::Local => Some(&mut self.local),
+            Reason::UseAlias => Some(&mut self.use_alias),
+            Reason::Assoc => Some(&mut self.assoc),
+            Reason::SelfMethod => Some(&mut self.self_method),
+            Reason::SelfAssoc => Some(&mut self.self_assoc),
+            Reason::CratePath => Some(&mut self.crate_path),
+            Reason::TypedMethod => Some(&mut self.typed_method),
+            Reason::UniqueMethod => Some(&mut self.unique_method),
+            Reason::UseGlob => Some(&mut self.use_glob),
+            Reason::PackageImport | Reason::EmbeddedMethod | Reason::InterfaceMethod => None,
         }
     }
 }

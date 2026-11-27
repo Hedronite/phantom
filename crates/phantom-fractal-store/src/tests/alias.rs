@@ -538,3 +538,375 @@ fn crate_alias_returns_sorted_unique_hits_across_multiple_scopes() {
     assert_eq!(hits[0].file, "crates/pkg1/src/a_cli.rs");
     assert_eq!(hits[1].file, "crates/pkg2/src/z_lib.rs");
 }
+
+#[test]
+fn go_import_path_longest_prefix_short_pkg_and_display() {
+    use super::graph::{GoFixtureLang, go_item};
+    use phantom_fractal_lang::{Extract, FileModule, ItemKind};
+
+    let db = TempDb::new("goalias");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+
+    let s_yaml = "// yaml";
+    let s_a = "// a";
+    let s_sub = "// sub";
+    let s_crate = "// cratepkg";
+    let s_one = "// cmd1";
+    let s_two = "// cmd2";
+    let s_u1 = "// u1";
+    let s_u2 = "// u2";
+    let go = GoFixtureLang::new(vec![
+        (
+            s_yaml,
+            Extract {
+                items: vec![
+                    go_item(ItemKind::Struct, "Decoder", 1),
+                    go_item(ItemKind::Function, "Decode", 3),
+                ],
+                item_scopes: vec![String::new(), String::new()],
+                item_owners: vec![None, Some("Decoder".to_owned())],
+                ..Extract::default()
+            },
+        ),
+        (
+            s_a,
+            Extract {
+                items: vec![go_item(ItemKind::Function, "Run", 1)],
+                item_scopes: vec![String::new()],
+                item_owners: vec![None],
+                ..Extract::default()
+            },
+        ),
+        (
+            s_sub,
+            Extract {
+                items: vec![go_item(ItemKind::Function, "Run", 1)],
+                item_scopes: vec![String::new()],
+                item_owners: vec![None],
+                ..Extract::default()
+            },
+        ),
+        (
+            s_crate,
+            Extract {
+                items: vec![go_item(ItemKind::Function, "Build", 1)],
+                item_scopes: vec![String::new()],
+                item_owners: vec![None],
+                ..Extract::default()
+            },
+        ),
+        (
+            s_one,
+            Extract {
+                items: vec![go_item(ItemKind::Function, "Run", 1)],
+                item_scopes: vec![String::new()],
+                item_owners: vec![None],
+                ..Extract::default()
+            },
+        ),
+        (
+            s_two,
+            Extract {
+                items: vec![go_item(ItemKind::Function, "Run", 1)],
+                item_scopes: vec![String::new()],
+                item_owners: vec![None],
+                ..Extract::default()
+            },
+        ),
+        (
+            s_u1,
+            Extract {
+                items: vec![go_item(ItemKind::Function, "Helper", 1)],
+                item_scopes: vec![String::new()],
+                item_owners: vec![None],
+                ..Extract::default()
+            },
+        ),
+        (
+            s_u2,
+            Extract {
+                items: vec![go_item(ItemKind::Function, "Helper", 1)],
+                item_scopes: vec![String::new()],
+                item_owners: vec![None],
+                ..Extract::default()
+            },
+        ),
+    ]);
+
+    for (path, src) in [
+        ("yaml/dec.go", s_yaml),
+        ("a/a.go", s_a),
+        ("sub/sub.go", s_sub),
+        ("cratepkg/c.go", s_crate),
+        ("cmd/one/main.go", s_one),
+        ("cmd/two/main.go", s_two),
+        ("internal/util/u.go", s_u1),
+        ("pkg/util/u.go", s_u2),
+    ] {
+        store.put_source(path, src, 0, &go).expect(path);
+    }
+
+    let targets = vec![
+        Target {
+            id: 1,
+            package: "gopkg.in/yaml.v3".to_owned(),
+            name: "yaml".to_owned(),
+            kind: TargetKind::Lib,
+            root: String::new(),
+        },
+        Target {
+            id: 2,
+            package: "example.com/a".to_owned(),
+            name: "a".to_owned(),
+            kind: TargetKind::Lib,
+            root: String::new(),
+        },
+        Target {
+            id: 3,
+            package: "example.com/a".to_owned(),
+            name: "sub".to_owned(),
+            kind: TargetKind::Lib,
+            root: String::new(),
+        },
+        Target {
+            id: 4,
+            package: "example.com/a".to_owned(),
+            name: "crate".to_owned(),
+            kind: TargetKind::Lib,
+            root: String::new(),
+        },
+        Target {
+            id: 5,
+            package: "example.com/a".to_owned(),
+            name: "one".to_owned(),
+            kind: TargetKind::Bin,
+            root: "cmd/one/main.go".to_owned(),
+        },
+        Target {
+            id: 6,
+            package: "example.com/a".to_owned(),
+            name: "two".to_owned(),
+            kind: TargetKind::Bin,
+            root: "cmd/two/main.go".to_owned(),
+        },
+        Target {
+            id: 7,
+            package: "example.com/a".to_owned(),
+            name: "util".to_owned(),
+            kind: TargetKind::Lib,
+            root: String::new(),
+        },
+        Target {
+            id: 8,
+            package: "example.com/a".to_owned(),
+            name: "util".to_owned(),
+            kind: TargetKind::Lib,
+            root: String::new(),
+        },
+    ];
+    let modules = vec![
+        Module {
+            id: 1,
+            target: 1,
+            parent: None,
+            path: "gopkg.in/yaml.v3".to_owned(),
+            file: String::new(),
+            scope: String::new(),
+        },
+        Module {
+            id: 2,
+            target: 2,
+            parent: None,
+            path: "example.com/a".to_owned(),
+            file: String::new(),
+            scope: String::new(),
+        },
+        Module {
+            id: 3,
+            target: 3,
+            parent: None,
+            path: "example.com/a/sub.v2".to_owned(),
+            file: String::new(),
+            scope: String::new(),
+        },
+        Module {
+            id: 4,
+            target: 4,
+            parent: None,
+            path: "crate".to_owned(),
+            file: String::new(),
+            scope: String::new(),
+        },
+        Module {
+            id: 5,
+            target: 5,
+            parent: None,
+            path: "example.com/a/cmd/one".to_owned(),
+            file: String::new(),
+            scope: String::new(),
+        },
+        Module {
+            id: 6,
+            target: 6,
+            parent: None,
+            path: "example.com/a/cmd/two".to_owned(),
+            file: String::new(),
+            scope: String::new(),
+        },
+        Module {
+            id: 7,
+            target: 7,
+            parent: None,
+            path: "example.com/a/internal/util".to_owned(),
+            file: String::new(),
+            scope: String::new(),
+        },
+        Module {
+            id: 8,
+            target: 8,
+            parent: None,
+            path: "example.com/a/pkg/util".to_owned(),
+            file: String::new(),
+            scope: String::new(),
+        },
+    ];
+    let file_modules = vec![
+        FileModule {
+            file: "yaml/dec.go".to_owned(),
+            module: 1,
+        },
+        FileModule {
+            file: "a/a.go".to_owned(),
+            module: 2,
+        },
+        FileModule {
+            file: "sub/sub.go".to_owned(),
+            module: 3,
+        },
+        FileModule {
+            file: "cratepkg/c.go".to_owned(),
+            module: 4,
+        },
+        FileModule {
+            file: "cmd/one/main.go".to_owned(),
+            module: 5,
+        },
+        FileModule {
+            file: "cmd/two/main.go".to_owned(),
+            module: 6,
+        },
+        FileModule {
+            file: "internal/util/u.go".to_owned(),
+            module: 7,
+        },
+        FileModule {
+            file: "pkg/util/u.go".to_owned(),
+            module: 8,
+        },
+    ];
+    store
+        .write_crate_graph_with_files(
+            &[
+                Package {
+                    name: "gopkg.in/yaml.v3".to_owned(),
+                    version: None,
+                    manifest_path: "yaml/go.mod".to_owned(),
+                },
+                Package {
+                    name: "example.com/a".to_owned(),
+                    version: None,
+                    manifest_path: "go.mod".to_owned(),
+                },
+            ],
+            &targets,
+            &modules,
+            &file_modules,
+            &[],
+        )
+        .expect("graph");
+
+    // Full import path with dot in version segment + method lookup + display.
+    let yaml_hits = store
+        .symbols_matching("gopkg.in/yaml.v3.Decoder.Decode")
+        .expect("yaml exact");
+    assert_eq!(yaml_hits.len(), 1);
+    assert_eq!(yaml_hits[0].file, "yaml/dec.go");
+
+    let yaml_short_method = store
+        .symbols_matching("yaml.Decode")
+        .expect("yaml short method");
+    assert_eq!(yaml_short_method.len(), 1);
+    assert_eq!(yaml_short_method[0].qual_name, "Decoder::Decode");
+
+    let display_hits = store
+        .symbols_matching("yaml/dec.go::Decoder.Decode")
+        .expect("go display");
+    assert_eq!(display_hits.len(), 1);
+    assert_eq!(display_hits[0].file, "yaml/dec.go");
+
+    // Longest-prefix beats shorter prefix example.com/a.
+    let sub_hits = store
+        .symbols_matching("example.com/a/sub.v2.Run")
+        .expect("longest prefix");
+    assert_eq!(sub_hits.len(), 1);
+    assert_eq!(sub_hits[0].file, "sub/sub.go");
+
+    let a_hits = store
+        .symbols_matching("example.com/a.Run")
+        .expect("base prefix");
+    assert_eq!(a_hits.len(), 1);
+    assert_eq!(a_hits[0].file, "a/a.go");
+
+    // Literal Go package named "crate" preserves its prefix.
+    for q in ["crate.Build", "crate::Build"] {
+        let crate_hits = store.symbols_matching(q).expect(q);
+        assert_eq!(crate_hits.len(), 1, "{q}");
+        assert_eq!(crate_hits[0].file, "cratepkg/c.go");
+    }
+
+    // Ambiguous short package & `main` bin resolution.
+    let main_hits = store.symbols_matching("main.Run").expect("main");
+    assert_eq!(
+        main_hits
+            .iter()
+            .map(|h| h.file.as_str())
+            .collect::<Vec<_>>(),
+        vec!["cmd/one/main.go", "cmd/two/main.go"]
+    );
+    assert!(
+        store
+            .symbols_matching("example.com/a.")
+            .expect("trailing dot")
+            .is_empty()
+    );
+    assert!(
+        store
+            .symbols_matching("example.com/a/Run")
+            .expect("slash rest")
+            .is_empty()
+    );
+    let util_hits = store.symbols_matching("util.Helper").expect("util");
+    assert_eq!(util_hits.len(), 2);
+
+    // Rust-style :: query against Go package short name does not cross into Rust aliases.
+    assert!(
+        store
+            .symbols_matching("yaml::Decoder")
+            .expect("no rust alias")
+            .is_empty()
+    );
+    // Edge inputs returning empty alias lists cleanly.
+    assert!(
+        store
+            .symbols_matching(".Decoder")
+            .expect("empty pkg")
+            .is_empty()
+    );
+    assert!(
+        store
+            .symbols_matching("a/b.Run")
+            .expect("slash in short pkg")
+            .is_empty()
+    );
+}

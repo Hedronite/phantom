@@ -92,7 +92,7 @@ impl crate::Store {
     pub fn rank_input(&self) -> Result<Vec<RankSymbolRow>, StoreError> {
         let mut statement = self.conn.prepare(
             "SELECT s.id, s.file_id, f.path, s.kind, s.visibility, s.is_test,
-                    t.kind, s.name, tf.path
+                    t.kind, s.name, tf.path, f.lang, t.name
              FROM symbols s
              JOIN files f ON f.id = s.file_id
              LEFT JOIN modules m ON m.id = s.module_id
@@ -110,12 +110,18 @@ impl crate::Store {
             let target_kind: Option<String> = row.get(6)?;
             let symbol_name: String = row.get(7)?;
             let root_path: Option<String> = row.get(8)?;
+            let lang: String = row.get(9)?;
+            let target_name: Option<String> = row.get(10)?;
             let declared_kind: String = row.get(3)?;
             let file_path: String = row.get(2)?;
-            let is_main = declared_kind == "function"
-                && symbol_name == "main"
-                && root_path.as_deref() == Some(file_path.as_str())
-                && target_kind.as_deref() == Some("bin");
+            let is_main = is_entry_symbol(
+                &lang,
+                &declared_kind,
+                &symbol_name,
+                target_kind.as_deref(),
+                target_name.as_deref(),
+                root_path.as_deref() == Some(file_path.as_str()),
+            );
             out.push(RankSymbolRow {
                 id: row.get(0)?,
                 file_id: row.get(1)?,
@@ -307,4 +313,33 @@ impl crate::Store {
         }
         Ok(out)
     }
+}
+
+fn is_entry_symbol(
+    lang: &str,
+    declared_kind: &str,
+    name: &str,
+    target_kind: Option<&str>,
+    target_name: Option<&str>,
+    in_root: bool,
+) -> bool {
+    if declared_kind != "function" {
+        return false;
+    }
+    if lang == "go" {
+        return is_go_entry(name, target_kind, target_name);
+    }
+    name == "main" && in_root && target_kind == Some("bin")
+}
+
+fn is_go_entry(name: &str, target_kind: Option<&str>, target_name: Option<&str>) -> bool {
+    if name == "init" {
+        return true;
+    }
+    if name == "main" && (target_kind == Some("bin") || target_name == Some("main")) {
+        return true;
+    }
+    ["Test", "Benchmark", "Fuzz", "Example"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
 }

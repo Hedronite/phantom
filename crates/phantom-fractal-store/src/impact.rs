@@ -65,7 +65,7 @@ impl crate::Store {
     pub fn unresolved_named(&self, name: &str) -> Result<i64, StoreError> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM refs r
-             WHERE r.kind IN ('call', 'method_call')
+             WHERE r.kind IN ('call', 'method_call', 'value_ref')
                AND r.last_segment = ?1
                AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.ref_id = r.id)",
             [name],
@@ -156,7 +156,11 @@ impl crate::Store {
     /// is an orphan at the store level (SPEC-w11 G1a).
     pub fn file_has_module(&self, file_id: i64) -> Result<bool, StoreError> {
         let claimed: i64 = self.conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM modules WHERE file_id = ?1)",
+            "SELECT EXISTS (
+                 SELECT 1 FROM files WHERE id = ?1 AND module_id IS NOT NULL
+                 UNION ALL
+                 SELECT 1 FROM modules WHERE file_id = ?1
+             )",
             [file_id],
             |row| row.get(0),
         )?;
@@ -172,7 +176,7 @@ impl crate::Store {
                     EXISTS (SELECT 1 FROM edges e WHERE e.ref_id = r.id)
              FROM refs r
              WHERE r.from_symbol = ?1
-               AND r.kind IN ('call', 'method_call', 'macro', 'macro_arg')
+               AND r.kind IN ('call', 'method_call', 'macro', 'macro_arg', 'value_ref')
              ORDER BY r.id",
         )?;
         let queried = statement.query([id]);
