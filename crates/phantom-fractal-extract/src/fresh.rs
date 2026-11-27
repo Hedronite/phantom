@@ -18,11 +18,11 @@ use phantom_fractal_store::{FileStat, Store};
 
 use phantom_fractal_store::StoreError;
 
-use crate::fingerprint::{ManifestRead, Unread, read_manifests_with, stamp};
+use crate::fingerprint::{ManifestRead, Unread, read_manifests_with, stamp_with_extra};
 use crate::read::{Source, mtime_ns, read_source};
 use crate::registry::Registry;
 use crate::walk::{Candidate, Walk, walk_with};
-use crate::{EXTRACTOR_VERSION, IndexError};
+use crate::{EXTRACTOR_VERSION, IndexError, PrefilterState, build_driver_filters};
 
 /// What [`probe`] found. Each list is sorted repo-relative paths.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -78,26 +78,27 @@ pub fn probe_with(
 ) -> Result<Freshness, IndexError> {
     let walk = walk_with(root, registry)?;
     let manifests = read_manifests_with(&walk, registry)?;
-    probe_walk(root, store, &walk, &manifests, |path| {
-        registry.is_supported(path)
-    })
+    let prefilter = build_driver_filters(&walk, &manifests, registry)?;
+    probe_walk(root, store, &walk, &manifests, registry, &prefilter)
 }
 
-fn probe_walk<F>(
+fn probe_walk(
     root: &Path,
     store: &Store,
     walk: &Walk,
     manifests: &[ManifestRead],
-    supported: F,
-) -> Result<Freshness, IndexError>
-where
-    F: Fn(&str) -> bool,
-{
+    registry: &Registry<'_>,
+    prefilter: &PrefilterState,
+) -> Result<Freshness, IndexError> {
     let stored = stored_stats_map(store)?;
-    let scan = scan_sources(&walk.files, &stored, &supported)?;
+    let scan = scan_sources(&walk.files, &stored, &|path| {
+        prefilter.keeps_source(registry, path)
+    })?;
     let mut out = finish_scan_lists(scan.freshness, &stored, &scan.kept);
-    let unread = collect_unread(walk, &scan.read_skipped, &scan.not_utf8, &supported);
-    let fingerprint = stamp(manifests, &unread).fingerprint;
+    let unread = collect_unread(walk, &scan.read_skipped, &scan.not_utf8, &|path| {
+        registry.is_supported(path)
+    });
+    let fingerprint = stamp_with_extra(manifests, &unread, &prefilter.excluded_hashes).fingerprint;
     fill_probe_meta(root, store, fingerprint, &mut out)?;
     Ok(out)
 }

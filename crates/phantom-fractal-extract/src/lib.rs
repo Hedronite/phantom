@@ -257,14 +257,7 @@ pub fn index_with(
         };
         let manifests = read_manifests_with(&walk, registry)?;
         let prefilter = build_driver_filters(&walk, &manifests, registry)?;
-        let kept = index_sources(
-            &walk,
-            store,
-            registry,
-            &prefilter.filters,
-            reextract,
-            &mut report,
-        )?;
+        let kept = index_sources(&walk, store, registry, &prefilter, reextract, &mut report)?;
         remove_stale_files(store, &kept, &mut report)?;
         let unread = unread_sources(&report, registry);
         let stamp = stamp_with_extra(&manifests, &unread, &prefilter.excluded_hashes);
@@ -286,7 +279,24 @@ pub(crate) struct PrefilterState {
     pub(crate) has_filtered_driver: bool,
 }
 
-fn build_driver_filters(
+impl PrefilterState {
+    /// True when `path` passes any source filter registered for `language_name`.
+    pub(crate) fn allows(&self, language_name: &str, path: &str) -> bool {
+        self.filters
+            .get(language_name)
+            .and_then(Option::as_ref)
+            .is_none_or(|allowed| allowed.contains(path))
+    }
+
+    /// True when `path` is claimed by a driver in `registry` and passes its source filter.
+    pub(crate) fn keeps_source(&self, registry: &Registry<'_>, path: &str) -> bool {
+        registry
+            .language_for(path)
+            .is_some_and(|driver| self.allows(driver.language().name(), path))
+    }
+}
+
+pub(crate) fn build_driver_filters(
     walk: &Walk,
     manifests: &[fingerprint::ManifestRead],
     registry: &Registry<'_>,
@@ -372,7 +382,7 @@ fn index_sources<'a>(
     walk: &'a Walk,
     store: &mut Store,
     registry: &Registry<'_>,
-    filters: &std::collections::HashMap<String, Option<HashSet<String>>>,
+    prefilter: &PrefilterState,
     reextract: bool,
     report: &mut IndexReport,
 ) -> Result<Vec<&'a Candidate>, IndexError> {
@@ -381,9 +391,7 @@ fn index_sources<'a>(
         let Some(driver) = registry.language_for(&file.path) else {
             continue;
         };
-        if let Some(Some(allowed)) = filters.get(driver.language().name())
-            && !allowed.contains(&file.path)
-        {
+        if !prefilter.allows(driver.language().name(), &file.path) {
             continue;
         }
         index_one_source(file, driver.language(), store, reextract, report, &mut kept)?;
