@@ -4,8 +4,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use phantom_fractal_lang::{
-    CallRef, Graph, Id, Language, Module, Reason, RefKind, ResolveInput, Resolver, Symbol,
-    SymbolKind, Target, TargetKind, UseBinding, Visibility,
+    CallRef, Graph, Id, Language, LinkKind, Module, Reason, RefKind, ResolveInput, Resolver,
+    Symbol, SymbolKind, Target, TargetKind, UseBinding, Visibility,
 };
 use phantom_fractal_lang_go::go_mod::{GoSourceFile, build_package_graph};
 use phantom_fractal_lang_go::{GoLanguage, GoResolver, parse_linknames};
@@ -1393,4 +1393,89 @@ func D(a ********C, c C) {
         "mret8: {:?}",
         m_calls[1]
     );
+}
+
+#[test]
+fn scan_peel_collects_refs_in_plus_chain_and_nested_blocks() {
+    let lang = GoLanguage::new();
+    let plus = (0..12)
+        .map(|_| "\"a\" + ")
+        .collect::<String>()
+        + "SideEffect()";
+    let src = format!("package p\nfunc F() int {{ return {plus}; }}\n");
+    let ext = lang.extract(&src).expect("extract");
+    assert!(
+        ext.refs.iter().any(|r| r.kind == RefKind::Call && r.text == "SideEffect"),
+        "refs: {:?}",
+        ext.refs
+    );
+    let mut blocks = "package p\nfunc G() int {\n".to_owned();
+    for _ in 0..12 {
+        blocks.push('{');
+    }
+    blocks.push_str("return H()\n");
+    for _ in 0..12 {
+        blocks.push('}');
+    }
+    blocks.push_str("\nfunc H() int { return 1 }\n");
+    let ext2 = lang.extract(&blocks).expect("extract");
+    assert!(
+        ext2.refs.iter().any(|r| r.kind == RefKind::Call && r.text == "H"),
+        "{:?}",
+        ext2.refs
+    );
+    let minus = lang
+        .extract("package p\nfunc Sub() { _ = a - callee() }\n")
+        .expect("extract");
+    assert!(
+        minus
+            .refs
+            .iter()
+            .any(|r| r.kind == RefKind::Call && r.text == "callee"),
+        "{:?}",
+        minus.refs
+    );
+}
+
+#[test]
+fn deep_paren_concat_index_does_not_stack_overflow() {
+    let lang = GoLanguage::new();
+    let parens = format!("package p\nfunc F() {{ {} }}\n", "(".repeat(48_000));
+    assert!(lang.extract(&parens).is_ok());
+    let concat = format!(
+        "package p\nvar s = {}\n",
+        (0..160_000)
+            .map(|_| "\"a\" + ")
+            .collect::<String>()
+            + "\"a\""
+    );
+    assert!(lang.extract(&concat).is_ok());
+}
+
+#[test]
+fn structural_impl_links_cap_at_budget() {
+    let mut body = String::from("package p\n");
+    for i in 0..64 {
+        body.push_str(&format!("type S{i} struct{{}}\nfunc (S{i}) M() {{}}\n"));
+    }
+    for i in 0..256 {
+        body.push_str(&format!("type I{i} interface {{ M() }}\n"));
+    }
+    let files = [
+        GoSourceFile {
+            path: "go.mod",
+            content: "module example.com/cap\ngo 1.26.0\n",
+        },
+        GoSourceFile {
+            path: "cap.go",
+            content: &body,
+        },
+    ];
+    let graph = GoResolver::new().resolve_graph(&build_input(&files));
+    let impls = graph
+        .links
+        .iter()
+        .filter(|l| l.kind == LinkKind::Impl)
+        .count();
+    assert!(impls <= 8_192, "structural impl count {impls}");
 }

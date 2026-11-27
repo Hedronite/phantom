@@ -56,6 +56,8 @@ pub struct DriverFilter {
     pub build_excluded_terms: String,
     /// Hashes of build-excluded files so build-tag edits trigger graph rebuilds.
     pub excluded_hashes: Vec<(String, [u8; 32])>,
+    /// `.go` paths dropped before extract (invalid package clause).
+    pub prefilter_skipped: Vec<String>,
 }
 
 /// Pluggable language backend pairing extraction, call resolution, manifests,
@@ -365,19 +367,27 @@ impl LanguageDriver for GoDriver {
         let mut excluded_terms = Vec::new();
         let mut excluded_hashes = Vec::new();
         let mut build_excluded_count = 0u64;
+        let mut prefilter_skipped = Vec::new();
         for ex in &pkg_graph.excluded {
-            if ex.reason != ExcludeReason::BuildConstraint {
+            let Some(&content) = src_map.get(ex.path.as_str()) else {
+                if ex.reason == ExcludeReason::MissingPackageClause {
+                    prefilter_skipped.push(ex.path.clone());
+                }
                 continue;
-            }
-            build_excluded_count += 1;
-            if let Some(&content) = src_map.get(ex.path.as_str()) {
-                excluded_hashes.push((
-                    ex.path.clone(),
-                    *blake3::hash(content.as_bytes()).as_bytes(),
-                ));
-                let mod_path = enclosing_go_module_path(&ex.path, &pkg_graph.modules);
-                let idents = collect_go_identifiers(content);
-                excluded_terms.push(format!("{mod_path}\t{idents}"));
+            };
+            match ex.reason {
+                ExcludeReason::BuildConstraint | ExcludeReason::NestedModule => {
+                    build_excluded_count += 1;
+                    excluded_hashes.push((
+                        ex.path.clone(),
+                        *blake3::hash(content.as_bytes()).as_bytes(),
+                    ));
+                    let mod_path = enclosing_go_module_path(&ex.path, &pkg_graph.modules);
+                    let idents = collect_go_identifiers(content);
+                    excluded_terms.push(format!("{mod_path}\t{idents}"));
+                }
+                ExcludeReason::MissingPackageClause => prefilter_skipped.push(ex.path.clone()),
+                _ => {}
             }
         }
         Some(DriverFilter {
@@ -385,6 +395,7 @@ impl LanguageDriver for GoDriver {
             build_excluded_count,
             build_excluded_terms: excluded_terms.join("\n"),
             excluded_hashes,
+            prefilter_skipped,
         })
     }
 
@@ -466,7 +477,7 @@ fn enclosing_go_module_path<'a>(
 
 fn collect_go_identifiers(content: &str) -> String {
     let set: BTreeSet<&str> = content
-        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|tok| !tok.is_empty() && !tok.as_bytes()[0].is_ascii_digit())
         .collect();
     set.into_iter().collect::<Vec<_>>().join(" ")

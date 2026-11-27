@@ -124,22 +124,98 @@ fn scan_expr_node(node: Node<'_>, kind: &str, env: &mut ScopeEnv, ctx: &mut Scan
         "call_expression" => scan_call_expr(node, env, ctx),
         "selector_expression" => scan_value_selector(node, env, ctx),
         "identifier" => record_ident_value_ref(node, env, ctx),
+        "binary_expression" if is_plus_chain(node, ctx.src) => scan_plus_chain(node, env, ctx),
         _ => scan_wrapped_or_children(node, kind, env, ctx),
+    }
+}
+
+fn is_plus_chain(node: Node<'_>, src: &[u8]) -> bool {
+    node.child_by_field_name("operator")
+        .is_some_and(|o| node_text(o, src) == "+")
+}
+
+fn scan_plus_chain(mut node: Node<'_>, env: &mut ScopeEnv, ctx: &mut ScanCtx<'_>) {
+    loop {
+        if node.kind() != "binary_expression" {
+            scan_node(node, env, ctx);
+            return;
+        }
+        if !is_plus_chain(node, ctx.src) {
+            scan_node(node, env, ctx);
+            return;
+        }
+        if let Some(right) = node.child_by_field_name("right") {
+            scan_node(right, env, ctx);
+        }
+        let Some(left) = node.child_by_field_name("left") else {
+            return;
+        };
+        if left.kind() != "binary_expression" {
+            scan_node(left, env, ctx);
+            return;
+        }
+        if !is_plus_chain(left, ctx.src) {
+            scan_node(left, env, ctx);
+            return;
+        }
+        node = left;
     }
 }
 
 fn scan_wrapped_or_children(node: Node<'_>, kind: &str, env: &mut ScopeEnv, ctx: &mut ScanCtx<'_>) {
     if kind == "keyed_element" {
         scan_field_only(node, "value", env, ctx);
+    } else if kind == "parenthesized_expression" {
+        scan_node(peel_parentheses(node), env, ctx);
     } else {
         scan_children(node, env, ctx);
     }
 }
 
+fn peel_parentheses(mut node: Node<'_>) -> Node<'_> {
+    while node.kind() == "parenthesized_expression" {
+        let Some(inner) = node.named_child(0) else {
+            break;
+        };
+        node = inner;
+    }
+    node
+}
+
+fn next_single_child_block(cur: Node<'_>) -> Option<Node<'_>> {
+    if cur.kind() != "block" {
+        return None;
+    }
+    let mut inner_walk = cur.walk();
+    let kids: Vec<Node<'_>> = cur.named_children(&mut inner_walk).collect();
+    if kids.len() != 1 {
+        return None;
+    }
+    if kids[0].kind() != "statement_list" {
+        return None;
+    }
+    let mut list_walk = kids[0].walk();
+    let stmts: Vec<Node<'_>> = kids[0].named_children(&mut list_walk).collect();
+    if stmts.len() != 1 {
+        return None;
+    }
+    if stmts[0].kind() != "block" {
+        return None;
+    }
+    Some(stmts[0])
+}
+
+fn peel_single_child_blocks(mut cur: Node<'_>) -> Node<'_> {
+    while let Some(next) = next_single_child_block(cur) {
+        cur = next;
+    }
+    cur
+}
+
 fn scan_children(node: Node<'_>, env: &mut ScopeEnv, ctx: &mut ScanCtx<'_>) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        scan_node(child, env, ctx);
+        scan_node(peel_single_child_blocks(child), env, ctx);
     }
 }
 
@@ -610,4 +686,211 @@ fn infer_method_return_hint(
     let field = func.child_by_field_name("field")?;
     let recv_hint = infer_expr_hint_d(op, false, env, ctx, depth + 1)?;
     Some(format!("mret:{recv_hint}|{}", node_text(field, ctx.src)))
+}
+
+#[cfg(test)]
+mod peel_tests {
+    use super::*;
+    use crate::GoLanguage;
+    use phantom_fractal_lang::{Language, RefKind};
+    use tree_sitter::{Node, Parser, Tree};
+
+    fn parse_go(source: &str) -> Tree {
+        let mut parser = Parser::new();
+        parser
+            .set_language(&tree_sitter_go::LANGUAGE.into())
+            .expect("grammar");
+        parser.parse(source, None).expect("parse")
+    }
+
+    fn first_binary(root: Node<'_>) -> Option<Node<'_>> {
+        if root.kind() == "binary_expression" {
+            return Some(root);
+        }
+        let mut cursor = root.walk();
+        for child in root.children(&mut cursor) {
+            if let Some(found) = first_binary(child) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    fn max_single_block_chain_depth(mut cur: Node<'_>) -> usize {
+        let mut depth = 0usize;
+        while let Some(next) = next_single_child_block(cur) {
+            depth += 1;
+            cur = next;
+        }
+        depth
+    }
+
+    fn func_body_decl(root: Node<'_>) -> Option<Node<'_>> {
+        if root.kind() == "function_declaration" {
+            return root.child_by_field_name("body");
+        }
+        let mut cursor = root.walk();
+        for child in root.children(&mut cursor) {
+            if let Some(body) = func_body_decl(child) {
+                return Some(body);
+            }
+        }
+        None
+    }
+
+    fn deepest_peelable_block(root: Node<'_>) -> Option<(Node<'_>, usize)> {
+        let mut best: Option<(Node<'_>, usize)> = None;
+        fn visit<'a>(node: Node<'a>, best: &mut Option<(Node<'a>, usize)>) {
+            if node.kind() == "block" {
+                let depth = max_single_block_chain_depth(node);
+                if depth > 0 && best.as_ref().is_none_or(|(_, d)| depth > *d) {
+                    *best = Some((node, depth));
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                visit(child, best);
+            }
+        }
+        visit(root, &mut best);
+        best
+    }
+
+    #[test]
+    fn is_plus_chain_rejects_subtraction() {
+        let src = "package p\nvar x = a - b\n";
+        let tree = parse_go(src);
+        let bin = first_binary(tree.root_node()).expect("binary");
+        assert!(!is_plus_chain(bin, src.as_bytes()));
+    }
+
+    #[test]
+    fn plus_chain_scan_visits_only_on_plus_path() {
+        let lang = GoLanguage::new();
+        let src = "package p\nfunc F() int { return (((((((\"a\" + \"b\") + Side()) + 1))))); }\n";
+        let ext = lang.extract(src).unwrap();
+        assert!(
+            ext.refs
+                .iter()
+                .any(|r| r.kind == RefKind::Call && r.text == "Side")
+        );
+        let minus = lang
+            .extract("package p\nfunc G() { _ = a - callee() }\n")
+            .unwrap();
+        assert!(
+            minus
+                .refs
+                .iter()
+                .any(|r| r.kind == RefKind::Call && r.text == "callee")
+        );
+    }
+
+    #[test]
+    fn next_single_child_block_none_when_not_a_chain() {
+        let tree = parse_go("package p\nfunc G() { return 1 }\n");
+        let body = func_body_decl(tree.root_node()).expect("body");
+        assert!(next_single_child_block(body).is_none());
+        let tree2 = parse_go("package p\nfunc G() { A(); B() }\n");
+        let body2 = func_body_decl(tree2.root_node()).expect("body");
+        assert!(next_single_child_block(body2).is_none());
+    }
+
+    #[test]
+    fn plus_chain_minus_on_left_spine_still_finds_calls() {
+        let lang = GoLanguage::new();
+        let ext = lang
+            .extract("package p\nfunc F() int { return (f2() - f3()) + f1() + f4() }\n")
+            .unwrap();
+        for name in ["f1", "f2", "f3", "f4"] {
+            assert!(
+                ext.refs
+                    .iter()
+                    .any(|r| r.kind == RefKind::Call && r.text == name),
+                "missing {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn plus_chain_spine_and_minus_rhs_are_collected() {
+        let lang = GoLanguage::new();
+        let ext = lang
+            .extract("package p\nfunc F() { _ = A() + (B() - C()) }\n")
+            .unwrap();
+        for name in ["A", "B", "C"] {
+            assert!(
+                ext.refs
+                    .iter()
+                    .any(|r| r.kind == RefKind::Call && r.text == name),
+                "missing call {name}"
+            );
+        }
+        let mut src = String::from("package p\nfunc F() int { return f1()");
+        for n in 2..=12 {
+            src.push_str(&format!(" + f{n}()"));
+        }
+        src.push_str(" }\n");
+        let ext = lang.extract(&src).unwrap();
+        for n in 1..=12 {
+            let want = format!("f{n}");
+            assert!(
+                ext.refs
+                    .iter()
+                    .any(|r| r.kind == RefKind::Call && r.text == want),
+                "missing {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn peel_single_child_blocks_reaches_return_block() {
+        let mut src = String::from("package p\nfunc G() int {\n");
+        for _ in 0..24 {
+            src.push('{');
+        }
+        src.push_str("return Tail()\n");
+        for _ in 0..24 {
+            src.push('}');
+        }
+        src.push_str("\n}\n");
+        let tree = parse_go(&src);
+        let (start, depth) = deepest_peelable_block(tree.root_node()).expect("peelable chain");
+        assert!(depth >= 20, "expected deep single-block chain, got {depth}");
+        let peeled = peel_single_child_blocks(start);
+        assert!(
+            max_single_block_chain_depth(peeled) < depth,
+            "peel should shorten the chain"
+        );
+        let stmt_list = peeled
+            .named_child(0)
+            .filter(|n| n.kind() == "statement_list")
+            .expect("statement_list");
+        let mut walk = stmt_list.walk();
+        assert!(
+            stmt_list
+                .named_children(&mut walk)
+                .any(|c| c.kind() == "return_statement"),
+            "peel should expose return in the inner statement list"
+        );
+    }
+
+    #[test]
+    fn single_block_chain_still_reaches_call() {
+        let lang = GoLanguage::new();
+        let mut src = String::from("package p\nfunc G() int {\n");
+        for _ in 0..24 {
+            src.push('{');
+        }
+        src.push_str("return Tail()\n");
+        for _ in 0..24 {
+            src.push('}');
+        }
+        src.push_str("\n}\nfunc Tail() int { return 1 }\n");
+        let ext = lang.extract(&src).unwrap();
+        assert!(
+            ext.refs
+                .iter()
+                .any(|r| r.kind == RefKind::Call && r.text == "Tail")
+        );
+    }
 }

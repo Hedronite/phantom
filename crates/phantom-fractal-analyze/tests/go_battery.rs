@@ -654,6 +654,95 @@ fn b28_parse_errors_and_b17_to_b20_diff_impact_hold_zero_false_exact() {
     assert!(dr1.outside_span_changes > 0);
 }
 
+fn write_battery_tree_no_newsyntax(root: &Path) {
+    write_battery_tree(root, false);
+}
+
+#[test]
+fn b35_bad_package_clause_makes_impact_mid_inexact() {
+    let repo = TempDir::new("b35");
+    let db = TempDir::new("b35-db");
+    write_battery_tree_no_newsyntax(&repo.0);
+    write_file(
+        &repo.0,
+        "internal/core/zz.go",
+        "pakage core\n\nfunc Z() int { return Mid() }\n",
+    );
+    let mut store = Store::open(&db.0.join("graph.db")).expect("open");
+    let rust = RustLanguage::new().expect("rust");
+    index(&repo.0, &mut store, &rust).expect("index");
+    let mid = sym_impact(&store, "example.com/battery/internal/core.Mid");
+    assert!(!mid.exact);
+    assert!(has_reason(&mid, CompletenessReason::ParseSkippedFiles));
+}
+
+#[test]
+fn b36_non_utf8_byte_makes_impact_mid_inexact() {
+    use std::io::Write as _;
+    let repo = TempDir::new("b36");
+    let db = TempDir::new("b36-db");
+    write_battery_tree_no_newsyntax(&repo.0);
+    let full = repo.0.join("internal/core/zz.go");
+    fs::create_dir_all(full.parent().unwrap()).unwrap();
+    let mut f = fs::File::create(&full).unwrap();
+    f.write_all(b"package core\n\n// ").unwrap();
+    f.write_all(&[0xff, 0xfe]).unwrap();
+    f.write_all(b" oops\nfunc Z() int { return Mid() }\n")
+        .unwrap();
+    let mut store = Store::open(&db.0.join("graph.db")).expect("open");
+    let rust = RustLanguage::new().expect("rust");
+    index(&repo.0, &mut store, &rust).expect("index");
+    let mid = sym_impact(&store, "example.com/battery/internal/core.Mid");
+    assert!(!mid.exact);
+    assert!(has_reason(&mid, CompletenessReason::ParseSkippedFiles));
+}
+
+#[test]
+fn b37_unicode_caller_in_build_excluded_makes_groesse_inexact() {
+    let repo = TempDir::new("b37");
+    let db = TempDir::new("b37-db");
+    write_battery_tree_no_newsyntax(&repo.0);
+    write_file(
+        &repo.0,
+        "internal/core/g.go",
+        "package core\n\nfunc größe() int { return 1 }\n",
+    );
+    write_file(
+        &repo.0,
+        "internal/core/w_windows.go",
+        "//go:build windows\n\npackage core\n\nfunc callG() int { return größe() }\n",
+    );
+    let mut store = Store::open(&db.0.join("graph.db")).expect("open");
+    let rust = RustLanguage::new().expect("rust");
+    index(&repo.0, &mut store, &rust).expect("index");
+    let imp = sym_impact(&store, "example.com/battery/internal/core.größe");
+    assert!(!imp.exact);
+    assert!(has_reason(&imp, CompletenessReason::BuildExcluded));
+}
+
+#[test]
+fn b38_nested_module_caller_makes_impact_mid_inexact() {
+    let repo = TempDir::new("b38");
+    let db = TempDir::new("b38-db");
+    write_battery_tree_no_newsyntax(&repo.0);
+    write_file(
+        &repo.0,
+        "test/e2e/go.mod",
+        "module example.com/battery/test/e2e\n\ngo 1.26.0\n\nrequire example.com/battery v0.0.0\n\nreplace example.com/battery => ../..\n",
+    );
+    write_file(
+        &repo.0,
+        "test/e2e/e.go",
+        "package e2e\n\nimport \"example.com/battery/internal/core\"\n\nfunc E() int { return core.Mid() }\n",
+    );
+    let mut store = Store::open(&db.0.join("graph.db")).expect("open");
+    let rust = RustLanguage::new().expect("rust");
+    index(&repo.0, &mut store, &rust).expect("index");
+    let mid = sym_impact(&store, "example.com/battery/internal/core.Mid");
+    assert!(!mid.exact);
+    assert!(has_reason(&mid, CompletenessReason::BuildExcluded));
+}
+
 fn run_git(dir: &Path, args: &[&str]) {
     let out = Command::new("git")
         .args(args)

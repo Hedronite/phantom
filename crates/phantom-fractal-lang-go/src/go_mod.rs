@@ -255,6 +255,7 @@ fn apply_path_segment<'a>(stack: &mut Vec<&'a str>, seg: &'a str) -> Option<()> 
 
 /// Parses the declared `package <name>` identifier from Go source text.
 pub fn parse_package_clause(source: &str) -> Option<String> {
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     let mut parser = Parser::new();
     parser.set_language(&tree_sitter_go::LANGUAGE.into()).ok()?;
     let tree = parser.parse(source, None)?;

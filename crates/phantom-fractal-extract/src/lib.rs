@@ -257,9 +257,14 @@ pub fn index_with(
         };
         let manifests = read_manifests_with(&walk, registry)?;
         let prefilter = build_driver_filters(&walk, &manifests, registry)?;
+        report
+            .not_utf8
+            .extend(prefilter.filter_not_utf8.iter().cloned());
         let kept = index_sources(&walk, store, registry, &prefilter, reextract, &mut report)?;
         remove_stale_files(store, &kept, &mut report)?;
-        let unread = unread_sources(&report, registry);
+        let owned_unread = driver_unread_owned(&prefilter, registry);
+        let mut unread = unread_sources(&report, registry);
+        unread.extend(owned_unread.iter().map(|(p, u)| (p.as_str(), *u)));
         let stamp = stamp_with_extra(&manifests, &unread, &prefilter.excluded_hashes);
         let stale = store.workspace_fingerprint()? != Some(stamp.fingerprint);
         if reextract || !report.written.is_empty() || !report.removed.is_empty() || stale {
@@ -276,6 +281,8 @@ pub(crate) struct PrefilterState {
     pub(crate) build_excluded_count: u64,
     pub(crate) build_excluded_terms: String,
     pub(crate) excluded_hashes: Vec<(String, [u8; 32])>,
+    pub(crate) filter_not_utf8: Vec<String>,
+    pub(crate) prefilter_skipped: Vec<String>,
     pub(crate) has_filtered_driver: bool,
 }
 
@@ -306,6 +313,8 @@ pub(crate) fn build_driver_filters(
         build_excluded_count: 0,
         build_excluded_terms: String::new(),
         excluded_hashes: Vec::new(),
+        filter_not_utf8: Vec::new(),
+        prefilter_skipped: Vec::new(),
         has_filtered_driver: false,
     };
     let manifest_files = rebuild::kept_manifest_files(manifests);
@@ -336,13 +345,16 @@ fn apply_driver_filter(
     if candidates.is_empty() && !has_driver_manifest(manifest_files, driver) {
         return Ok(());
     }
-    let Some(res) = driver.filter_sources(manifest_files, &read_filter_texts(&candidates)?) else {
+    let (filter_texts, not_utf8) = read_filter_texts(&candidates)?;
+    state.filter_not_utf8.extend(not_utf8);
+    let Some(res) = driver.filter_sources(manifest_files, &filter_texts) else {
         return Ok(());
     };
     state.has_filtered_driver = true;
     state.build_excluded_count += res.build_excluded_count;
     append_terms(&mut state.build_excluded_terms, &res.build_excluded_terms);
     state.excluded_hashes.extend(res.excluded_hashes);
+    state.prefilter_skipped.extend(res.prefilter_skipped);
     state
         .filters
         .insert(driver.language().name().to_owned(), res.kept_paths);
@@ -368,16 +380,20 @@ fn has_driver_manifest(manifests: &[ManifestFile], driver: &dyn LanguageDriver) 
     })
 }
 
-fn read_filter_texts(candidates: &[&Candidate]) -> Result<Vec<(String, String)>, IndexError> {
+type FilterTextPairs = (Vec<(String, String)>, Vec<String>);
+
+fn read_filter_texts(candidates: &[&Candidate]) -> Result<FilterTextPairs, IndexError> {
     let mut out = Vec::with_capacity(candidates.len());
+    let mut not_utf8 = Vec::new();
     for file in candidates {
-        if let Source::Bytes { bytes, .. } = read_source(&file.abs_path)?
-            && let Ok(text) = String::from_utf8(bytes)
-        {
-            out.push((file.path.clone(), text));
+        if let Source::Bytes { bytes, .. } = read_source(&file.abs_path)? {
+            match String::from_utf8(bytes) {
+                Ok(text) => out.push((file.path.clone(), text)),
+                Err(_) => not_utf8.push(file.path.clone()),
+            }
         }
     }
-    Ok(out)
+    Ok((out, not_utf8))
 }
 
 fn index_sources<'a>(
@@ -456,6 +472,24 @@ fn remove_stale_files(
         }
     }
     Ok(())
+}
+
+pub(crate) fn driver_unread_owned(
+    prefilter: &PrefilterState,
+    registry: &Registry<'_>,
+) -> Vec<(String, Unread)> {
+    let mut out = Vec::new();
+    for path in &prefilter.filter_not_utf8 {
+        if registry.is_supported(path) {
+            out.push((path.clone(), Unread::NotUtf8));
+        }
+    }
+    for path in &prefilter.prefilter_skipped {
+        if registry.is_supported(path) {
+            out.push((path.clone(), Unread::Skipped));
+        }
+    }
+    out
 }
 
 fn unread_sources<'a>(report: &'a IndexReport, registry: &Registry<'_>) -> Vec<(&'a str, Unread)> {

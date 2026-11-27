@@ -4,13 +4,20 @@ use std::collections::{HashMap, HashSet};
 
 const MAX_EMBED_DEPTH: usize = 16;
 const MAX_HINT_DEPTH: u8 = 8;
+/// Structural `Impl` edge budget per index (CONTRACT / DoS guard).
+const MAX_STRUCTURAL_IMPL_TOTAL: usize = 8_192;
 
 const GO_STDLIB_METHODS: &[&str] = &[
+    "Add",
+    "And",
     "AppendBinary",
     "AppendText",
+    "Clear",
     "Close",
     "Compare",
+    "CompareAndSwap",
     "Deadline",
+    "Delete",
     "Done",
     "Equal",
     "Err",
@@ -20,7 +27,12 @@ const GO_STDLIB_METHODS: &[&str] = &[
     "GoString",
     "Len",
     "Less",
+    "Load",
+    "LoadAndDelete",
+    "LoadOrStore",
     "Lock",
+    "Or",
+    "Range",
     "MarshalBinary",
     "MarshalJSON",
     "MarshalText",
@@ -40,6 +52,7 @@ const GO_STDLIB_METHODS: &[&str] = &[
     "ServeHTTP",
     "Signal",
     "Stat",
+    "Store",
     "String",
     "Swap",
     "Text",
@@ -323,14 +336,26 @@ fn collect_impl_links(input: &ResolveInput, idx: &Index<'_>, links: &mut Vec<Lin
         }
         sets.insert(st.id, mset);
     }
+    let mut structural_left = MAX_STRUCTURAL_IMPL_TOTAL;
     for iface in input
         .symbols
         .iter()
         .filter(|s| s.kind == SymbolKind::Interface)
     {
+        if structural_left == 0 {
+            break;
+        }
         let req = method_set_memo(idx, iface.id, &sets);
         if !req.is_empty() {
-            match_structural_impls(iface.id, &req, &sets, &by_method, &explicit, links);
+            structural_left = match_structural_impls(
+                iface.id,
+                &req,
+                &sets,
+                &by_method,
+                &explicit,
+                links,
+                structural_left,
+            );
         }
     }
 }
@@ -374,6 +399,7 @@ fn explicit_assert_pair(idx: &Index<'_>, r: &CallRef) -> Option<(Id, Id)> {
         .then_some((st.id, iface.id))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn match_structural_impls(
     iface_id: Id,
     req: &HashSet<&str>,
@@ -381,15 +407,19 @@ fn match_structural_impls(
     by_method: &HashMap<&str, Vec<Id>>,
     explicit: &HashSet<(Id, Id)>,
     links: &mut Vec<Link>,
-) {
+    mut budget: usize,
+) -> usize {
     let Some(rarest) = req
         .iter()
         .min_by_key(|m| by_method.get(*m).map_or(0, Vec::len))
         .and_then(|m| by_method.get(m))
     else {
-        return;
+        return budget;
     };
     for &st_id in rarest {
+        if budget == 0 {
+            break;
+        }
         if explicit.contains(&(st_id, iface_id)) {
             continue;
         }
@@ -405,8 +435,10 @@ fn match_structural_impls(
                 reason: LinkReason::StructuralImpl,
                 ref_id: None,
             });
+            budget -= 1;
         }
     }
+    budget
 }
 
 fn method_set_memo<'a>(

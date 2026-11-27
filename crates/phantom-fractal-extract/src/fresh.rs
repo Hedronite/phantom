@@ -95,9 +95,11 @@ fn probe_walk(
         prefilter.keeps_source(registry, path)
     })?;
     let mut out = finish_scan_lists(scan.freshness, &stored, &scan.kept);
-    let unread = collect_unread(walk, &scan.read_skipped, &scan.not_utf8, &|path| {
+    let mut unread = collect_unread(walk, &scan.read_skipped, &scan.not_utf8, &|path| {
         registry.is_supported(path)
     });
+    let owned_unread = crate::driver_unread_owned(prefilter, registry);
+    unread.extend(owned_unread.iter().map(|(p, u)| (p.as_str(), *u)));
     let fingerprint = stamp_with_extra(manifests, &unread, &prefilter.excluded_hashes).fingerprint;
     fill_probe_meta(root, store, fingerprint, &mut out)?;
     Ok(out)
