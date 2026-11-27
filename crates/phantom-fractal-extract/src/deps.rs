@@ -156,6 +156,13 @@ fn entries(text: &str, header: &str) -> Vec<(String, Form)> {
     out
 }
 
+#[derive(Default)]
+struct InlineFields {
+    path: Option<String>,
+    package: Option<String>,
+    workspace: bool,
+}
+
 /// One `B.workspace = true` or single-line `B = { … }` line.
 fn entry(line: &str) -> Option<(String, Form)> {
     let (key, value) = line.split_once('=')?;
@@ -163,27 +170,53 @@ fn entry(line: &str) -> Option<(String, Form)> {
     if let Some(name) = key.strip_suffix(".workspace") {
         return (is_bare_key(name) && value == "true").then(|| (name.to_owned(), Form::Workspace));
     }
+    inline_entry(key, value)
+}
+
+fn inline_entry(key: &str, value: &str) -> Option<(String, Form)> {
     if !is_bare_key(key) {
         return None;
     }
     let body = value.strip_prefix('{')?.strip_suffix('}')?;
-    let mut path = None;
-    let mut package = None;
-    let mut workspace = false;
-    for field in fields(body)? {
-        let (name, value) = field.split_once('=')?;
-        match (name.trim(), value.trim()) {
-            ("path", value) => path = Some(unquote(value)?.to_owned()),
-            ("package", value) => package = Some(non_empty_unquote(value)?),
-            ("workspace", "true") => workspace = true,
-            ("workspace" | "git", _) => return None,
-            _ => {}
-        }
-    }
-    match (path, package, workspace) {
+    let parsed = parse_inline_fields(body)?;
+    form_from_fields(key, parsed)
+}
+
+fn form_from_fields(key: &str, parsed: InlineFields) -> Option<(String, Form)> {
+    match (parsed.path, parsed.package, parsed.workspace) {
         (Some(path), package, false) => Some((key.to_owned(), Form::Path { path, package })),
         (None, None, true) => Some((key.to_owned(), Form::Workspace)),
         _ => None,
+    }
+}
+
+fn parse_inline_fields(body: &str) -> Option<InlineFields> {
+    let mut parsed = InlineFields::default();
+    for field in fields(body)? {
+        let (name, value) = field.split_once('=')?;
+        if !apply_inline_field(&mut parsed, name.trim(), value.trim()) {
+            return None;
+        }
+    }
+    Some(parsed)
+}
+
+fn apply_inline_field(parsed: &mut InlineFields, name: &str, value: &str) -> bool {
+    match name {
+        "path" => {
+            parsed.path = unquote(value).map(str::to_owned);
+            parsed.path.is_some()
+        }
+        "package" => {
+            parsed.package = non_empty_unquote(value);
+            parsed.package.is_some()
+        }
+        "workspace" => {
+            parsed.workspace = value == "true";
+            parsed.workspace
+        }
+        "git" => false,
+        _ => true,
     }
 }
 

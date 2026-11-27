@@ -140,7 +140,11 @@ probe_local_repo() {
   if ! command -v git >/dev/null 2>&1; then
     return 0
   fi
-  if ! _head=$(git -C "$_dir" -c core.fsmonitor=false -c core.hooksPath=/dev/null rev-parse HEAD 2>/dev/null); then
+  if ! _head=$(
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR \
+      GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+    git -C "$_dir" -c core.fsmonitor=false -c core.hooksPath=/dev/null rev-parse HEAD 2>/dev/null
+  ); then
     return 0
   fi
   case $_head in
@@ -151,7 +155,11 @@ probe_local_repo() {
   if [ "${#_head}" -ne 40 ] && [ "${#_head}" -ne 64 ]; then
     return 0
   fi
-  if ! _status=$(git -C "$_dir" -c core.fsmonitor=false -c core.hooksPath=/dev/null status --porcelain=v1 --untracked-files=normal 2>/dev/null); then
+  if ! _status=$(
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR \
+      GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+    git -C "$_dir" -c core.fsmonitor=false -c core.hooksPath=/dev/null status --porcelain=v1 --untracked-files=normal 2>/dev/null
+  ); then
     expected_head=$_head
     return 0
   fi

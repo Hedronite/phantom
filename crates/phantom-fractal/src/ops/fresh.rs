@@ -8,9 +8,9 @@
 
 use std::path::Path;
 
-use phantom_fractal_extract::{Freshness, probe};
+use phantom_fractal_extract::{Freshness, IndexError, probe};
 use phantom_fractal_proto::Meta;
-use phantom_fractal_store::Store;
+use phantom_fractal_store::{IndexState, Store};
 
 use super::Failure;
 
@@ -41,6 +41,18 @@ pub(crate) fn of(freshness: &Freshness, rank_epoch: u64) -> Meta {
         rank_epoch,
         limit: None,
         stale_cause: None,
+    })
+}
+
+/// Guarded freshness state for `path:line` resolution: stale whenever either the
+/// index probe or the locality guard flags staleness.
+pub(crate) fn index_state(root: &Path, store: &Store) -> Result<IndexState, IndexError> {
+    let freshness = probe(root, store)?;
+    let stale = freshness.stale() || locality_cause(freshness.head.as_deref()).is_some();
+    Ok(if stale {
+        IndexState::Stale
+    } else {
+        IndexState::Fresh
     })
 }
 

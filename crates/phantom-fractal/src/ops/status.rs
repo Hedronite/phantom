@@ -77,8 +77,9 @@ pub(crate) fn status(request: &StatusRequest) -> Result<Reply<StatusResult>, Fai
     let database = index_database_path(&root);
     let freshness = probe_tree(&root, &store)?;
     let rank = store.rank_epoch()?;
-    let result = result(&store, &database, &freshness, rank)?;
-    Ok(Reply::with_meta(result, fresh::of(&freshness, rank)))
+    let meta = fresh::of(&freshness, rank);
+    let result = result(&store, &database, &freshness, meta.stale, rank)?;
+    Ok(Reply::with_meta(result, meta))
 }
 
 /// The tree at `root` compared with its index. The probe's error may hold
@@ -98,6 +99,7 @@ fn result(
     store: &Store,
     database: &Path,
     freshness: &Freshness,
+    stale: bool,
     rank: u64,
 ) -> Result<StatusResult, Failure> {
     let key = key(database);
@@ -108,7 +110,7 @@ fn result(
         key,
         head: freshness.head.clone(),
         index_head: freshness.index_head.clone(),
-        stale: freshness.stale(),
+        stale,
         changes: Changes {
             added: freshness.added.len(),
             modified: freshness.modified.len(),

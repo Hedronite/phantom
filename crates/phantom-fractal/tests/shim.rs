@@ -220,3 +220,46 @@ fn mapping_keyed_locality_guard_probes_local_and_fails_closed() {
     );
     assert!(!argv[4].contains("PHANTOM_EXPECTED_HEAD="), "{}", argv[4]);
 }
+
+#[test]
+fn probe_ignores_caller_git_dir_and_work_tree_env_overrides() {
+    let tmp = TempDir::new("shim-git-env");
+    let log = tmp.path().join("ssh-argv.log");
+    let bin = make_fake_ssh(tmp.path(), &log);
+    let target_repo = Repo::new("target", &history());
+    let mut other_script = history();
+    other_script.commit(
+        support::HEAD + support::DAY,
+        &[("extra.rs", "pub fn x() {}\n".to_owned())],
+    );
+    let other_repo = Repo::new("other", &other_script);
+    let target_local = target_repo.root.to_str().unwrap();
+    let target_head = target_repo.rev("HEAD");
+    assert_ne!(target_head, other_repo.rev("HEAD"));
+    // Make target_repo dirty while other_repo stays clean at a different HEAD.
+    fs::write(target_repo.root.join("dirty.rs"), "pub fn d() {}\n").unwrap();
+
+    let (out, argv) = run_shim(
+        &bin,
+        &[
+            ("PHANTOM_LOCAL_REPO", target_local),
+            ("PHANTOM_REMOTE_REPO", "/remote/target"),
+            ("GIT_DIR", other_repo.root.join(".git").to_str().unwrap()),
+            ("GIT_WORK_TREE", other_repo.root.to_str().unwrap()),
+        ],
+        &["status", "--repo", target_local],
+        false,
+    );
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        argv[4].starts_with(&format!(
+            "PHANTOM_EXPECTED_HEAD='{target_head}' PHANTOM_EXPECTED_DIRTY='1' exec "
+        )),
+        "{}",
+        argv[4]
+    );
+}

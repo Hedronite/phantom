@@ -699,6 +699,7 @@ fn locality_guard_env_vars_are_monotone_and_fail_closed() {
         ]);
         assert_eq!(code, Some(0), "{bad_head}: {line}");
         let v: Value = serde_json::from_str(&line).expect("json");
+        assert_eq!(v["data"]["stale"], true, "{bad_head}: {line}");
         assert_eq!(v["meta"]["stale"], true, "{bad_head}: {line}");
         assert_eq!(v["meta"]["stale_cause"], "local_head", "{bad_head}: {line}");
     }
@@ -711,8 +712,53 @@ fn locality_guard_env_vars_are_monotone_and_fail_closed() {
         ]);
         assert_eq!(code, Some(0), "{dirty}: {line}");
         let v: Value = serde_json::from_str(&line).expect("json");
+        assert_eq!(v["data"]["stale"], true, "{dirty}: {line}");
         assert_eq!(v["meta"]["stale"], true, "{dirty}: {line}");
         assert_eq!(v["meta"]["stale_cause"], "local_dirty", "{dirty}: {line}");
+    }
+
+    // path:line resolves under matching clean guard, but is refused under local_dirty or local_head.
+    let sym = world.ok(&["show", "fa"]);
+    let line_num = sym["data"]["symbol"]["line"].as_u64().expect("line");
+    let at = format!("src/a.rs:{line_num}");
+    let ok_line = Command::new(BINS[0])
+        .args(["show", &at])
+        .current_dir(&world.root)
+        .env("PHANTOM_FRACTAL_DATA", world.data.path())
+        .env("PHANTOM_EXPECTED_HEAD", &head)
+        .env("PHANTOM_EXPECTED_DIRTY", "0")
+        .output()
+        .expect("show path:line");
+    assert_eq!(
+        ok_line.status.code(),
+        Some(0),
+        "{:?}",
+        String::from_utf8_lossy(&ok_line.stdout)
+    );
+    let ok_v: Value = serde_json::from_slice(&ok_line.stdout).expect("ok json");
+    assert_eq!(ok_v["meta"]["stale"], false, "{ok_v}");
+
+    for envs in [
+        [
+            ("PHANTOM_EXPECTED_HEAD", head.as_str()),
+            ("PHANTOM_EXPECTED_DIRTY", "1"),
+        ],
+        [
+            ("PHANTOM_EXPECTED_HEAD", other_40.as_str()),
+            ("PHANTOM_EXPECTED_DIRTY", "0"),
+        ],
+    ] {
+        let refused = Command::new(BINS[0])
+            .args(["show", &at])
+            .current_dir(&world.root)
+            .env("PHANTOM_FRACTAL_DATA", world.data.path())
+            .envs(envs)
+            .output()
+            .expect("show path:line stale");
+        assert_eq!(refused.status.code(), Some(1), "{envs:?}");
+        let err_v: Value = serde_json::from_slice(&refused.stdout).expect("err json");
+        assert_eq!(err_v["ok"], false, "{err_v}");
+        assert_eq!(err_v["error"]["kind"], "usage", "{err_v}");
     }
 
     // `impact --diff` receives meta.stale -> stale_index reason when local_dirty is set.
