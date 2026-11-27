@@ -21,9 +21,9 @@ use phantom_fractal_git::{Base, ChangesError, FileChange, changes};
 use phantom_fractal_lang::{Extract, ExtractError, Language};
 use phantom_fractal_lang_rust::RustLanguage;
 
-use crate::is_rust;
 use crate::read::{Source, read_source};
-use crate::walk::{MAX_FILE_BYTES, is_secret, walk};
+use crate::registry::{Registry, RustDriver};
+use crate::walk::{MAX_FILE_BYTES, is_secret, walk_with};
 
 /// One changed symbol.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,32 +114,28 @@ impl From<ExtractError> for DiffError {
 /// which removes it. A base path the walk never sees although it is
 /// there, an ignored one, is no change: it is not indexed on either side.
 pub fn diff(root: &Path, base: &Base, language: &RustLanguage) -> Result<Option<Diff>, DiffError> {
+    let rust = RustDriver::new(language);
+    let registry = Registry::new(vec![&rust]);
+    diff_with(root, base, &registry)
+}
+
+/// Changed symbols and files across all languages registered in `registry`.
+pub fn diff_with(
+    root: &Path,
+    base: &Base,
+    registry: &Registry<'_>,
+) -> Result<Option<Diff>, DiffError> {
     let root = root.canonicalize()?;
-    let walked = walk(&root)?;
+    let walked = walk_with(&root, registry)?;
     let seen: HashSet<String> = walked
         .files
         .iter()
         .map(|file| file.path.clone())
         .chain(walked.skipped.iter().map(|skip| skip.path.clone()))
         .collect();
-    let mut worktree: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    for file in walked.files {
-        let Source::Bytes { bytes, .. } = read_source(&file.abs_path)? else {
-            continue;
-        };
-        if is_rust(&file.path) && std::str::from_utf8(&bytes).is_err() {
-            continue;
-        }
-        worktree.insert(file.path, bytes);
-    }
-    let keep_base = |path: &str, size: u64| {
-        size <= MAX_FILE_BYTES
-            && !path.rsplit('/').next().is_some_and(is_secret)
-            && !is_pruned(&root, path)
-            && (worktree.contains_key(path)
-                || seen.contains(path)
-                || fs::symlink_metadata(root.join(path)).is_err())
-    };
+    let worktree = read_worktree(walked.files, registry)?;
+    let keep_base =
+        |path: &str, size: u64| keep_base_file(&root, path, size, &worktree, &seen, registry);
     let Some(found) = changes(&root, base, &worktree, &keep_base)? else {
         return Ok(None);
     };
@@ -150,32 +146,82 @@ pub fn diff(root: &Path, base: &Base, language: &RustLanguage) -> Result<Option<
         manifest_changed: false,
     };
     for file in found.files {
-        if file.path == "Cargo.toml" || file.path.ends_with("/Cargo.toml") {
-            out.manifest_changed = true;
-        }
-        let before = out.changed.len();
-        if is_rust(&file.path) {
-            let old = spans(&file.path, file.base.as_deref(), language)?;
-            let new = match file.change {
-                FileChange::Removed => BTreeMap::new(),
-                _ => spans(
-                    &file.path,
-                    worktree.get(&file.path).map(Vec::as_slice),
-                    language,
-                )?,
-            };
-            out.changed.extend(compare(&file.path, &old, &new));
-        }
-        if out.changed.len() == before {
-            out.files_only.push(FileOnly {
-                path: file.path,
-                change: file.change,
-            });
-        }
+        classify_diff_file(file, &worktree, registry, &mut out)?;
     }
     out.changed
         .sort_by(|a, b| (&a.path, &a.key).cmp(&(&b.path, &b.key)));
     Ok(Some(out))
+}
+
+fn read_worktree(
+    files: Vec<crate::walk::Candidate>,
+    registry: &Registry<'_>,
+) -> Result<BTreeMap<String, Vec<u8>>, DiffError> {
+    let mut worktree = BTreeMap::new();
+    for file in files {
+        let Source::Bytes { bytes, .. } = read_source(&file.abs_path)? else {
+            continue;
+        };
+        if registry.is_supported(&file.path) && std::str::from_utf8(&bytes).is_err() {
+            continue;
+        }
+        worktree.insert(file.path, bytes);
+    }
+    Ok(worktree)
+}
+
+fn keep_base_file(
+    root: &Path,
+    path: &str,
+    size: u64,
+    worktree: &BTreeMap<String, Vec<u8>>,
+    seen: &HashSet<String>,
+    registry: &Registry<'_>,
+) -> bool {
+    size <= MAX_FILE_BYTES
+        && !path.rsplit('/').next().is_some_and(is_secret)
+        && !is_pruned(root, path, registry)
+        && (worktree.contains_key(path)
+            || seen.contains(path)
+            || fs::symlink_metadata(root.join(path)).is_err())
+}
+
+fn classify_diff_file(
+    file: phantom_fractal_git::Changed,
+    worktree: &BTreeMap<String, Vec<u8>>,
+    registry: &Registry<'_>,
+    out: &mut Diff,
+) -> Result<(), DiffError> {
+    if registry.is_manifest(&file.path) {
+        out.manifest_changed = true;
+    }
+    let before = out.changed.len();
+    if let Some(driver) = registry.language_for(&file.path) {
+        compare_supported_file(&file, worktree, driver.language(), &mut out.changed)?;
+    }
+    if out.changed.len() == before {
+        out.files_only.push(FileOnly {
+            path: file.path,
+            change: file.change,
+        });
+    }
+    Ok(())
+}
+
+fn compare_supported_file(
+    file: &phantom_fractal_git::Changed,
+    worktree: &BTreeMap<String, Vec<u8>>,
+    lang: &dyn Language,
+    changed: &mut Vec<ChangedSymbol>,
+) -> Result<(), DiffError> {
+    let old = spans(&file.path, file.base.as_deref(), lang)?;
+    let new = spans(
+        &file.path,
+        worktree.get(&file.path).map(Vec::as_slice),
+        lang,
+    )?;
+    changed.extend(compare(&file.path, &old, &new));
+    Ok(())
 }
 
 /// A symbol's name and the bytes of its lines, by stable key.
@@ -183,7 +229,7 @@ type Spans = BTreeMap<String, (String, Vec<u8>)>;
 
 /// The symbols of `bytes` as the file at `path`, or none for no bytes or
 /// bytes that are not UTF-8.
-fn spans(path: &str, bytes: Option<&[u8]>, language: &RustLanguage) -> Result<Spans, DiffError> {
+fn spans(path: &str, bytes: Option<&[u8]>, language: &dyn Language) -> Result<Spans, DiffError> {
     let Some(text) = bytes.and_then(|bytes| std::str::from_utf8(bytes).ok()) else {
         return Ok(Spans::new());
     };
@@ -283,18 +329,15 @@ fn span(lines: &[&str], start: u32, end: u32) -> Vec<u8> {
 
 /// True for a path the walk prunes: under `.git`, or under a `target`
 /// directory at the root or beside a `Cargo.toml` in the work tree.
-fn is_pruned(root: &Path, path: &str) -> bool {
+fn is_pruned(root: &Path, path: &str, registry: &Registry<'_>) -> bool {
     let parts: Vec<&str> = path.split('/').collect();
     let dirs = &parts[..parts.len().saturating_sub(1)];
-    dirs.iter().enumerate().any(|(depth, part)| match *part {
-        ".git" => true,
-        "target" => {
-            depth == 0
-                || root
-                    .join(dirs[..depth].join("/"))
-                    .join("Cargo.toml")
-                    .is_file()
-        }
-        _ => false,
+    dirs.iter().enumerate().any(|(depth, part)| {
+        let parent = if depth == 0 {
+            root.to_path_buf()
+        } else {
+            root.join(dirs[..depth].join("/"))
+        };
+        registry.should_prune_dir(&parent, part, depth + 1)
     })
 }

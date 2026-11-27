@@ -595,3 +595,62 @@ fn summary_and_no_tests_leave_out_their_keys() {
     assert_eq!(summary["counts"], full["counts"]);
     assert_eq!(summary["reasons"], full["reasons"]);
 }
+
+#[test]
+fn manifest_only_or_rs_comment_only_edit_is_never_exact() {
+    let world = World::new();
+
+    // 1. Clean against older commit with only a Cargo.toml change -> exact: false + manifest_changed reason.
+    // 2. Clean against commit with only a comment edit in src/z_comment.rs -> exact: false + unindexed_changes.
+    let manifest = fs::read_to_string(world.root().join("Cargo.toml")).unwrap();
+    let mut script = Script::after_main();
+    script.commit(
+        support::HEAD + support::DAY,
+        &[(
+            "Cargo.toml",
+            format!("{manifest}\n[features]\nextra = []\n"),
+        )],
+    );
+    script.commit(
+        support::HEAD + 2 * support::DAY,
+        &[(
+            "src/z_comment.rs",
+            "// pure comment\npub fn kept() {}\n".to_owned(),
+        )],
+    );
+    script.commit(
+        support::HEAD + 3 * support::DAY,
+        &[(
+            "src/z_comment.rs",
+            "// pure comment edited\npub fn kept() {}\n".to_owned(),
+        )],
+    );
+    world.repo.import(&script);
+    world.ok(&["index", "."]);
+
+    let c1 = world.repo.rev("HEAD~2");
+    let c0 = world.repo.rev("HEAD~3");
+    let manifest_diff = world.ok(&["impact", "--diff", "--against", &c0])["data"].clone();
+    // c0 -> worktree touches Cargo.toml AND z_comment.rs (added). Test c2 -> worktree (only comment edit):
+    let c2 = world.repo.rev("HEAD~1");
+    let comment_diff = world.ok(&["impact", "--diff", "--against", &c2])["data"].clone();
+    assert_eq!(comment_diff["changed"], json!([]));
+    assert_eq!(comment_diff["impact"]["exact"], false, "{comment_diff}");
+    assert!(
+        reasons(&comment_diff).contains(&"unindexed_changes".to_owned()),
+        "{comment_diff}"
+    );
+    assert_eq!(manifest_diff["manifest_changed"], true);
+
+    // Now test clean Cargo.toml-only diff: reset HEAD to c1, index, and diff against c0.
+    world.repo.git(&["reset", "--hard", &c1], None);
+    world.ok(&["index", "."]);
+    let manifest_only = world.ok(&["impact", "--diff", "--against", &c0])["data"].clone();
+    assert_eq!(manifest_only["manifest_changed"], true);
+    assert_eq!(manifest_only["changed"], json!([]));
+    assert_eq!(manifest_only["impact"]["exact"], false, "{manifest_only}");
+    assert!(
+        reasons(&manifest_only).contains(&"manifest_changed".to_owned()),
+        "{manifest_only}"
+    );
+}

@@ -20,7 +20,7 @@ mod rank;
 mod risk;
 mod walk;
 
-use phantom_fractal_store::{CallHit, Store, StoreError, SymbolFacts};
+use phantom_fractal_store::{CallHit, Store, StoreError, SymbolFacts, SymbolMatch};
 
 pub use estimate::estimate_tokens;
 pub use map::{
@@ -46,8 +46,20 @@ pub trait ImpactSource {
     fn unresolved_named(&self, name: &str) -> Result<i64, StoreError>;
     /// `macro_arg` refs ending in `name` with no edge.
     fn macro_args_named(&self, name: &str) -> Result<i64, StoreError>;
-    /// The stored count of `.rs` files the index pass could not read.
+    /// The stored count of skipped/parse-error source files.
     fn rs_skipped(&self) -> Result<Option<u64>, StoreError>;
+    /// Source language of `path` (for example `"rust"` or `"go"`).
+    fn file_lang(&self, _path: &str) -> Result<Option<String>, StoreError> {
+        Ok(None)
+    }
+    /// Non-call value references ending in `name` (such as Go function values).
+    fn value_refs_named(&self, _name: &str) -> Result<i64, StoreError> {
+        Ok(0)
+    }
+    /// Count of build-excluded source files, or none when untracked.
+    fn build_excluded_count(&self) -> Result<Option<u64>, StoreError> {
+        Ok(None)
+    }
 }
 
 impl ImpactSource for Store {
@@ -68,7 +80,33 @@ impl ImpactSource for Store {
     }
 
     fn rs_skipped(&self) -> Result<Option<u64>, StoreError> {
-        Store::rs_skipped(self)
+        Store::source_skipped(self)
+    }
+
+    fn file_lang(&self, path: &str) -> Result<Option<String>, StoreError> {
+        let probe = SymbolMatch {
+            id: 0,
+            kind: String::new(),
+            module_path: String::new(),
+            qual_name: "a::b".to_owned(),
+            file: path.to_owned(),
+            line: None,
+        };
+        Ok(self
+            .format_symbol_display(&probe)?
+            .ends_with("::a.b")
+            .then(|| "go".to_owned()))
+    }
+
+    fn value_refs_named(&self, name: &str) -> Result<i64, StoreError> {
+        let ids = self.ref_ids_of_kind("value_ref")?;
+        let input = self.resolve_input()?;
+        let count = input
+            .refs
+            .iter()
+            .filter(|r| ids.contains(&r.id) && r.text.rsplit([':', '.']).next() == Some(name))
+            .count();
+        Ok(i64::try_from(count).unwrap_or(i64::MAX))
     }
 }
 
@@ -219,6 +257,8 @@ pub struct DiffState {
     /// Changed symbols the index does not hold: the reason
     /// `unindexed_changes`, counted.
     pub unindexed_changes: u64,
+    /// A package manifest changed with no indexed symbol changes to walk.
+    pub manifest_changed: bool,
 }
 
 /// What [`impact_many`] found.

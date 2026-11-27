@@ -19,9 +19,8 @@ use super::agents::{Agents, Lookup, agents};
 use super::registry::{header_schema, indexes, repos_dir};
 use super::{Failure, Reply};
 
-/// The tree-sitter-rust version `build.rs` read from `Cargo.lock`, or
-/// empty.
-const GRAMMAR: &str = env!("PHANTOM_FRACTAL_BUILD_GRAMMAR");
+/// Grammar crate versions `build.rs` read from `Cargo.lock`.
+const GRAMMARS: &str = env!("PHANTOM_FRACTAL_BUILD_GRAMMARS");
 
 /// `data` of `doctor`.
 #[derive(Serialize)]
@@ -67,11 +66,7 @@ pub(crate) fn doctor(_request: &DoctorRequest) -> Result<Reply<DoctorResult>, Fa
         Check {
             name: "grammar",
             ok: true,
-            detail: if GRAMMAR.is_empty() {
-                "tree-sitter-rust, version unknown".to_owned()
-            } else {
-                format!("tree-sitter-rust {GRAMMAR}")
-            },
+            detail: GRAMMARS.to_owned(),
         },
         Check {
             name: "network",

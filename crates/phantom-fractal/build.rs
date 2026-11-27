@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const OVERRIDE: &str = "PHANTOM_FRACTAL_GIT_SHA";
+const GRAMMARS: &[&str] = &["tree-sitter-rust"];
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -30,24 +31,40 @@ fn main() {
         .unwrap_or_default();
     println!("cargo:rustc-env=PHANTOM_FRACTAL_BUILD_GIT_SHA={sha}");
     println!(
-        "cargo:rustc-env=PHANTOM_FRACTAL_BUILD_GRAMMAR={}",
-        grammar(&dir).unwrap_or_default()
+        "cargo:rustc-env=PHANTOM_FRACTAL_BUILD_GRAMMARS={}",
+        grammars_line(&dir)
     );
 }
 
-/// The version `Cargo.lock` gives `tree-sitter-rust`, from the workspace
-/// lock two directories up. Without that lock, as in a crates.io tarball,
-/// there is none.
-fn grammar(dir: &Path) -> Option<String> {
+fn grammars_line(dir: &Path) -> String {
+    let text = read_lock(dir);
+    GRAMMARS
+        .iter()
+        .map(
+            |name| match text.as_deref().and_then(|t| grammar_version(t, name)) {
+                Some(ver) => format!("{name} {ver}"),
+                None => format!("{name}, version unknown"),
+            },
+        )
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn read_lock(dir: &Path) -> Option<String> {
     let lock = dir.join("../../Cargo.lock");
     if !lock.exists() {
         return None;
     }
     println!("cargo:rerun-if-changed={}", lock.display());
-    let text = std::fs::read_to_string(lock).ok()?;
-    let mut lines = text.lines();
+    std::fs::read_to_string(lock).ok()
+}
+
+/// The version `Cargo.lock` gives `package_name`.
+fn grammar_version(lock_text: &str, package_name: &str) -> Option<String> {
+    let target = format!("name = \"{package_name}\"");
+    let mut lines = lock_text.lines();
     while let Some(line) = lines.next() {
-        if line == "name = \"tree-sitter-rust\"" {
+        if line == target {
             let version = lines
                 .next()?
                 .strip_prefix("version = \"")?

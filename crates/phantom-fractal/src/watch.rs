@@ -22,15 +22,18 @@ use std::process::ExitCode;
 use std::thread::sleep;
 use std::time::Duration;
 
-use phantom_fractal_extract::{Freshness, probe};
+use std::collections::BTreeSet;
+
+use phantom_fractal_extract::{
+    Freshness, Registry, RustDriver, index_with, probe_with, stored_graph_with,
+};
 use phantom_fractal_git::Window;
-use phantom_fractal_lang_rust::RustLanguage;
 use phantom_fractal_proto::ErrorKind;
-use phantom_fractal_store::{Store, index_database_path};
+use phantom_fractal_store::{CochangeScan, Store, index_database_path};
 use serde::Serialize;
 
 use crate::ops::cochange::stored_window;
-use crate::ops::index::{CochangeSummary, checked_root, open_locked, pass};
+use crate::ops::index::{CochangeSummary, Pass, checked_root, open_locked, stored_cochange};
 use crate::ops::{Failure, Reply, envelope, fresh};
 
 /// `--interval-ms`: how often the tree is probed.
@@ -125,14 +128,19 @@ fn watch(
     request: &WatchRequest,
     emit: &mut dyn FnMut(Reply<Batch>) -> Result<(), ()>,
 ) -> Result<(), Stop> {
-    let root = checked_root(&request.repo)?;
-    let language = RustLanguage::new()
+    let rust = RustDriver::owned()
         .map_err(|err| Failure::new(ErrorKind::Usage, format!("extract: {err}")))?;
-    let (store, lock) = open_locked(&index_database_path(&root))?;
-    // The lock is bound before the store, so when the watch ends the store
-    // is closed first and the lock is released after it, as in `index`.
-    let _lock = lock;
-    let mut store = store;
+    let registry = Registry::new(vec![&rust]);
+    watch_with(request, &registry, emit)
+}
+
+fn watch_with(
+    request: &WatchRequest,
+    registry: &Registry<'_>,
+    emit: &mut dyn FnMut(Reply<Batch>) -> Result<(), ()>,
+) -> Result<(), Stop> {
+    let root = checked_root(&request.repo)?;
+    let (mut store, _lock) = open_locked(&index_database_path(&root))?;
     let mut batches = 0;
     let mut failed = false;
     let mut first = true;
@@ -140,45 +148,68 @@ fn watch(
         if !std::mem::take(&mut first) {
             sleep(request.interval);
         }
-        let step = run_step(&root, &mut store, &language, request.debounce);
-        let done = match step {
-            Ok(done) => {
-                failed = false;
-                done
-            }
-            Err(_) if !failed => {
-                failed = true;
-                continue;
-            }
-            Err(failure) => return Err(failure.into()),
-        };
-        let Some(done) = done else {
+        let Some(done) =
+            try_watch_step(&root, &mut store, registry, request.debounce, &mut failed)?
+        else {
             continue;
         };
         batches += 1;
-        let meta = fresh::meta(&root, &store)?;
-        let batch = Batch {
-            batch: batches,
-            written: done.report.written.len(),
-            removed: done.report.removed.len(),
-            rebuilt: done.report.graph.is_some(),
-            cochange: done.cochange,
-        };
-        emit(Reply::with_meta(batch, meta)).map_err(|()| Stop::Output)?;
+        emit_batch(&root, &store, batches, done, emit)?;
         if request.max_batches.is_some_and(|max| batches >= max) {
             return Ok(());
         }
     }
 }
 
-/// True once the tree is stale and has settled, false when it is fresh:
-/// after a stale probe, it waits `debounce` and probes again until two
-/// probes in a row give the same [`Look`].
-fn settle(root: &Path, store: &Store, debounce: Duration) -> Result<bool, Failure> {
-    let mut look = Look::new(root, store)?;
+fn try_watch_step(
+    root: &Path,
+    store: &mut Store,
+    registry: &Registry<'_>,
+    debounce: Duration,
+    failed: &mut bool,
+) -> Result<Option<Pass>, Stop> {
+    match run_step(root, store, registry, debounce) {
+        Ok(done) => {
+            *failed = false;
+            Ok(done)
+        }
+        Err(_) if !*failed => {
+            *failed = true;
+            Ok(None)
+        }
+        Err(failure) => Err(failure.into()),
+    }
+}
+
+fn emit_batch(
+    root: &Path,
+    store: &Store,
+    batch_num: u64,
+    done: Pass,
+    emit: &mut dyn FnMut(Reply<Batch>) -> Result<(), ()>,
+) -> Result<(), Stop> {
+    let meta = fresh::meta(root, store)?;
+    let batch = Batch {
+        batch: batch_num,
+        written: done.report.written.len(),
+        removed: done.report.removed.len(),
+        rebuilt: done.report.graph.is_some(),
+        cochange: done.cochange,
+    };
+    emit(Reply::with_meta(batch, meta)).map_err(|()| Stop::Output)
+}
+
+/// True once the tree is stale and has settled, false when it is fresh.
+fn settle(
+    root: &Path,
+    store: &Store,
+    registry: &Registry<'_>,
+    debounce: Duration,
+) -> Result<bool, Failure> {
+    let mut look = Look::new(root, store, registry)?;
     while look.freshness.stale() {
         sleep(debounce);
-        let next = Look::new(root, store)?;
+        let next = Look::new(root, store, registry)?;
         if next == look {
             return Ok(true);
         }
@@ -187,10 +218,6 @@ fn settle(root: &Path, store: &Store, debounce: Duration) -> Result<bool, Failur
     Ok(false)
 }
 
-/// One probe, plus the size and mtime of each file it lists as added or
-/// modified. Two looks are equal only when the probe is equal and none of
-/// those files moved, so a file saved again and again inside the debounce
-/// is not taken as settled after its first save.
 #[derive(PartialEq, Eq)]
 struct Look {
     freshness: Freshness,
@@ -198,8 +225,8 @@ struct Look {
 }
 
 impl Look {
-    fn new(root: &Path, store: &Store) -> Result<Self, Failure> {
-        let freshness = probe(root, store)?;
+    fn new(root: &Path, store: &Store, registry: &Registry<'_>) -> Result<Self, Failure> {
+        let freshness = probe_with(root, store, registry)?;
         let stats = freshness
             .added
             .iter()
@@ -214,8 +241,6 @@ impl Look {
     }
 }
 
-/// The window of the stored co-change scan, so a pass keeps the window
-/// `index` was given; the default when no scan is stored.
 fn window(store: &Store) -> Result<Window, Failure> {
     match store.cochange_scan()? {
         Some(scan) if scan.last_oid.as_deref().is_some_and(|oid| !oid.is_empty()) => {
@@ -225,25 +250,126 @@ fn window(store: &Store) -> Result<Window, Failure> {
     }
 }
 
-/// Runs one probe-and-pass step. All index, graph, rank, co-change, and
-/// metadata writes commit in a single atomic SQLite transaction so a
-/// mid-write or mid-batch kill leaves the previous consistent batch intact.
 fn run_step(
     root: &Path,
     store: &mut Store,
-    language: &RustLanguage,
+    registry: &Registry<'_>,
     debounce: Duration,
-) -> Result<Option<crate::ops::index::Pass>, Failure> {
-    let stale = settle(root, store, debounce)?;
-    if !stale {
+) -> Result<Option<Pass>, Failure> {
+    if !settle(root, store, registry, debounce)? {
         return Ok(None);
     }
     store
-        .atomic_batch(|store| {
-            let window = window(store)?;
-            pass(root, store, language, window)
-        })
+        .atomic_batch(|store| pass_with(root, store, registry, window(store)?))
         .map(Some)
+}
+
+pub(crate) fn pass_with(
+    root: &Path,
+    store: &mut Store,
+    registry: &Registry<'_>,
+    window: Window,
+) -> Result<Pass, Failure> {
+    let report = index_with(root, store, registry)?;
+    let graph = report_graph(&report, store, root, registry)?;
+    let head = read_head(root)?;
+    let cochange = finish_pass(store, root, head.as_deref(), window)?;
+    Ok(Pass {
+        report,
+        graph,
+        cochange,
+    })
+}
+
+fn report_graph(
+    report: &phantom_fractal_extract::IndexReport,
+    store: &Store,
+    root: &Path,
+    registry: &Registry<'_>,
+) -> Result<phantom_fractal_extract::GraphReport, Failure> {
+    match report.graph {
+        Some(graph) => Ok(graph),
+        None => Ok(stored_graph_with(store, root, registry)?),
+    }
+}
+
+fn finish_pass(
+    store: &mut Store,
+    root: &Path,
+    head: Option<&str>,
+    window: Window,
+) -> Result<Option<CochangeSummary>, Failure> {
+    update_rank(store)?;
+    let cochange = update_cochange(store, root, head, window)?;
+    store.set_root(&root.to_string_lossy())?;
+    store.set_index_head(head)?;
+    Ok(cochange)
+}
+
+fn read_head(root: &Path) -> Result<Option<String>, Failure> {
+    phantom_fractal_git::head(root).map_err(|_| git_history_failure())
+}
+
+fn git_history_failure() -> Failure {
+    Failure::new(
+        ErrorKind::Usage,
+        "git history could not be read; the files were indexed, the co-change was not",
+    )
+}
+
+fn update_rank(store: &mut Store) -> Result<(), Failure> {
+    if store.rank_epoch()? != store.graph_epoch()? {
+        let ranks = phantom_fractal_analyze::rank(&*store)?;
+        store.write_rank(ranks.epoch, &ranks.symbols, &ranks.files)?;
+    }
+    Ok(())
+}
+
+fn update_cochange(
+    store: &mut Store,
+    root: &Path,
+    head: Option<&str>,
+    window: Window,
+) -> Result<Option<CochangeSummary>, Failure> {
+    match head {
+        None => clear_stale_cochange(store),
+        Some(oid) => refresh_git_cochange(store, root, oid, window),
+    }
+}
+
+fn clear_stale_cochange(store: &mut Store) -> Result<Option<CochangeSummary>, Failure> {
+    if store.cochange_head()?.is_some() {
+        store.write_cochange(&CochangeScan {
+            last_oid: Some(String::new()),
+            ..CochangeScan::default()
+        })?;
+    }
+    Ok(None)
+}
+
+fn refresh_git_cochange(
+    store: &mut Store,
+    root: &Path,
+    head: &str,
+    window: Window,
+) -> Result<Option<CochangeSummary>, Failure> {
+    if is_cochange_fresh(store, head, &window)? {
+        return stored_cochange(store);
+    }
+    let indexed: BTreeSet<String> = store.files()?.into_iter().map(|f| f.path).collect();
+    if let Some(scan) =
+        phantom_fractal_git::mine(root, &window, &indexed).map_err(|_| git_history_failure())?
+    {
+        store.write_cochange(&scan)?;
+    }
+    stored_cochange(store)
+}
+
+fn is_cochange_fresh(store: &Store, head: &str, window: &Window) -> Result<bool, Failure> {
+    let window_json = window.to_json();
+    Ok(store.cochange_scan()?.is_some_and(|scan| {
+        scan.last_oid.as_deref() == Some(head) && scan.window_json == window_json
+    }))
 }
 
 #[cfg(test)]
@@ -277,6 +403,221 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn pass_with_dispatches_non_rust_registry_cleanly() {
+        use phantom_fractal_extract::{
+            LanguageDriver, ManifestFile, PackageGraph, Registry, SourceFileExtract,
+        };
+        use phantom_fractal_lang::{
+            Edge, Extract, ExtractError, FileModule, Item, ItemKind, Language, Module,
+            ResolveCounts, ResolveInput, Resolver, Target, TargetKind, Visibility,
+        };
+        use phantom_fractal_store::Package;
+
+        struct TinyLang;
+        impl Language for TinyLang {
+            fn name(&self) -> &'static str {
+                "tiny"
+            }
+            fn extensions(&self) -> &'static [&'static str] {
+                &["tiny"]
+            }
+            fn extract(&self, _s: &str) -> Result<Extract, ExtractError> {
+                Ok(Extract {
+                    items: vec![Item {
+                        kind: ItemKind::Function,
+                        name: "entry".to_owned(),
+                        visibility: Visibility::Public,
+                        start_line: 1,
+                        end_line: 1,
+                        signature: "fn entry".to_owned(),
+                        doc_summary: None,
+                        is_test: false,
+                    }],
+                    item_scopes: vec![String::new()],
+                    item_owners: vec![None],
+                    ..Extract::default()
+                })
+            }
+        }
+        struct TinyResolver;
+        impl Resolver for TinyResolver {
+            fn name(&self) -> &'static str {
+                "tiny"
+            }
+            fn resolve(&self, _input: &ResolveInput) -> (Vec<Edge>, ResolveCounts) {
+                (Vec::new(), ResolveCounts::default())
+            }
+        }
+        fn tiny_prune(_p: &std::path::Path, _n: &str, _d: usize) -> bool {
+            false
+        }
+        struct TinyDriver(TinyLang, TinyResolver);
+        impl LanguageDriver for TinyDriver {
+            fn language(&self) -> &dyn Language {
+                &self.0
+            }
+            fn resolver(&self) -> &dyn Resolver {
+                &self.1
+            }
+            fn manifest_names(&self) -> &'static [&'static str] {
+                &["tiny.mod"]
+            }
+            fn prune_rule(&self) -> fn(&std::path::Path, &str, usize) -> bool {
+                tiny_prune
+            }
+            fn build_graph(
+                &self,
+                _m: &[ManifestFile],
+                files: &[SourceFileExtract],
+            ) -> PackageGraph {
+                PackageGraph {
+                    packages: vec![Package {
+                        name: "tiny".to_owned(),
+                        version: None,
+                        manifest_path: "tiny.mod".to_owned(),
+                    }],
+                    targets: vec![Target {
+                        id: 1,
+                        package: "tiny".to_owned(),
+                        name: "pkg".to_owned(),
+                        kind: TargetKind::Lib,
+                        root: String::new(),
+                    }],
+                    modules: vec![Module {
+                        id: 1,
+                        target: 1,
+                        parent: None,
+                        path: "tiny/pkg".to_owned(),
+                        file: String::new(),
+                        scope: String::new(),
+                    }],
+                    file_modules: files
+                        .iter()
+                        .map(|f| FileModule {
+                            file: f.path.clone(),
+                            module: 1,
+                        })
+                        .collect(),
+                    test_modules: Vec::new(),
+                    orphans: 0,
+                }
+            }
+        }
+
+        let tree = TempDir::new("tiny-tree");
+        let data = TempDir::new("tiny-data");
+        fs::write(tree.0.join("tiny.mod"), "tiny\n").unwrap();
+        fs::write(tree.0.join("a.tiny"), "fn entry\n").unwrap();
+        let db = data.0.join("repos/tiny/graph.db");
+        let _lock = WriterLock::acquire(&db).unwrap();
+        let mut store = Store::open(&db).unwrap();
+        let driver = TinyDriver(TinyLang, TinyResolver);
+        let registry = Registry::new(vec![&driver]);
+        let Ok(passed) =
+            store.atomic_batch(|s| super::pass_with(&tree.0, s, &registry, Window::default()))
+        else {
+            panic!("pass_with failed");
+        };
+        assert_eq!(passed.report.written, vec!["a.tiny"]);
+        assert!(passed.report.graph.is_some());
+        assert_eq!(store.symbols_matching("entry").unwrap().len(), 1);
+
+        // Git repo test: populates cochange, skips re-mining when fresh, re-mines on window change,
+        // and clears cochange if .git is removed (last_oid -> Some("")).
+        let git_tree = TempDir::new("tiny-git");
+        let git_home = TempDir::new("tiny-home");
+        fs::write(git_tree.0.join("tiny.mod"), "tiny\n").unwrap();
+        fs::write(git_tree.0.join("a.tiny"), "fn entry\n").unwrap();
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &["add", "."],
+            &["commit", "-q", "-m", "init"],
+        ] {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&git_tree.0)
+                .env("HOME", &git_home.0)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "T")
+                .env("GIT_AUTHOR_EMAIL", "t@e.com")
+                .env("GIT_COMMITTER_NAME", "T")
+                .env("GIT_COMMITTER_EMAIL", "t@e.com")
+                .status()
+                .unwrap();
+            assert!(status.success());
+        }
+        let gdb = data.0.join("repos/tiny-git/graph.db");
+        let _glock = WriterLock::acquire(&gdb).unwrap();
+        let mut gstore = Store::open(&gdb).unwrap();
+        let Ok(p1) =
+            gstore.atomic_batch(|s| super::pass_with(&git_tree.0, s, &registry, Window::default()))
+        else {
+            panic!("git pass 1 failed");
+        };
+        assert!(p1.cochange.is_some());
+        assert!(p1.graph.modules > 0);
+        // Seed a sentinel commit count with matching head+window so p_noop proves
+        // is_cochange_fresh skips mining while p2 (new window) re-mines.
+        let mut seeded = gstore.cochange_scan().unwrap().unwrap();
+        seeded.commits_seen = 77;
+        gstore.write_cochange(&seeded).unwrap();
+        let Ok(p_noop) =
+            gstore.atomic_batch(|s| super::pass_with(&git_tree.0, s, &registry, Window::default()))
+        else {
+            panic!("git noop failed");
+        };
+        assert!(p_noop.report.graph.is_none() && p_noop.cochange.is_some());
+        assert_eq!(p_noop.graph.modules, p1.graph.modules);
+        assert_eq!(gstore.cochange_scan().unwrap().unwrap().commits_seen, 77);
+        let w2 = Window {
+            days: 30,
+            max_commits: 100,
+        };
+        let Ok(p2) = gstore.atomic_batch(|s| super::pass_with(&git_tree.0, s, &registry, w2))
+        else {
+            panic!("git pass 2 failed");
+        };
+        assert!(p2.cochange.is_some());
+        assert_eq!(gstore.cochange_scan().unwrap().unwrap().commits_seen, 1);
+        // Exercise try_watch_step consecutive failure handling cleanly.
+        let mut failed = false;
+        assert!(matches!(
+            super::try_watch_step(
+                std::path::Path::new("/nonexistent-phantom-watch-root"),
+                &mut gstore,
+                &registry,
+                std::time::Duration::from_millis(1),
+                &mut failed,
+            ),
+            Ok(None)
+        ));
+        assert!(failed);
+        assert!(
+            super::try_watch_step(
+                std::path::Path::new("/nonexistent-phantom-watch-root"),
+                &mut gstore,
+                &registry,
+                std::time::Duration::from_millis(1),
+                &mut failed,
+            )
+            .is_err()
+        );
+        // Removing .git clears stored cochange (last_oid = Some("") -> cochange_head None).
+        fs::remove_dir_all(git_tree.0.join(".git")).unwrap();
+        let Ok(p3) = gstore.atomic_batch(|s| super::pass_with(&git_tree.0, s, &registry, w2))
+        else {
+            panic!("git pass 3 failed");
+        };
+        assert!(p3.cochange.is_none());
+        assert_eq!(gstore.cochange_head().unwrap(), None);
+        assert_eq!(
+            gstore.cochange_scan().unwrap().unwrap().last_oid.as_deref(),
+            Some("")
+        );
     }
 
     #[test]

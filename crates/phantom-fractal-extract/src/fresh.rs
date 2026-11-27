@@ -16,10 +16,11 @@ use std::path::Path;
 
 use phantom_fractal_store::{FileStat, Store};
 
-use crate::fingerprint::{Unread, read_manifests, stamp};
+use crate::fingerprint::{ManifestRead, Unread, read_manifests, read_manifests_with, stamp};
 use crate::read::{Source, mtime_ns, read_source};
-use crate::walk::{Candidate, walk};
-use crate::{EXTRACTOR_VERSION, IndexError, is_rust};
+use crate::registry::{Registry, RustFilter};
+use crate::walk::{Candidate, Walk, walk, walk_with};
+use crate::{EXTRACTOR_VERSION, IndexError};
 
 /// What [`probe`] found. Each list is sorted repo-relative paths.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -64,43 +65,55 @@ impl Freshness {
 /// opens as a root but whose HEAD cannot be read fails it too.
 pub fn probe(root: &Path, store: &Store) -> Result<Freshness, IndexError> {
     let walk = walk(root)?;
-    let stored: BTreeMap<String, FileStat> = store
+    let manifests = read_manifests(&walk)?;
+    probe_walk(root, store, &walk, &manifests, RustFilter::is_supported)
+}
+
+/// Compares `root` with what `store` holds using registered languages in `registry`.
+pub fn probe_with(
+    root: &Path,
+    store: &Store,
+    registry: &Registry<'_>,
+) -> Result<Freshness, IndexError> {
+    let walk = walk_with(root, registry)?;
+    let manifests = read_manifests_with(&walk, registry)?;
+    probe_walk(root, store, &walk, &manifests, |path| {
+        registry.is_supported(path)
+    })
+}
+
+fn probe_walk<F>(
+    root: &Path,
+    store: &Store,
+    walk: &Walk,
+    manifests: &[ManifestRead],
+    supported: F,
+) -> Result<Freshness, IndexError>
+where
+    F: Fn(&str) -> bool,
+{
+    let stored = stored_stats_map(store)?;
+    let scan = scan_sources(&walk.files, &stored, &supported)?;
+    let mut out = finish_scan_lists(scan.freshness, &stored, &scan.kept);
+    let unread = collect_unread(walk, &scan.read_skipped, &scan.not_utf8, &supported);
+    let fingerprint = stamp(manifests, &unread).fingerprint;
+    fill_probe_meta(root, store, fingerprint, &mut out)?;
+    Ok(out)
+}
+
+fn stored_stats_map(store: &Store) -> Result<BTreeMap<String, FileStat>, IndexError> {
+    Ok(store
         .file_stats()?
         .into_iter()
         .map(|stat| (stat.path.clone(), stat))
-        .collect();
-    let mut out = Freshness::default();
-    let mut kept: BTreeSet<&str> = BTreeSet::new();
-    let mut read_skipped: Vec<&str> = Vec::new();
-    let mut not_utf8: Vec<&str> = Vec::new();
-    for file in walk.files.iter().filter(|file| is_rust(&file.path)) {
-        let stat = stored.get(&file.path);
-        if let Some(stat) = stat
-            && same_stat(file, stat)?
-        {
-            kept.insert(&file.path);
-            continue;
-        }
-        let bytes = match read_source(&file.abs_path)? {
-            Source::Bytes { bytes, .. } => bytes,
-            Source::Skipped(_) => {
-                read_skipped.push(&file.path);
-                continue;
-            }
-        };
-        if std::str::from_utf8(&bytes).is_err() {
-            not_utf8.push(&file.path);
-            continue;
-        }
-        kept.insert(&file.path);
-        match stat {
-            None => out.added.push(file.path.clone()),
-            Some(stat) if stat.blake3 != blake3::hash(&bytes).as_bytes() => {
-                out.modified.push(file.path.clone());
-            }
-            Some(_) => {}
-        }
-    }
+        .collect())
+}
+
+fn finish_scan_lists(
+    mut out: Freshness,
+    stored: &BTreeMap<String, FileStat>,
+    kept: &BTreeSet<&str>,
+) -> Freshness {
     out.removed = stored
         .keys()
         .filter(|path| !kept.contains(path.as_str()))
@@ -108,24 +121,109 @@ pub fn probe(root: &Path, store: &Store) -> Result<Freshness, IndexError> {
         .collect();
     out.added.sort();
     out.modified.sort();
+    out
+}
 
-    // The indexer's order: the walk's `.rs` skips, the read's, then the
-    // ones that are not UTF-8, each in walk order.
-    let unread: Vec<(&str, Unread)> = walk
-        .skipped
-        .iter()
-        .filter(|skip| is_rust(&skip.path))
-        .map(|skip| (skip.path.as_str(), Unread::Skipped))
-        .chain(read_skipped.into_iter().map(|path| (path, Unread::Skipped)))
-        .chain(not_utf8.into_iter().map(|path| (path, Unread::NotUtf8)))
-        .collect();
-    let manifests = read_manifests(&walk)?;
-    let fingerprint = stamp(&manifests, &unread).fingerprint;
+fn fill_probe_meta(
+    root: &Path,
+    store: &Store,
+    fingerprint: [u8; 32],
+    out: &mut Freshness,
+) -> Result<(), IndexError> {
     out.fingerprint_changed = store.workspace_fingerprint()? != Some(fingerprint);
     out.extractor_changed = store.extractor_version()? != Some(EXTRACTOR_VERSION);
     out.head = phantom_fractal_git::head(root)?;
     out.index_head = store.index_head()?;
-    Ok(out)
+    Ok(())
+}
+
+struct ScanState<'a> {
+    freshness: Freshness,
+    kept: BTreeSet<&'a str>,
+    read_skipped: Vec<&'a str>,
+    not_utf8: Vec<&'a str>,
+}
+
+fn scan_sources<'a, F>(
+    files: &'a [Candidate],
+    stored: &BTreeMap<String, FileStat>,
+    supported: &F,
+) -> Result<ScanState<'a>, IndexError>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut state = ScanState {
+        freshness: Freshness::default(),
+        kept: BTreeSet::new(),
+        read_skipped: Vec::new(),
+        not_utf8: Vec::new(),
+    };
+    for file in files.iter().filter(|file| supported(&file.path)) {
+        classify_source(file, stored.get(&file.path), &mut state)?;
+    }
+    Ok(state)
+}
+
+fn classify_source<'a>(
+    file: &'a Candidate,
+    stat: Option<&FileStat>,
+    state: &mut ScanState<'a>,
+) -> Result<(), IndexError> {
+    if let Some(stat) = stat
+        && same_stat(file, stat)?
+    {
+        state.kept.insert(&file.path);
+        return Ok(());
+    }
+    let Some(bytes) = read_utf8_bytes(file, state)? else {
+        return Ok(());
+    };
+    state.kept.insert(&file.path);
+    record_bytes_change(&file.path, &bytes, stat, &mut state.freshness);
+    Ok(())
+}
+
+fn read_utf8_bytes<'a>(
+    file: &'a Candidate,
+    state: &mut ScanState<'a>,
+) -> Result<Option<Vec<u8>>, IndexError> {
+    let Source::Bytes { bytes, .. } = read_source(&file.abs_path)? else {
+        state.read_skipped.push(&file.path);
+        return Ok(None);
+    };
+    if std::str::from_utf8(&bytes).is_err() {
+        state.not_utf8.push(&file.path);
+        return Ok(None);
+    }
+    Ok(Some(bytes))
+}
+
+fn record_bytes_change(path: &str, bytes: &[u8], stat: Option<&FileStat>, out: &mut Freshness) {
+    match stat {
+        None => out.added.push(path.to_owned()),
+        Some(stat) if stat.blake3 != blake3::hash(bytes).as_bytes() => {
+            out.modified.push(path.to_owned());
+        }
+        Some(_) => {}
+    }
+}
+
+fn collect_unread<'a, F>(
+    walk: &'a Walk,
+    read_skipped: &[&'a str],
+    not_utf8: &[&'a str],
+    supported: &F,
+) -> Vec<(&'a str, Unread)>
+where
+    F: Fn(&str) -> bool,
+{
+    walk.skipped
+        .iter()
+        .filter(|skip| supported(&skip.path))
+        .map(|skip| (skip.path.as_str(), Unread::Skipped))
+        .chain(read_skipped.iter().map(|path| (*path, Unread::Skipped)))
+        .chain(not_utf8.iter().map(|path| (*path, Unread::NotUtf8)))
+        .collect()
 }
 
 /// True when the file's size and mtime on disk are the stored ones. The

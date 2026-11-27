@@ -11,9 +11,8 @@ use std::cmp::Reverse;
 use std::path::PathBuf;
 
 use phantom_fractal_analyze::{DiffState, ImpactOptions, impact_many};
-use phantom_fractal_extract::{DiffError, diff};
+use phantom_fractal_extract::{DiffError, Registry, RustDriver, diff_with};
 use phantom_fractal_git::{Base, ChangesError};
-use phantom_fractal_lang_rust::RustLanguage;
 use phantom_fractal_proto::ErrorKind;
 use serde::Serialize;
 
@@ -151,64 +150,89 @@ pub(crate) fn staged_refusal() -> Failure {
 /// What the change in the work tree of `request.repo` against its base
 /// reaches, fitted to `request.max_tokens`.
 pub(crate) fn impact_diff(request: &DiffRequest) -> Result<Reply<DiffResult>, Failure> {
+    let rust = RustDriver::owned()
+        .map_err(|err| Failure::new(ErrorKind::Usage, format!("extract: {err}")))?;
+    let registry = Registry::new(vec![&rust]);
+    impact_diff_with(request, &registry)
+}
+
+pub(crate) fn impact_diff_with(
+    request: &DiffRequest,
+    registry: &Registry<'_>,
+) -> Result<Reply<DiffResult>, Failure> {
+    check_diff_request(request)?;
+    let (store, names) = current_index(&request.repo)?;
+    let root = canonical_repo(&request.repo)?;
+    let changes = compute_diff(&root, request.against.as_deref(), registry)?;
+    let (changed, sources) = map_changed_symbols(&store, &changes.changed)?;
+    let meta = fresh::meta(&root, &store)?;
+    let state = build_diff_state(
+        &changed,
+        &sources,
+        &changes.files_only,
+        changes.manifest_changed,
+        meta.stale,
+        registry,
+    );
+    let answer = impact_many(&store, &sources, &request.options, &state)?;
+    let result = assemble_diff_result(request, changes, changed, answer, &names);
+    let result = budget::fit(result, request.max_tokens, &meta)?;
+    Ok(Reply::with_meta(result, meta))
+}
+
+fn check_diff_request(request: &DiffRequest) -> Result<(), Failure> {
     if !request.options.in_range() {
         return Err(Failure::new(
             ErrorKind::Usage,
             "depth must be 1 to 5 and min_confidence above 0 and at most 1",
         ));
     }
-    budget::check(request.max_tokens)?;
-    let (store, names) = current_index(&request.repo)?;
-    let root = canonical_repo(&request.repo)?;
-    let language = RustLanguage::new()
-        .map_err(|err| Failure::new(ErrorKind::Usage, format!("extract: {err}")))?;
-    let base = match &request.against {
-        None => Base::Head,
-        Some(name) => Base::Ref(name.clone()),
-    };
-    let changes = diff(&root, &base, &language)
-        .map_err(diff_failure)?
-        .ok_or_else(|| Failure::new(ErrorKind::Usage, NOT_GIT))?;
+    budget::check(request.max_tokens)
+}
 
+fn compute_diff(
+    root: &std::path::Path,
+    against: Option<&str>,
+    registry: &Registry<'_>,
+) -> Result<phantom_fractal_extract::Diff, Failure> {
+    let base = match against {
+        None => Base::Head,
+        Some(name) => Base::Ref(name.to_owned()),
+    };
+    diff_with(root, &base, registry)
+        .map_err(diff_failure)?
+        .ok_or_else(|| Failure::new(ErrorKind::Usage, NOT_GIT))
+}
+
+fn map_changed_symbols(
+    store: &phantom_fractal_store::Store,
+    symbols: &[phantom_fractal_extract::ChangedSymbol],
+) -> Result<(Vec<ChangedOut>, Vec<i64>), Failure> {
     let mut changed = Vec::new();
     let mut sources = Vec::new();
-    for symbol in changes.changed {
+    for symbol in symbols {
         let id = store.symbol_by_stable_key(&symbol.key)?;
         sources.extend(id);
         changed.push(ChangedOut {
-            path: symbol.path,
-            key: symbol.key,
-            name: symbol.name,
+            path: symbol.path.clone(),
+            key: symbol.key.clone(),
+            name: symbol.name.clone(),
             change: symbol.change.as_str(),
             in_index: id.is_some(),
         });
     }
-    let unindexed = changed.iter().filter(|symbol| !symbol.in_index).count();
-    let meta = fresh::meta(&root, &store)?;
-    let state = DiffState {
-        stale_index: meta.stale,
-        unindexed_changes: u64::try_from(unindexed).unwrap_or(u64::MAX),
-    };
-    let options = request.options;
-    let answer = impact_many(&store, &sources, &options, &state)?;
-    let (groups, tests) = if request.summary {
-        (None, None)
-    } else {
-        let groups = answer
-            .groups
-            .into_iter()
-            .map(|group| group_out(&names, group, Shown::Plain))
-            .collect();
-        let tests = options.include_tests.then(|| {
-            answer
-                .tests
-                .into_iter()
-                .map(|hit| test_out(&names, hit, Shown::Plain))
-                .collect()
-        });
-        (Some(groups), tests)
-    };
-    let result = DiffResult {
+    Ok((changed, sources))
+}
+
+fn assemble_diff_result(
+    request: &DiffRequest,
+    changes: phantom_fractal_extract::Diff,
+    changed: Vec<ChangedOut>,
+    answer: phantom_fractal_analyze::ManyImpact,
+    names: &super::lookup::Names,
+) -> DiffResult {
+    let (groups, tests) = format_diff_hits(request, &answer, names);
+    DiffResult {
         base: BaseOut {
             kind: if request.against.is_some() {
                 "ref"
@@ -235,21 +259,167 @@ pub(crate) fn impact_diff(request: &DiffRequest) -> Result<Reply<DiffResult>, Fa
             counts: counts_out(answer.counts),
             groups,
             tests,
-            options: options_out(&options),
+            options: options_out(&request.options),
         },
         tokens: None,
-    };
-    let result = budget::fit(result, request.max_tokens, &meta)?;
-    Ok(Reply::with_meta(result, meta))
+    }
+}
+
+fn format_diff_hits(
+    request: &DiffRequest,
+    answer: &phantom_fractal_analyze::ManyImpact,
+    names: &super::lookup::Names,
+) -> (Option<Vec<GroupOut>>, Option<Vec<TestOut>>) {
+    if request.summary {
+        return (None, None);
+    }
+    let groups = answer
+        .groups
+        .iter()
+        .cloned()
+        .map(|group| group_out(names, group, Shown::Plain))
+        .collect();
+    let tests = request.options.include_tests.then(|| {
+        answer
+            .tests
+            .iter()
+            .cloned()
+            .map(|hit| test_out(names, hit, Shown::Plain))
+            .collect()
+    });
+    (Some(groups), tests)
 }
 
 /// A base that names no commit, or more than one, is usage with its own
 /// path-free text; any other failure is usage with a fixed text.
+fn build_diff_state(
+    changed: &[ChangedOut],
+    sources: &[i64],
+    files_only: &[phantom_fractal_extract::FileOnly],
+    manifest_changed: bool,
+    stale_index: bool,
+    registry: &Registry<'_>,
+) -> DiffState {
+    let unindexed = changed.iter().filter(|symbol| !symbol.in_index).count();
+    let supported_only = if sources.is_empty() {
+        files_only
+            .iter()
+            .filter(|file| registry.is_supported(&file.path))
+            .count()
+    } else {
+        0
+    };
+    DiffState {
+        stale_index,
+        unindexed_changes: u64::try_from(unindexed + supported_only).unwrap_or(u64::MAX),
+        manifest_changed: sources.is_empty() && manifest_changed,
+    }
+}
+
 fn diff_failure(err: DiffError) -> Failure {
     match err {
         DiffError::Changes(err @ (ChangesError::UnknownBase | ChangesError::AmbiguousBase)) => {
             Failure::new(ErrorKind::Usage, err.to_string())
         }
         _ => Failure::new(ErrorKind::Usage, UNREADABLE),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use phantom_fractal_extract::{FileOnly, Registry, RustDriver};
+    use phantom_fractal_git::FileChange;
+
+    use super::{ChangedOut, build_diff_state};
+
+    #[test]
+    fn build_diff_state_never_drops_supported_files_only_or_manifest_with_empty_sources() {
+        let rust = RustDriver::owned().expect("rust driver");
+        let registry = Registry::new(vec![&rust]);
+
+        // Only a supported .rs file changed outside symbol spans, with clean index: must force unindexed_changes.
+        let state = build_diff_state(
+            &[],
+            &[],
+            &[
+                FileOnly {
+                    path: "README.md".to_owned(),
+                    change: FileChange::Modified,
+                },
+                FileOnly {
+                    path: "src/lib.rs".to_owned(),
+                    change: FileChange::Modified,
+                },
+            ],
+            false,
+            false,
+            &registry,
+        );
+        assert_eq!(state.unindexed_changes, 1);
+        assert!(!state.manifest_changed);
+
+        // Manifest-only change with no indexed symbol sources: sets manifest_changed = true.
+        let man = build_diff_state(
+            &[],
+            &[],
+            &[FileOnly {
+                path: "Cargo.toml".to_owned(),
+                change: FileChange::Modified,
+            }],
+            true,
+            false,
+            &registry,
+        );
+        assert!(man.manifest_changed);
+        assert_eq!(man.unindexed_changes, 0);
+
+        // Non-empty sources keeps manifest_changed = false in DiffState and counts only unindexed symbols.
+        let with_sources = build_diff_state(
+            &[ChangedOut {
+                path: "src/a.rs".to_owned(),
+                key: "k1".to_owned(),
+                name: "f".to_owned(),
+                change: "modified",
+                in_index: true,
+            }],
+            &[1],
+            &[FileOnly {
+                path: "src/c.rs".to_owned(),
+                change: FileChange::Modified,
+            }],
+            true,
+            true,
+            &registry,
+        );
+        assert!(with_sources.stale_index);
+        assert!(!with_sources.manifest_changed);
+        assert_eq!(with_sources.unindexed_changes, 0);
+
+        let bad_depth = super::DiffRequest {
+            against: None,
+            repo: std::path::PathBuf::from("/nonexistent"),
+            options: phantom_fractal_analyze::ImpactOptions {
+                max_depth: 0,
+                ..phantom_fractal_analyze::ImpactOptions::default()
+            },
+            summary: false,
+            max_tokens: None,
+        };
+        let Err(err) = super::impact_diff_with(&bad_depth, &registry) else {
+            panic!("invalid depth must fail");
+        };
+        assert_eq!(err.kind, phantom_fractal_proto::ErrorKind::Usage);
+
+        let bad_budget = super::DiffRequest {
+            against: None,
+            repo: std::path::PathBuf::from("/nonexistent"),
+            options: phantom_fractal_analyze::ImpactOptions::default(),
+            summary: false,
+            max_tokens: Some(0),
+        };
+        let Err(err_b) = super::impact_diff_with(&bad_budget, &registry) else {
+            panic!("invalid budget must fail");
+        };
+        assert_eq!(err_b.kind, phantom_fractal_proto::ErrorKind::Usage);
     }
 }
