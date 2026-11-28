@@ -382,16 +382,35 @@ fn has_driver_manifest(manifests: &[ManifestFile], driver: &dyn LanguageDriver) 
 
 type FilterTextPairs = (Vec<(String, String)>, Vec<String>);
 
+fn push_filter_source_bytes(
+    path: String,
+    bytes: Vec<u8>,
+    out: &mut Vec<(String, String)>,
+    not_utf8: &mut Vec<String>,
+) {
+    match String::from_utf8(bytes) {
+        Ok(text) => out.push((path, text)),
+        Err(_) => not_utf8.push(path),
+    }
+}
+
+fn read_filter_file(
+    file: &Candidate,
+    out: &mut Vec<(String, String)>,
+    not_utf8: &mut Vec<String>,
+) -> Result<(), IndexError> {
+    let Source::Bytes { bytes, .. } = read_source(&file.abs_path)? else {
+        return Ok(());
+    };
+    push_filter_source_bytes(file.path.clone(), bytes, out, not_utf8);
+    Ok(())
+}
+
 fn read_filter_texts(candidates: &[&Candidate]) -> Result<FilterTextPairs, IndexError> {
     let mut out = Vec::with_capacity(candidates.len());
     let mut not_utf8 = Vec::new();
     for file in candidates {
-        if let Source::Bytes { bytes, .. } = read_source(&file.abs_path)? {
-            match String::from_utf8(bytes) {
-                Ok(text) => out.push((file.path.clone(), text)),
-                Err(_) => not_utf8.push(file.path.clone()),
-            }
-        }
+        read_filter_file(file, &mut out, &mut not_utf8)?;
     }
     Ok((out, not_utf8))
 }
@@ -552,6 +571,40 @@ mod tests {
     use super::{DynLang, PrefilterState, RustResolver, driver_unread_owned};
     use crate::fingerprint::Unread;
     use crate::registry::{GoDriver, Registry};
+
+    #[test]
+    fn read_filter_texts_splits_utf8_and_invalid_bytes() {
+        use std::fs;
+        use std::io::Write;
+
+        use crate::walk::Candidate;
+
+        let base = std::env::temp_dir().join(format!("phantom-filter-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).expect("tmpdir");
+        let good = base.join("ok.go");
+        fs::write(&good, b"package p\n").expect("write good");
+        let bad = base.join("bad.go");
+        let mut f = fs::File::create(&bad).expect("create bad");
+        f.write_all(b"package p\n\xff\nfunc X(){}\n")
+            .expect("write bad bytes");
+        let c_ok = Candidate {
+            path: "ok.go".to_owned(),
+            abs_path: good,
+            size: 9,
+        };
+        let c_bad = Candidate {
+            path: "bad.go".to_owned(),
+            abs_path: bad,
+            size: 20,
+        };
+        let refs = [&c_ok, &c_bad];
+        let (pairs, not_utf8) = super::read_filter_texts(&refs).expect("read");
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, "ok.go");
+        assert_eq!(not_utf8, vec!["bad.go".to_owned()]);
+        let _ = fs::remove_dir_all(base);
+    }
 
     #[test]
     fn driver_unread_owned_lists_prefiltered_go_paths() {

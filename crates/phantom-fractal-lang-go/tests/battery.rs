@@ -1451,6 +1451,61 @@ fn deep_paren_concat_index_does_not_stack_overflow() {
 }
 
 #[test]
+fn f1_else_if_chain_extract_does_not_stack_overflow() {
+    let mut src = String::from("package p\nfunc F() {\nif false {\n}\n");
+    for _ in 0..24_000 {
+        src.push_str("else if false {\n}\n");
+    }
+    src.push_str("}\n");
+    assert!(GoLanguage::new().extract(&src).is_ok());
+}
+
+#[test]
+#[ignore = "300k nested blocks (~600 KB); run with --ignored and F1 index probe"]
+fn f1_nested_blocks_extract_does_not_stack_overflow() {
+    let mut src = String::from("package p\nfunc G() int {\n");
+    for _ in 0..300_000 {
+        src.push('{');
+    }
+    src.push_str("return 1\n");
+    for _ in 0..300_000 {
+        src.push('}');
+    }
+    src.push_str("\n}\n");
+    assert!(GoLanguage::new().extract(&src).is_ok());
+}
+
+/// F1 §4.1 1 MB shapes (480k parens, 160k concat, 24k else-if, 300k blocks).
+#[test]
+#[ignore = "run with --ignored for F1 hand index correlate"]
+fn f1_full_megabyte_shapes_extract() {
+    let lang = GoLanguage::new();
+    let parens = format!("package p\nfunc F() {{ {} }}\n", "(".repeat(480_000));
+    assert!(lang.extract(&parens).is_ok());
+    let concat = format!(
+        "package p\nvar s = {}\n",
+        (0..160_000).map(|_| "\"a\" + ").collect::<String>() + "\"a\""
+    );
+    assert!(lang.extract(&concat).is_ok());
+    let mut else_if = String::from("package p\nfunc F() {\nif false {\n}\n");
+    for _ in 0..24_000 {
+        else_if.push_str("else if false {\n}\n");
+    }
+    else_if.push_str("}\n");
+    assert!(lang.extract(&else_if).is_ok());
+    let mut blocks = String::from("package p\nfunc G() int {\n");
+    for _ in 0..300_000 {
+        blocks.push('{');
+    }
+    blocks.push_str("return 1\n");
+    for _ in 0..300_000 {
+        blocks.push('}');
+    }
+    blocks.push_str("\n}\n");
+    assert!(lang.extract(&blocks).is_ok());
+}
+
+#[test]
 fn structural_impl_links_cap_at_budget() {
     let mut body = String::from("package p\n");
     for i in 0..64 {

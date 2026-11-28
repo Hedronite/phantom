@@ -134,13 +134,13 @@ fn is_plus_chain(node: Node<'_>, src: &[u8]) -> bool {
         .is_some_and(|o| node_text(o, src) == "+")
 }
 
+fn is_plus_binary(node: Node<'_>, src: &[u8]) -> bool {
+    node.kind() == "binary_expression" && is_plus_chain(node, src)
+}
+
 fn scan_plus_chain(mut node: Node<'_>, env: &mut ScopeEnv, ctx: &mut ScanCtx<'_>) {
     loop {
-        if node.kind() != "binary_expression" {
-            scan_node(node, env, ctx);
-            return;
-        }
-        if !is_plus_chain(node, ctx.src) {
+        if !is_plus_binary(node, ctx.src) {
             scan_node(node, env, ctx);
             return;
         }
@@ -150,11 +150,7 @@ fn scan_plus_chain(mut node: Node<'_>, env: &mut ScopeEnv, ctx: &mut ScanCtx<'_>
         let Some(left) = node.child_by_field_name("left") else {
             return;
         };
-        if left.kind() != "binary_expression" {
-            scan_node(left, env, ctx);
-            return;
-        }
-        if !is_plus_chain(left, ctx.src) {
+        if !is_plus_binary(left, ctx.src) {
             scan_node(left, env, ctx);
             return;
         }
@@ -182,27 +178,25 @@ fn peel_parentheses(mut node: Node<'_>) -> Node<'_> {
     node
 }
 
+fn lone_block_in_statement_list(stmt_list: Node<'_>) -> Option<Node<'_>> {
+    let mut list_walk = stmt_list.walk();
+    let stmts: Vec<Node<'_>> = stmt_list.named_children(&mut list_walk).collect();
+    if stmts.len() != 1 || stmts[0].kind() != "block" {
+        return None;
+    }
+    Some(stmts[0])
+}
+
 fn next_single_child_block(cur: Node<'_>) -> Option<Node<'_>> {
     if cur.kind() != "block" {
         return None;
     }
     let mut inner_walk = cur.walk();
     let kids: Vec<Node<'_>> = cur.named_children(&mut inner_walk).collect();
-    if kids.len() != 1 {
+    if kids.len() != 1 || kids[0].kind() != "statement_list" {
         return None;
     }
-    if kids[0].kind() != "statement_list" {
-        return None;
-    }
-    let mut list_walk = kids[0].walk();
-    let stmts: Vec<Node<'_>> = kids[0].named_children(&mut list_walk).collect();
-    if stmts.len() != 1 {
-        return None;
-    }
-    if stmts[0].kind() != "block" {
-        return None;
-    }
-    Some(stmts[0])
+    lone_block_in_statement_list(kids[0])
 }
 
 fn peel_single_child_blocks(mut cur: Node<'_>) -> Node<'_> {
@@ -765,6 +759,18 @@ mod peel_tests {
     }
 
     #[test]
+    fn is_plus_binary_requires_plus_binary_shape() {
+        let minus = "package p\nvar x = a - b\n";
+        let tree = parse_go(minus);
+        let bin = first_binary(tree.root_node()).expect("binary");
+        assert!(!is_plus_binary(bin, minus.as_bytes()));
+        let plus = "package p\nvar x = a + b\n";
+        let tree2 = parse_go(plus);
+        let bin2 = first_binary(tree2.root_node()).expect("binary");
+        assert!(is_plus_binary(bin2, plus.as_bytes()));
+    }
+
+    #[test]
     fn plus_chain_scan_visits_only_on_plus_path() {
         let lang = GoLanguage::new();
         let src = "package p\nfunc F() int { return (((((((\"a\" + \"b\") + Side()) + 1))))); }\n";
@@ -793,6 +799,9 @@ mod peel_tests {
         let tree2 = parse_go("package p\nfunc G() { A(); B() }\n");
         let body2 = func_body_decl(tree2.root_node()).expect("body");
         assert!(next_single_child_block(body2).is_none());
+        let tree3 = parse_go("package p\nfunc G() int { x := 1; return x }\n");
+        let body3 = func_body_decl(tree3.root_node()).expect("body");
+        assert!(next_single_child_block(body3).is_none());
     }
 
     #[test]
