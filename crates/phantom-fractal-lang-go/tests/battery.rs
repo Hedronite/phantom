@@ -1398,14 +1398,13 @@ func D(a ********C, c C) {
 #[test]
 fn scan_peel_collects_refs_in_plus_chain_and_nested_blocks() {
     let lang = GoLanguage::new();
-    let plus = (0..12)
-        .map(|_| "\"a\" + ")
-        .collect::<String>()
-        + "SideEffect()";
+    let plus = (0..12).map(|_| "\"a\" + ").collect::<String>() + "SideEffect()";
     let src = format!("package p\nfunc F() int {{ return {plus}; }}\n");
     let ext = lang.extract(&src).expect("extract");
     assert!(
-        ext.refs.iter().any(|r| r.kind == RefKind::Call && r.text == "SideEffect"),
+        ext.refs
+            .iter()
+            .any(|r| r.kind == RefKind::Call && r.text == "SideEffect"),
         "refs: {:?}",
         ext.refs
     );
@@ -1420,7 +1419,9 @@ fn scan_peel_collects_refs_in_plus_chain_and_nested_blocks() {
     blocks.push_str("\nfunc H() int { return 1 }\n");
     let ext2 = lang.extract(&blocks).expect("extract");
     assert!(
-        ext2.refs.iter().any(|r| r.kind == RefKind::Call && r.text == "H"),
+        ext2.refs
+            .iter()
+            .any(|r| r.kind == RefKind::Call && r.text == "H"),
         "{:?}",
         ext2.refs
     );
@@ -1444,10 +1445,7 @@ fn deep_paren_concat_index_does_not_stack_overflow() {
     assert!(lang.extract(&parens).is_ok());
     let concat = format!(
         "package p\nvar s = {}\n",
-        (0..160_000)
-            .map(|_| "\"a\" + ")
-            .collect::<String>()
-            + "\"a\""
+        (0..160_000).map(|_| "\"a\" + ").collect::<String>() + "\"a\""
     );
     assert!(lang.extract(&concat).is_ok());
 }

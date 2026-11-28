@@ -369,25 +369,25 @@ impl LanguageDriver for GoDriver {
         let mut build_excluded_count = 0u64;
         let mut prefilter_skipped = Vec::new();
         for ex in &pkg_graph.excluded {
-            let Some(&content) = src_map.get(ex.path.as_str()) else {
-                if ex.reason == ExcludeReason::MissingPackageClause {
-                    prefilter_skipped.push(ex.path.clone());
-                }
+            if ex.reason == ExcludeReason::MissingPackageClause {
+                prefilter_skipped.push(ex.path.clone());
+                continue;
+            }
+            let Some(content) = src_map.get(ex.path.as_str()).copied() else {
                 continue;
             };
-            match ex.reason {
-                ExcludeReason::BuildConstraint | ExcludeReason::NestedModule => {
-                    build_excluded_count += 1;
-                    excluded_hashes.push((
-                        ex.path.clone(),
-                        *blake3::hash(content.as_bytes()).as_bytes(),
-                    ));
-                    let mod_path = enclosing_go_module_path(&ex.path, &pkg_graph.modules);
-                    let idents = collect_go_identifiers(content);
-                    excluded_terms.push(format!("{mod_path}\t{idents}"));
-                }
-                ExcludeReason::MissingPackageClause => prefilter_skipped.push(ex.path.clone()),
-                _ => {}
+            if matches!(
+                ex.reason,
+                ExcludeReason::BuildConstraint | ExcludeReason::NestedModule
+            ) {
+                build_excluded_count += 1;
+                excluded_hashes.push((
+                    ex.path.clone(),
+                    *blake3::hash(content.as_bytes()).as_bytes(),
+                ));
+                let mod_path = enclosing_go_module_path(&ex.path, &pkg_graph.modules);
+                let idents = collect_go_identifiers(content);
+                excluded_terms.push(format!("{mod_path}\t{idents}"));
             }
         }
         Some(DriverFilter {
@@ -766,6 +766,25 @@ func Loose() {}
     }
 
     #[test]
+    fn go_missing_package_clause_prefilter_skipped() {
+        let go = GoDriver::new();
+        let man = vec![ManifestFile {
+            path: "go.mod".to_owned(),
+            text: "module example.com/missing\n\ngo 1.26\n".to_owned(),
+        }];
+        let filtered = go
+            .filter_sources(
+                &man,
+                &[(
+                    "bad.go".to_owned(),
+                    "pakage core\n\nfunc Z() int { return 0 }\n".to_owned(),
+                )],
+            )
+            .expect("filter");
+        assert_eq!(filtered.prefilter_skipped, vec!["bad.go".to_owned()]);
+    }
+
+    #[test]
     fn language_driver_defaults_and_go_helpers_cover_edge_cases() {
         use phantom_fractal_lang_go::go_mod::GoModuleSpec;
         use phantom_fractal_lang_rust::RustLanguage;
@@ -889,6 +908,27 @@ func Loose() {}
         assert!(filtered.build_excluded_terms.contains("example.com/test\t"));
         assert!(filtered.build_excluded_terms.contains("Dar"));
         assert!(filtered.build_excluded_terms.contains("TagFn"));
+
+        let missing_pkg = go
+            .filter_sources(
+                &man,
+                &[
+                    ("typo.go".to_owned(), "pakage p\nfunc Bad() {}\n".to_owned()),
+                    (
+                        "good.go".to_owned(),
+                        "package p\nfunc Good() {}\n".to_owned(),
+                    ),
+                ],
+            )
+            .expect("go filter missing pkg");
+        assert!(
+            missing_pkg
+                .prefilter_skipped
+                .iter()
+                .any(|path| path == "typo.go"),
+            "{:?}",
+            missing_pkg.prefilter_skipped
+        );
 
         // method_owners links Method symbols to matching Struct/Interface in same module.
         let owner_input = ResolveInput {

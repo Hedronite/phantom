@@ -544,10 +544,40 @@ impl phantom_fractal_lang::Language for DynLang<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use phantom_fractal_lang::{Language, ResolveInput, Resolver};
     use phantom_fractal_lang_rust::RustLanguage;
 
-    use super::{DynLang, RustResolver};
+    use super::{DynLang, PrefilterState, RustResolver, driver_unread_owned};
+    use crate::fingerprint::Unread;
+    use crate::registry::{GoDriver, Registry};
+
+    #[test]
+    fn driver_unread_owned_lists_prefiltered_go_paths() {
+        let registry = Registry::from_owned(vec![Box::new(GoDriver::new())]);
+        let prefilter = PrefilterState {
+            filters: HashMap::new(),
+            build_excluded_count: 0,
+            build_excluded_terms: String::new(),
+            excluded_hashes: Vec::new(),
+            filter_not_utf8: vec!["internal/zz.go".to_owned()],
+            prefilter_skipped: vec!["internal/typo.go".to_owned()],
+            has_filtered_driver: true,
+        };
+        let unread = driver_unread_owned(&prefilter, &registry);
+        assert_eq!(unread.len(), 2);
+        assert!(
+            unread
+                .iter()
+                .any(|(path, why)| path == "internal/zz.go" && matches!(why, Unread::NotUtf8))
+        );
+        assert!(
+            unread
+                .iter()
+                .any(|(path, why)| path == "internal/typo.go" && matches!(why, Unread::Skipped))
+        );
+    }
 
     #[test]
     fn append_terms_joins_non_empty_lines_only() {
