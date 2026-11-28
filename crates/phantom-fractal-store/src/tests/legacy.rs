@@ -320,7 +320,7 @@ fn version_1_database_indexes_open_ledger_on_open() {
 
 #[test]
 fn existing_open_ledger_matches_after_version_1_open() {
-    assert_eq!(SCHEMA_VERSION, 4);
+    assert_eq!(SCHEMA_VERSION, 5);
     let db = TempDb::new("pre");
     assert_outside_workspace(db.path());
     drop(Store::open(db.path()).expect("create"));
@@ -344,13 +344,13 @@ fn existing_open_ledger_matches_after_version_1_open() {
         .expect("seed");
     }
     let store = Store::open(db.path()).expect("migrate");
-    assert_eq!(store.schema_version().expect("schema"), 4);
+    assert_eq!(store.schema_version().expect("schema"), SCHEMA_VERSION);
     assert!(store.match_count("open_ledger").expect("match") >= 1);
 }
 
 #[test]
 fn version_2_database_migrates_to_4() {
-    assert_eq!(SCHEMA_VERSION, 4);
+    assert_eq!(SCHEMA_VERSION, 5);
     let db = TempDb::new("v2");
     assert_outside_workspace(db.path());
     drop(Store::open(db.path()).expect("create"));
@@ -361,6 +361,7 @@ fn version_2_database_migrates_to_4() {
              ALTER TABLE symbols DROP COLUMN owner;
              ALTER TABLE symbols DROP COLUMN owner_path;
              ALTER TABLE symbols DROP COLUMN trait_name;
+             DROP INDEX IF EXISTS modules_file_scope;
              ALTER TABLE modules DROP COLUMN scope;
              ALTER TABLE refs DROP COLUMN scope;
              ALTER TABLE refs DROP COLUMN receiver;
@@ -374,8 +375,8 @@ fn version_2_database_migrates_to_4() {
         .expect("downgrade");
     }
     let mut store = Store::open(db.path()).expect("migrate");
-    assert_eq!(store.schema_version().expect("schema"), 4);
-    assert_eq!(store.user_version().expect("user_version"), 4);
+    assert_eq!(store.schema_version().expect("schema"), SCHEMA_VERSION);
+    assert_eq!(store.user_version().expect("user_version"), SCHEMA_VERSION);
     let language = RustLanguage::new().expect("grammar");
     let (source, mtime_ns) = fixture();
     store
@@ -395,18 +396,18 @@ fn version_2_database_migrates_to_4() {
 }
 
 #[test]
-fn schema_five_fails_to_open() {
-    let db = TempDb::new("v5");
+fn schema_six_fails_to_open() {
+    let db = TempDb::new("v6");
     assert_outside_workspace(db.path());
     let conn = Connection::open(db.path()).expect("sqlite");
     conn.execute_batch(
         "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
          INSERT INTO meta(key, value) VALUES ('producer', 'phantom-fractal');
-         INSERT INTO meta(key, value) VALUES ('schema_version', '5');
-         PRAGMA user_version = 5;",
+         INSERT INTO meta(key, value) VALUES ('schema_version', '6');
+         PRAGMA user_version = 6;",
     )
     .expect("stamp");
     drop(conn);
     let opened = Store::open(db.path());
-    assert!(matches!(opened, Err(StoreError::SchemaNewer { found: 5 })));
+    assert!(matches!(opened, Err(StoreError::SchemaNewer { found: 6 })));
 }

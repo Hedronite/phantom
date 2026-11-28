@@ -60,6 +60,17 @@ pub trait ImpactSource {
     fn build_excluded_count(&self) -> Result<Option<u64>, StoreError> {
         Ok(None)
     }
+    /// Count of build-excluded files potentially reaching `targets`.
+    fn build_excluded_for_targets(
+        &self,
+        _targets: &[SymbolFacts],
+    ) -> Result<Option<u64>, StoreError> {
+        self.build_excluded_count()
+    }
+    /// Owning target name (`targets.name`) for symbol `id`, or none.
+    fn target_name(&self, _id: i64) -> Result<Option<String>, StoreError> {
+        Ok(None)
+    }
 }
 
 impl ImpactSource for Store {
@@ -100,6 +111,21 @@ impl ImpactSource for Store {
 
     fn value_refs_named(&self, name: &str) -> Result<i64, StoreError> {
         Store::value_refs_named(self, name)
+    }
+
+    fn build_excluded_count(&self) -> Result<Option<u64>, StoreError> {
+        Store::build_excluded_count(self)
+    }
+
+    fn build_excluded_for_targets(
+        &self,
+        targets: &[SymbolFacts],
+    ) -> Result<Option<u64>, StoreError> {
+        Store::build_excluded_for_targets(self, targets)
+    }
+
+    fn target_name(&self, id: i64) -> Result<Option<String>, StoreError> {
+        Store::target_name(self, id)
     }
 }
 

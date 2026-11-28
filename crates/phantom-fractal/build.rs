@@ -1,5 +1,5 @@
 //! Embeds the commit the binary is built from, for `version`, and the
-//! tree-sitter-rust version `Cargo.lock` pins, for `doctor`.
+//! grammar versions `Cargo.lock` pins, for `doctor`.
 //!
 //! `PHANTOM_FRACTAL_GIT_SHA`, when it is 40 hex characters, wins; it is
 //! for packagers. Otherwise `git rev-parse HEAD` in this crate's directory
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const OVERRIDE: &str = "PHANTOM_FRACTAL_GIT_SHA";
-const GRAMMARS: &[&str] = &["tree-sitter-rust"];
+const GRAMMARS: &[&str] = &["tree-sitter-rust", "tree-sitter-go"];
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");

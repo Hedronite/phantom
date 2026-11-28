@@ -684,3 +684,111 @@ fn the_probe_writes_nothing() {
         "{names:?}"
     );
 }
+
+#[test]
+fn go_build_excluded_files_are_fresh_after_index_and_dirty_on_edit() {
+    let dir = TempDir::new("go-testpkg-fresh");
+    let fixture = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/go-testpkg"
+    ));
+    common::copy_tree(fixture, dir.path());
+
+    let mut s = Probed::new(dir.path());
+    let initial = s.probe();
+    assert_eq!(initial, fresh());
+    assert!(!initial.stale());
+
+    // Editing a build-excluded file flips fingerprint_changed (not added/modified) and re-index clears it.
+    write(
+        dir.path(),
+        "internal/calc/impl_darwin.go",
+        b"package calc\n\nfunc Platform() int {\n\treturn 99\n}\n",
+    );
+    s.assert_probe(&Freshness {
+        fingerprint_changed: true,
+        ..fresh()
+    });
+
+    // Editing a build-tag-excluded file flips fingerprint_changed and re-index clears it.
+    write(
+        dir.path(),
+        "internal/calc/tagged.go",
+        b"//go:build customtag\n\npackage calc\n\nfunc UseTagged() int {\n\treturn Platform() + 1\n}\n",
+    );
+    s.assert_probe(&Freshness {
+        fingerprint_changed: true,
+        ..fresh()
+    });
+
+    // Adding a new platform-excluded file also changes fingerprint without appearing in added.
+    write(
+        dir.path(),
+        "internal/calc/impl_windows.go",
+        b"package calc\n\nfunc Platform() int {\n\treturn 3\n}\n",
+    );
+    s.assert_probe(&Freshness {
+        fingerprint_changed: true,
+        ..fresh()
+    });
+
+    // Editing or adding active Go sources surfaces in modified/added cleanly.
+    write(
+        dir.path(),
+        "internal/calc/helper.go",
+        b"package calc\n\nfunc ExtraHelper() int {\n\treturn 7\n}\n",
+    );
+    s.assert_probe(&Freshness {
+        added: paths(&["internal/calc/helper.go"]),
+        ..fresh()
+    });
+
+    write(
+        dir.path(),
+        "internal/calc/calc.go",
+        b"package calc\n\nfunc Add(a, b int) int {\n\treturn a + b + Platform()\n}\n",
+    );
+    s.assert_probe(&Freshness {
+        modified: paths(&["internal/calc/calc.go"]),
+        ..fresh()
+    });
+}
+
+#[test]
+fn go_vendor_without_go_mod_is_fresh_and_excluded() {
+    let dir = TempDir::new("go-vendor-no-mod");
+    write(dir.path(), "main.go", b"package main\n\nfunc main() {}\n");
+    write(
+        dir.path(),
+        "vendor/dep/dep.go",
+        b"package dep\n\nfunc Helper() {}\n",
+    );
+
+    let s = Probed::new(dir.path());
+    assert_eq!(s.probe(), fresh());
+    assert_eq!(
+        s.store.file_paths().expect("paths"),
+        vec!["main.go".to_owned()]
+    );
+    assert_eq!(s.store.build_excluded_count().expect("count"), Some(0));
+
+    // Editing a Go file inside vendor/ without go.mod stays clean and never marks added/stale.
+    write(
+        dir.path(),
+        "vendor/dep/dep.go",
+        b"package dep\n\nfunc Helper() int { return 2 }\n",
+    );
+    assert_eq!(s.probe(), fresh());
+
+    // Even a directory with ONLY vendor/*.go (no go.mod and no active .go files) stays fresh.
+    let vendor_only = TempDir::new("go-vendor-only");
+    write(
+        vendor_only.path(),
+        "vendor/lib/x.go",
+        b"package lib\n\nfunc OnlyVendor() {}\n",
+    );
+    let sv = Probed::new(vendor_only.path());
+    assert_eq!(sv.probe(), fresh());
+    assert!(sv.store.file_paths().expect("paths").is_empty());
+    assert_eq!(sv.store.build_excluded_count().expect("count"), Some(0));
+}

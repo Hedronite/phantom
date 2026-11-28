@@ -57,9 +57,15 @@ fn fingerprint_stamps_round_trip_and_read_malformed_as_none() {
     }
     assert_eq!(store.workspace_fingerprint().expect("malformed hex"), None);
     assert_eq!(store.rs_skipped().expect("malformed count"), None);
-    // SCHEMA_VERSION stays 4: no migration.
-    assert_eq!(store.schema_version().expect("schema"), 4);
-    assert_eq!(store.user_version().expect("user_version"), 4);
+    // crate::SCHEMA_VERSION stays 4: no migration.
+    assert_eq!(
+        store.schema_version().expect("schema"),
+        crate::SCHEMA_VERSION
+    );
+    assert_eq!(
+        store.user_version().expect("user_version"),
+        crate::SCHEMA_VERSION
+    );
     drop(store);
 }
 
@@ -1383,4 +1389,124 @@ fn rust_shared_file_multi_mount_answers_exact_and_scoped_lookups() {
     ] {
         assert_eq!(store.symbols_matching(q).expect(q).len(), 1, "{q}");
     }
+}
+
+#[test]
+fn stores_build_excluded_target_name_and_disambiguates_same_named_multi_driver_packages() {
+    let db = TempDb::new("g3b-meta");
+    assert_outside_workspace(db.path());
+    let mut store = Store::open(db.path()).expect("open");
+    assert_eq!(store.build_excluded_count().expect("none"), None);
+    assert!(store.set_build_excluded_count(2).expect("set"));
+    assert!(!store.set_build_excluded_count(2).expect("unchanged"));
+    assert_eq!(store.build_excluded_count().expect("two"), Some(2));
+
+    let f1 = crate::SymbolFacts {
+        id: 1,
+        name: "Leaf".to_owned(),
+        kind: "function".to_owned(),
+        file: "pkg/a.go".to_owned(),
+        line: Some(1),
+        visibility: "public".to_owned(),
+        trait_name: None,
+        is_test: false,
+        package: Some("example.com/mod/pkg".to_owned()),
+        target_kind: Some("lib".to_owned()),
+    };
+    let f2 = crate::SymbolFacts {
+        id: 2,
+        name: "Other".to_owned(),
+        kind: "function".to_owned(),
+        file: "pkg/b.go".to_owned(),
+        line: Some(2),
+        visibility: "public".to_owned(),
+        trait_name: None,
+        is_test: false,
+        package: Some("example.com/mod/pkg".to_owned()),
+        target_kind: Some("lib".to_owned()),
+    };
+    assert_eq!(
+        store
+            .build_excluded_for_targets(std::slice::from_ref(&f1))
+            .expect("fallback"),
+        Some(2)
+    );
+    store
+        .set_build_excluded_terms(
+            "example.com/mod	Leaf Foo
+other.com/mod	Other
+",
+        )
+        .expect("terms");
+    assert_eq!(
+        store.build_excluded_for_targets(&[f1]).expect("leaf"),
+        Some(1)
+    );
+    assert_eq!(
+        store.build_excluded_for_targets(&[f2]).expect("other"),
+        Some(0)
+    );
+    store.set_build_excluded_count(0).expect("zero");
+    assert_eq!(
+        store.build_excluded_for_targets(&[]).expect("zero"),
+        Some(0)
+    );
+
+    let rust = RustLanguage::new().expect("grammar");
+    store
+        .put_source(
+            "src/lib.rs",
+            "pub fn rs_fn() {}
+",
+            0,
+            &rust,
+        )
+        .expect("rs");
+    store
+        .write_crate_graph(
+            &[
+                crate::Package {
+                    name: "app".to_owned(),
+                    version: None,
+                    manifest_path: "Cargo.toml".to_owned(),
+                },
+                crate::Package {
+                    name: "app".to_owned(),
+                    version: None,
+                    manifest_path: "go/go.mod".to_owned(),
+                },
+            ],
+            &[
+                phantom_fractal_lang::Target {
+                    id: 1,
+                    package: "app".to_owned(),
+                    name: "app".to_owned(),
+                    kind: phantom_fractal_lang::TargetKind::Lib,
+                    root: "src/lib.rs".to_owned(),
+                },
+                phantom_fractal_lang::Target {
+                    id: 2,
+                    package: "app".to_owned(),
+                    name: "main".to_owned(),
+                    kind: phantom_fractal_lang::TargetKind::Bin,
+                    root: "go/main.go".to_owned(),
+                },
+            ],
+            &[phantom_fractal_lang::Module {
+                id: 1,
+                target: 1,
+                parent: None,
+                path: "crate".to_owned(),
+                file: "src/lib.rs".to_owned(),
+                scope: String::new(),
+            }],
+            &[],
+        )
+        .expect("multi-driver graph");
+    let sym = store.symbols_matching("rs_fn").expect("match")[0].id;
+    assert_eq!(
+        store.target_name(sym).expect("target").as_deref(),
+        Some("app")
+    );
+    assert_eq!(store.target_name(999999).expect("missing"), None);
 }

@@ -908,17 +908,22 @@ fn clear_crate_graph(tx: &rusqlite::Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
+type PackageIndex = HashMap<String, Vec<(String, i64)>>;
+
 fn insert_packages(
     tx: &rusqlite::Connection,
     packages: &[Package],
-) -> Result<HashMap<String, i64>, StoreError> {
-    let mut package_ids = HashMap::new();
+) -> Result<PackageIndex, StoreError> {
+    let mut package_ids: PackageIndex = HashMap::new();
     for package in packages {
         tx.execute(
             "INSERT INTO packages(name, version, manifest_path) VALUES (?1, ?2, ?3)",
             (&package.name, &package.version, &package.manifest_path),
         )?;
-        package_ids.insert(package.name.clone(), tx.last_insert_rowid());
+        package_ids
+            .entry(package.name.clone())
+            .or_default()
+            .push((package.manifest_path.clone(), tx.last_insert_rowid()));
     }
     Ok(package_ids)
 }
@@ -926,13 +931,11 @@ fn insert_packages(
 fn insert_targets(
     tx: &rusqlite::Connection,
     targets: &[Target],
-    package_ids: &HashMap<String, i64>,
+    package_ids: &PackageIndex,
 ) -> Result<HashMap<i64, i64>, StoreError> {
     let mut target_ids = HashMap::new();
     for target in targets {
-        let package_id = *package_ids
-            .get(&target.package)
-            .ok_or_else(|| StoreError::UnknownPackage(target.package.clone()))?;
+        let package_id = resolve_package_id(package_ids, &target.package, &target.root)?;
         tx.execute(
             "INSERT INTO targets(package_id, kind, name, root_file) VALUES (?1, ?2, ?3, ?4)",
             (
@@ -945,6 +948,38 @@ fn insert_targets(
         target_ids.insert(target.id, tx.last_insert_rowid());
     }
     Ok(target_ids)
+}
+
+fn resolve_package_id(
+    package_ids: &PackageIndex,
+    package_name: &str,
+    target_root: &str,
+) -> Result<i64, StoreError> {
+    let entries = package_ids
+        .get(package_name)
+        .filter(|list| !list.is_empty())
+        .ok_or_else(|| StoreError::UnknownPackage(package_name.to_owned()))?;
+    if entries.len() == 1 {
+        return Ok(entries[0].1);
+    }
+    let want_go = target_root.ends_with(".go");
+    entries
+        .iter()
+        .max_by_key(|(manifest, _)| manifest_match_score(manifest, target_root, want_go))
+        .map(|(_, id)| *id)
+        .ok_or_else(|| StoreError::UnknownPackage(package_name.to_owned()))
+}
+
+fn manifest_match_score(manifest: &str, target_root: &str, want_go: bool) -> (usize, usize) {
+    let is_go_manifest = manifest.ends_with("go.mod") || manifest.ends_with("go.work");
+    let lang_match = usize::from(want_go == is_go_manifest);
+    let dir = manifest.rsplit_once('/').map_or("", |(d, _)| d);
+    let prefix = if target_root.starts_with(dir) {
+        dir.len() + 1
+    } else {
+        0
+    };
+    (lang_match, prefix)
 }
 
 fn file_ids_map(tx: &rusqlite::Connection) -> Result<HashMap<String, i64>, StoreError> {
@@ -1094,4 +1129,71 @@ fn mark_test_modules(
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod resolve_pkg_tests {
+    use super::*;
+
+    #[test]
+    fn resolve_package_id_prefers_matching_language_and_longest_dir() {
+        // Go targets match go.mod/go.work over longer Rust prefixes, and disambiguate nested dirs.
+        assert_eq!(manifest_match_score("go.work", "sub/main.go", true), (1, 1));
+        assert_eq!(
+            manifest_match_score("sub/Cargo.toml", "sub/main.go", true),
+            (0, 4)
+        );
+        assert_eq!(
+            manifest_match_score("sub/Cargo.toml", "sub/lib.rs", false),
+            (1, 4)
+        );
+        assert_eq!(manifest_match_score("a/go.mod", "a/main.go", true), (1, 2));
+        assert_eq!(
+            manifest_match_score("other/go.mod", "a/main.go", true),
+            (1, 0)
+        );
+
+        let mut pkg_ids: PackageIndex = HashMap::new();
+        pkg_ids.insert(
+            "app".to_owned(),
+            vec![
+                ("a/go.mod".to_owned(), 10),
+                ("other/go.mod".to_owned(), 20),
+                ("go.mod".to_owned(), 30),
+                ("sub/Cargo.toml".to_owned(), 40),
+            ],
+        );
+        // Winner is NOT entries[0] ("go.mod" -> 30): catches `entries.len() == 1` mutation.
+        assert_eq!(resolve_package_id(&pkg_ids, "app", "main.go").unwrap(), 30);
+        // Nested dir len=1 ("a/go.mod" -> score 2) beats root ("go.mod" -> score 1): catches `+ 1` -> `* 1`.
+        assert_eq!(
+            resolve_package_id(&pkg_ids, "app", "a/main.go").unwrap(),
+            10
+        );
+        // Non-matching Go root ("sub/Cargo.toml" has longer prefix 4, but Go wants go.mod -> 30).
+        assert_eq!(
+            resolve_package_id(&pkg_ids, "app", "sub/main.go").unwrap(),
+            30
+        );
+        // Rust target in sub/ prefers sub/Cargo.toml -> 40 over go.work/go.mod.
+        assert_eq!(
+            resolve_package_id(&pkg_ids, "app", "sub/lib.rs").unwrap(),
+            40
+        );
+
+        // go.work alone vs Cargo.toml picks go.work for Go and Cargo.toml for Rust.
+        let mut work_ids: PackageIndex = HashMap::new();
+        work_ids.insert(
+            "ws".to_owned(),
+            vec![("sub/Cargo.toml".to_owned(), 1), ("go.work".to_owned(), 2)],
+        );
+        assert_eq!(
+            resolve_package_id(&work_ids, "ws", "sub/main.go").unwrap(),
+            2
+        );
+        assert_eq!(
+            resolve_package_id(&work_ids, "ws", "sub/lib.rs").unwrap(),
+            1
+        );
+    }
 }

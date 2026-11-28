@@ -7,13 +7,18 @@
 //! decides which symbols it names, and refuses `path:line` on a stale
 //! index. A miss is always a failure: it suggests symbols and the command
 //! that asks about the first, and never answers for one of them.
+//!
+//! A Go name is spelled with `.`, in and out: `import/path.Type.Method`,
+//! or by file as `dir/f.go::Type.Method`. The store keeps `::`.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 
 use phantom_fractal_extract::EXTRACTOR_VERSION;
-use phantom_fractal_lang::{Id, ResolveInput, Symbol, SymbolKind};
+use phantom_fractal_lang::{
+    Id, ResolveInput, Symbol, SymbolKind, format_file_display, format_qual_name,
+};
 use phantom_fractal_proto::ErrorKind;
 use phantom_fractal_store::{Store, SymbolMatch, parse_path_line};
 use serde::Serialize;
@@ -105,6 +110,12 @@ fn shell_word(word: &str) -> Cow<'_, str> {
     }
 }
 
+/// The language whose spelling the names of `file`'s symbols print in:
+/// Go's for a `.go` file, and the stored `::` for every other.
+fn lang_of(file: &str) -> &'static str {
+    if file.ends_with(".go") { "go" } else { "rust" }
+}
+
 /// Qualified names for every stored symbol, built from the resolver input.
 pub(crate) struct Names {
     symbols: HashMap<Id, Symbol>,
@@ -142,8 +153,9 @@ impl Names {
         self.symbols.get(&id)
     }
 
-    /// `crate::a::Owner::name`. A symbol in an orphan file has no module,
-    /// so its name starts at its inline scope.
+    /// `crate::a::Owner::name`, or `import/path.Owner.name` for Go. A
+    /// symbol in an orphan file has no module, so its name starts at its
+    /// inline scope.
     pub(crate) fn qualified(&self, symbol: &Symbol) -> String {
         let mut parts: Vec<&str> = Vec::new();
         match symbol.module.and_then(|id| self.modules.get(&id)) {
@@ -155,13 +167,14 @@ impl Names {
             parts.push(owner);
         }
         parts.push(&symbol.name);
-        parts.join("::")
+        format_qual_name(lang_of(&symbol.file), &parts.join("::"))
     }
 
     /// `src/tui/app.rs::App::start_watcher`: the declaring file, then the
-    /// inline scope, owner and name within it.
+    /// inline scope, owner and name within it. In a Go file the part after
+    /// the file is `Owner.name`.
     pub(crate) fn display(symbol: &Symbol) -> String {
-        let mut parts: Vec<&str> = vec![&symbol.file];
+        let mut parts: Vec<&str> = Vec::new();
         if !symbol.scope.is_empty() {
             parts.push(&symbol.scope);
         }
@@ -169,15 +182,16 @@ impl Names {
             parts.push(owner);
         }
         parts.push(&symbol.name);
-        parts.join("::")
+        format_file_display(lang_of(&symbol.file), &symbol.file, &parts.join("::"))
     }
 
     /// [`Names::display`] of symbol `id`, or `file::name` when the
     /// resolver input does not hold it.
     pub(crate) fn display_of(&self, id: Id, file: &str, name: &str) -> String {
-        self.symbols
-            .get(&id)
-            .map_or_else(|| format!("{file}::{name}"), Self::display)
+        self.symbols.get(&id).map_or_else(
+            || format_file_display(lang_of(file), file, name),
+            Self::display,
+        )
     }
 }
 
@@ -406,7 +420,54 @@ pub(crate) fn kind_text(kind: SymbolKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{Retry, shell_word};
+    use phantom_fractal_lang::{Module, ResolveInput, Symbol, SymbolKind};
+
+    use super::{Names, Retry, shell_word};
+
+    fn method(id: i64, file: &str) -> Symbol {
+        Symbol {
+            id,
+            kind: SymbolKind::Method,
+            name: "Run".to_owned(),
+            owner: Some("job".to_owned()),
+            owner_path: Some("job".to_owned()),
+            trait_name: None,
+            scope: String::new(),
+            module: Some(id),
+            file: file.to_owned(),
+            signature: None,
+        }
+    }
+
+    fn module(id: i64, path: &str) -> Module {
+        Module {
+            id,
+            target: 1,
+            parent: None,
+            path: path.to_owned(),
+            file: String::new(),
+            scope: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_go_name_prints_with_dots_and_a_rust_name_as_stored() {
+        let (go, rust) = (method(1, "pkg/job.go"), method(2, "src/job.rs"));
+        let names = Names::new(ResolveInput {
+            modules: vec![module(1, "example.com/m/pkg"), module(2, "crate::pkg")],
+            symbols: vec![go.clone(), rust.clone()],
+            ..ResolveInput::default()
+        });
+        assert_eq!(names.qualified(&go), "example.com/m/pkg.job.Run");
+        assert_eq!(Names::display(&go), "pkg/job.go::job.Run");
+        assert_eq!(names.qualified(&rust), "crate::pkg::job::Run");
+        assert_eq!(Names::display(&rust), "src/job.rs::job::Run");
+        // A symbol the resolver input does not hold is named as stored,
+        // in its file's spelling.
+        assert_eq!(names.display_of(9, "a.go", "job::Run"), "a.go::job.Run");
+        assert_eq!(names.display_of(9, "a.rs", "job::Run"), "a.rs::job::Run");
+        assert_eq!(names.display_of(1, "x.rs", "x"), "pkg/job.go::job.Run");
+    }
 
     #[test]
     fn a_shell_word_is_quoted_unless_it_is_plain() {

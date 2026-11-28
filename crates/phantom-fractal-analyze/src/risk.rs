@@ -160,7 +160,7 @@ fn collect_reason_inputs(
         macro_args,
         value_refs,
         skipped: source.rs_skipped()?,
-        build_excluded: source.build_excluded_count()?,
+        build_excluded: source.build_excluded_for_targets(targets)?,
         trait_dispatch: has_trait_dispatch(targets),
         interface_dispatch: has_go_method(source, targets)?,
         external_users: has_external_users(source, targets)?,
@@ -282,7 +282,7 @@ fn is_go_internal_or_main(
     if !is_go_file(source, &target.file)? {
         return Ok(false);
     }
-    Ok(target.package.as_deref() == Some("main") || is_internal_path(&target.file))
+    Ok(source.target_name(target.id)?.as_deref() == Some("main") || is_internal_path(&target.file))
 }
 
 fn is_internal_path(path: &str) -> bool {

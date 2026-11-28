@@ -1009,3 +1009,163 @@ fn where_answers_an_envelope_when_show_has_no_symbol() {
         );
     }
 }
+
+/// `fixtures/go-basic` with an unexported type, whose method display must
+/// keep its lower-case owner, indexed.
+fn go_fixture(nu: PathBuf) -> Fixture {
+    let fixture = Fixture::empty(nu, "skill-nu-go");
+    support::copy_fixture("go-basic", &fixture.repo);
+    fs::write(
+        fixture.repo.join("lib/job.go"),
+        "package lib\n\ntype job struct{}\n\nfunc (job) run() int {\n\treturn 1\n}\n\n\
+         func start() int {\n\tvar j job\n\treturn j.run()\n}\n",
+    )
+    .expect("job.go");
+    fixture.index(&fixture.repo);
+    fixture
+}
+
+/// Every `display` the skill prints for a Go tree, whether the CLI sent it
+/// or the script built it, reads back through the skill as the symbol it
+/// was printed for.
+#[test]
+fn a_go_display_from_any_reply_is_a_name() {
+    let Some(nu) = nu() else { return };
+    let fx = go_fixture(nu);
+
+    let found = fx.ok(&["where", "run"]);
+    assert_eq!(
+        found["hits"][0]["display"], "lib/job.go:5 job.run",
+        "{found}"
+    );
+    let boot = fx.ok(&["where", "example.com/gobasic/lib.Svc.Boot"]);
+    assert_eq!(
+        boot["hits"][0]["display"], "lib/lib.go:11 Svc.Boot",
+        "{boot}"
+    );
+
+    let callers = fx.ok(&["callers", "lib/job.go:5 job.run"]);
+    assert_eq!(
+        callers["symbol"]["display"], "lib/job.go::job.run",
+        "{callers}"
+    );
+    assert_eq!(displays(&callers["callers"]), ["lib/job.go::start"]);
+    let callees = fx.ok(&["callees", "lib.start"]);
+    assert_eq!(displays(&callees["callees"]), ["lib/job.go::job.run"]);
+    let shown = fx.ok(&["show", "lib.start"]);
+    assert_eq!(shown["symbol"]["display"], "lib/job.go:9 start", "{shown}");
+    assert_eq!(
+        displays(&shown["callees"]["callees"]),
+        ["lib/job.go::job.run"]
+    );
+    let impact = fx.ok(&["impact", "lib/job.go::job.run"]);
+    assert_eq!(
+        displays(&impact["by_depth"][0]["callers"]),
+        ["lib/job.go::start"]
+    );
+    let path = fx.ok(&["path", "lib.start", "job.run"]);
+    assert_eq!(
+        path["route"], "lib/job.go::start -> lib/job.go::job.run",
+        "{path}"
+    );
+
+    let ranked = fx.ok(&["rank", "--limit", "100"]);
+    let ranked = displays(&ranked["hits"]);
+    for display in [
+        "lib/job.go::job.run",
+        "lib/lib.go::Svc.Boot",
+        "lib/job.go::job",
+    ] {
+        assert!(ranked.contains(&display), "{display}: {ranked:?}");
+    }
+    for display in ranked {
+        let (file, _) = display.split_once("::").expect("file::name");
+        let again = fx.ok(&["show", display]);
+        assert_eq!(again["symbol"]["path"], file, "{display}: {again}");
+        let line = again["symbol"]["display"].as_str().expect("display");
+        assert_eq!(fx.ok(&["show", line])["symbol"], again["symbol"], "{line}");
+    }
+
+    let (code, miss) = fx.run(&["callers", "nope.run"]);
+    assert_eq!(
+        (code, miss["kind"].as_str()),
+        (3, Some("not_found")),
+        "{miss}"
+    );
+    assert_eq!(
+        miss["retry"], "phantomq callers -- lib/job.go::job.run",
+        "{miss}"
+    );
+}
+
+/// `diff-impact` names a changed Go method with its owner.
+#[test]
+fn a_changed_go_method_is_displayed_with_its_owner() {
+    let Some(nu) = nu() else { return };
+    let mut script = support::Script::default();
+    let source = "package m\n\ntype job struct{}\n\nfunc (job) run() int {\n\treturn 1\n}\n";
+    script.commit(
+        support::HEAD,
+        &[
+            ("go.mod", "module example.com/m\n".to_owned()),
+            ("job.go", source.to_owned()),
+        ],
+    );
+    let repo = support::Repo::new("skill-nu-go-diff", &script);
+    let fx = Fixture::empty(nu, "skill-nu-go-diff-data");
+    fx.index(&repo.root);
+    fs::write(
+        repo.root.join("job.go"),
+        source.replace("return 1", "return 2"),
+    )
+    .expect("edit");
+
+    let root = repo.root.to_str().expect("utf-8");
+    let (code, envelope) = fx.run_with(&Bin::OnPath, &repo.root, &["diff-impact", "--repo", root]);
+    assert_eq!(code, 0, "{envelope}");
+    let changed = &envelope["data"]["changed"];
+    assert_eq!(displays(changed), ["job.go::job.run"], "{envelope}");
+}
+
+/// Only the `where` display shape is rewritten: every other Go form, a
+/// near miss and a backslash reach the CLI as given, and a leading `-` is
+/// never read as part of a name before `--`.
+#[cfg(unix)]
+#[test]
+fn only_the_go_display_shape_is_rewritten() {
+    let Some(nu) = nu() else { return };
+    let fx = Fixture::empty(nu, "skill-nu-go-argv");
+    let (bin, log) = fake(&fx, FAKE_REPLY);
+
+    for refused in ["-x.go::F", "-pkg.Func"] {
+        fx.fails(&bin, &["callers", refused], "usage", 1);
+    }
+    assert!(argv(&log).is_empty(), "a usage error ran the CLI");
+
+    for (given, sent) in [
+        ("lib/lib.go:11 Svc.Boot", "lib/lib.go::Svc.Boot"),
+        ("job.go:5 job.run", "job.go::job.run"),
+        ("src/a.rs:1 App::new", "src/a.rs::App::new"),
+        ("pkg.Func", "pkg.Func"),
+        ("Type.Method", "Type.Method"),
+        (
+            "github.com/org/repo/pkg.Func",
+            "github.com/org/repo/pkg.Func",
+        ),
+        (
+            "gopkg.in/yaml.v3.Node.Decode",
+            "gopkg.in/yaml.v3.Node.Decode",
+        ),
+        ("dir/f.go::Type.Method", "dir/f.go::Type.Method"),
+        ("dir/f.go:42", "dir/f.go:42"),
+        ("job.go:5 job.run extra", "job.go:5 job.run extra"),
+        ("job.go:x job.run", "job.go:x job.run"),
+        ("src/a.rs:1 a.b", "src/a.rs:1 a.b"),
+        (r"lib\lib.go:11 Svc.Boot", r"lib\lib.go:11 Svc.Boot"),
+        (r"lib/lib.go:11 Svc\Boot", r"lib/lib.go:11 Svc\Boot"),
+    ] {
+        fs::write(&log, "").expect("clear log");
+        fx.ok_with(&bin, &["show", "--", given]);
+        assert_eq!(argv(&log), [format!("--json show -- {sent}")], "{given}");
+    }
+}

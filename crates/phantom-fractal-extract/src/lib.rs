@@ -17,7 +17,7 @@ mod rebuild;
 pub mod registry;
 mod walk;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
 
@@ -26,7 +26,7 @@ use phantom_fractal_lang::{Edge, Reason, ResolveCounts};
 use phantom_fractal_lang_rust::RustLanguage;
 use phantom_fractal_store::{IndexState, Store, StoreError, SymbolMatch, parse_path_line};
 
-use fingerprint::{Unread, read_manifests_with, stamp};
+use fingerprint::{Unread, read_manifests_with, stamp_with_extra};
 
 pub use diff::{ChangedSymbol, Diff, DiffError, FileOnly, diff, diff_with, symbol_keys};
 pub use fresh::{Freshness, probe, probe_with};
@@ -36,8 +36,8 @@ pub use rebuild::{
     stored_graph, stored_graph_with, stored_input, stored_links, stored_method_owners,
 };
 pub use registry::{
-    LanguageDriver, ManifestFile, PackageGraph, Registry, RustDriver, RustResolver,
-    SourceFileExtract, default_registry,
+    DriverFilter, GoDriver, LanguageDriver, ManifestFile, PackageGraph, Registry, RustDriver,
+    RustResolver, SourceFileExtract, default_registry,
 };
 pub use walk::{Candidate, MAX_FILE_BYTES, SkipReason, Skipped, Walk, is_secret, walk, walk_with};
 
@@ -255,33 +255,183 @@ pub fn index_with(
             skipped: walk.skipped.clone(),
             ..IndexReport::default()
         };
-        let kept = index_sources(&walk, store, registry, reextract, &mut report)?;
-        remove_stale_files(store, &kept, &mut report)?;
-        let unread = unread_sources(&report, registry);
         let manifests = read_manifests_with(&walk, registry)?;
-        let stamp = stamp(&manifests, &unread);
+        let prefilter = build_driver_filters(&walk, &manifests, registry)?;
+        report
+            .not_utf8
+            .extend(prefilter.filter_not_utf8.iter().cloned());
+        let kept = index_sources(&walk, store, registry, &prefilter, reextract, &mut report)?;
+        remove_stale_files(store, &kept, &mut report)?;
+        let owned_unread = driver_unread_owned(&prefilter, registry);
+        let mut unread = unread_sources(&report, registry);
+        unread.extend(owned_unread.iter().map(|(p, u)| (p.as_str(), *u)));
+        let stamp = stamp_with_extra(&manifests, &unread, &prefilter.excluded_hashes);
         let stale = store.workspace_fingerprint()? != Some(stamp.fingerprint);
         if reextract || !report.written.is_empty() || !report.removed.is_empty() || stale {
             report.graph = Some(rebuild::rebuild_with(
-                &manifests, &stamp, &kept, store, registry,
+                &manifests, &stamp, &kept, &prefilter, store, registry,
             )?);
         }
         Ok(report)
     })
 }
 
+pub(crate) struct PrefilterState {
+    pub(crate) filters: HashMap<String, Option<HashSet<String>>>,
+    pub(crate) build_excluded_count: u64,
+    pub(crate) build_excluded_terms: String,
+    pub(crate) excluded_hashes: Vec<(String, [u8; 32])>,
+    pub(crate) filter_not_utf8: Vec<String>,
+    pub(crate) prefilter_skipped: Vec<String>,
+    pub(crate) has_filtered_driver: bool,
+}
+
+impl PrefilterState {
+    /// True when `path` passes any source filter registered for `language_name`.
+    pub(crate) fn allows(&self, language_name: &str, path: &str) -> bool {
+        self.filters
+            .get(language_name)
+            .and_then(Option::as_ref)
+            .is_none_or(|allowed| allowed.contains(path))
+    }
+
+    /// True when `path` is claimed by a driver in `registry` and passes its source filter.
+    pub(crate) fn keeps_source(&self, registry: &Registry<'_>, path: &str) -> bool {
+        registry
+            .language_for(path)
+            .is_some_and(|driver| self.allows(driver.language().name(), path))
+    }
+}
+
+pub(crate) fn build_driver_filters(
+    walk: &Walk,
+    manifests: &[fingerprint::ManifestRead],
+    registry: &Registry<'_>,
+) -> Result<PrefilterState, IndexError> {
+    let mut state = PrefilterState {
+        filters: HashMap::new(),
+        build_excluded_count: 0,
+        build_excluded_terms: String::new(),
+        excluded_hashes: Vec::new(),
+        filter_not_utf8: Vec::new(),
+        prefilter_skipped: Vec::new(),
+        has_filtered_driver: false,
+    };
+    let manifest_files = rebuild::kept_manifest_files(manifests);
+    for driver in registry.drivers() {
+        if driver.needs_source_filter() {
+            apply_driver_filter(driver, &walk.files, &manifest_files, &mut state)?;
+        }
+    }
+    Ok(state)
+}
+
+fn apply_driver_filter(
+    driver: &dyn LanguageDriver,
+    files: &[Candidate],
+    manifest_files: &[ManifestFile],
+    state: &mut PrefilterState,
+) -> Result<(), IndexError> {
+    let exts = driver.language().extensions();
+    let candidates: Vec<&Candidate> = files
+        .iter()
+        .filter(|f| {
+            Path::new(&f.path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| exts.contains(&e))
+        })
+        .collect();
+    if candidates.is_empty() && !has_driver_manifest(manifest_files, driver) {
+        return Ok(());
+    }
+    let (filter_texts, not_utf8) = read_filter_texts(&candidates)?;
+    state.filter_not_utf8.extend(not_utf8);
+    let Some(res) = driver.filter_sources(manifest_files, &filter_texts) else {
+        return Ok(());
+    };
+    state.has_filtered_driver = true;
+    state.build_excluded_count += res.build_excluded_count;
+    append_terms(&mut state.build_excluded_terms, &res.build_excluded_terms);
+    state.excluded_hashes.extend(res.excluded_hashes);
+    state.prefilter_skipped.extend(res.prefilter_skipped);
+    state
+        .filters
+        .insert(driver.language().name().to_owned(), res.kept_paths);
+    Ok(())
+}
+
+fn append_terms(dst: &mut String, part: &str) {
+    if part.is_empty() {
+        return;
+    }
+    if !dst.is_empty() {
+        dst.push('\n');
+    }
+    dst.push_str(part);
+}
+
+fn has_driver_manifest(manifests: &[ManifestFile], driver: &dyn LanguageDriver) -> bool {
+    manifests.iter().any(|m| {
+        Path::new(&m.path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| driver.manifest_names().contains(&n))
+    })
+}
+
+type FilterTextPairs = (Vec<(String, String)>, Vec<String>);
+
+fn push_filter_source_bytes(
+    path: String,
+    bytes: Vec<u8>,
+    out: &mut Vec<(String, String)>,
+    not_utf8: &mut Vec<String>,
+) {
+    match String::from_utf8(bytes) {
+        Ok(text) => out.push((path, text)),
+        Err(_) => not_utf8.push(path),
+    }
+}
+
+fn read_filter_file(
+    file: &Candidate,
+    out: &mut Vec<(String, String)>,
+    not_utf8: &mut Vec<String>,
+) -> Result<(), IndexError> {
+    let Source::Bytes { bytes, .. } = read_source(&file.abs_path)? else {
+        return Ok(());
+    };
+    push_filter_source_bytes(file.path.clone(), bytes, out, not_utf8);
+    Ok(())
+}
+
+fn read_filter_texts(candidates: &[&Candidate]) -> Result<FilterTextPairs, IndexError> {
+    let mut out = Vec::with_capacity(candidates.len());
+    let mut not_utf8 = Vec::new();
+    for file in candidates {
+        read_filter_file(file, &mut out, &mut not_utf8)?;
+    }
+    Ok((out, not_utf8))
+}
+
 fn index_sources<'a>(
     walk: &'a Walk,
     store: &mut Store,
     registry: &Registry<'_>,
+    prefilter: &PrefilterState,
     reextract: bool,
     report: &mut IndexReport,
 ) -> Result<Vec<&'a Candidate>, IndexError> {
     let mut kept = Vec::new();
     for file in &walk.files {
-        if let Some(driver) = registry.language_for(&file.path) {
-            index_one_source(file, driver.language(), store, reextract, report, &mut kept)?;
+        let Some(driver) = registry.language_for(&file.path) else {
+            continue;
+        };
+        if !prefilter.allows(driver.language().name(), &file.path) {
+            continue;
         }
+        index_one_source(file, driver.language(), store, reextract, report, &mut kept)?;
     }
     Ok(kept)
 }
@@ -343,6 +493,24 @@ fn remove_stale_files(
     Ok(())
 }
 
+pub(crate) fn driver_unread_owned(
+    prefilter: &PrefilterState,
+    registry: &Registry<'_>,
+) -> Vec<(String, Unread)> {
+    let mut out = Vec::new();
+    for path in &prefilter.filter_not_utf8 {
+        if registry.is_supported(path) {
+            out.push((path.clone(), Unread::NotUtf8));
+        }
+    }
+    for path in &prefilter.prefilter_skipped {
+        if registry.is_supported(path) {
+            out.push((path.clone(), Unread::Skipped));
+        }
+    }
+    out
+}
+
 fn unread_sources<'a>(report: &'a IndexReport, registry: &Registry<'_>) -> Vec<(&'a str, Unread)> {
     report
         .skipped
@@ -395,10 +563,87 @@ impl phantom_fractal_lang::Language for DynLang<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use phantom_fractal_lang::{Language, ResolveInput, Resolver};
     use phantom_fractal_lang_rust::RustLanguage;
 
-    use super::{DynLang, RustResolver};
+    use super::{DynLang, PrefilterState, RustResolver, driver_unread_owned};
+    use crate::fingerprint::Unread;
+    use crate::registry::{GoDriver, Registry};
+
+    #[test]
+    fn read_filter_texts_splits_utf8_and_invalid_bytes() {
+        use std::fs;
+        use std::io::Write;
+
+        use crate::walk::Candidate;
+
+        let base = std::env::temp_dir().join(format!("phantom-filter-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).expect("tmpdir");
+        let good = base.join("ok.go");
+        fs::write(&good, b"package p\n").expect("write good");
+        let bad = base.join("bad.go");
+        let mut f = fs::File::create(&bad).expect("create bad");
+        f.write_all(b"package p\n\xff\nfunc X(){}\n")
+            .expect("write bad bytes");
+        let c_ok = Candidate {
+            path: "ok.go".to_owned(),
+            abs_path: good,
+            size: 9,
+        };
+        let c_bad = Candidate {
+            path: "bad.go".to_owned(),
+            abs_path: bad,
+            size: 20,
+        };
+        let refs = [&c_ok, &c_bad];
+        let (pairs, not_utf8) = super::read_filter_texts(&refs).expect("read");
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, "ok.go");
+        assert_eq!(not_utf8, vec!["bad.go".to_owned()]);
+        let _ = fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn driver_unread_owned_lists_prefiltered_go_paths() {
+        let registry = Registry::from_owned(vec![Box::new(GoDriver::new())]);
+        let prefilter = PrefilterState {
+            filters: HashMap::new(),
+            build_excluded_count: 0,
+            build_excluded_terms: String::new(),
+            excluded_hashes: Vec::new(),
+            filter_not_utf8: vec!["internal/zz.go".to_owned()],
+            prefilter_skipped: vec!["internal/typo.go".to_owned()],
+            has_filtered_driver: true,
+        };
+        let unread = driver_unread_owned(&prefilter, &registry);
+        assert_eq!(unread.len(), 2);
+        assert!(
+            unread
+                .iter()
+                .any(|(path, why)| path == "internal/zz.go" && matches!(why, Unread::NotUtf8))
+        );
+        assert!(
+            unread
+                .iter()
+                .any(|(path, why)| path == "internal/typo.go" && matches!(why, Unread::Skipped))
+        );
+    }
+
+    #[test]
+    fn append_terms_joins_non_empty_lines_only() {
+        let mut dst = String::new();
+        super::append_terms(&mut dst, "");
+        assert_eq!(dst, "");
+        super::append_terms(&mut dst, "mod_a\tid1");
+        assert_eq!(dst, "mod_a\tid1");
+        super::append_terms(&mut dst, "");
+        assert_eq!(dst, "mod_a\tid1");
+        super::append_terms(&mut dst, "mod_b\tid2");
+        assert_eq!(dst, "mod_a\tid1\nmod_b\tid2");
+    }
 
     #[test]
     fn dyn_lang_and_rust_resolver_forward_trait_methods() {

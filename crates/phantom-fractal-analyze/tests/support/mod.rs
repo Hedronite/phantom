@@ -16,6 +16,7 @@ pub struct Graph {
     pub value_refs: HashMap<String, i64>,
     pub build_excluded: Option<u64>,
     pub langs: HashMap<String, String>,
+    pub target_names: HashMap<i64, String>,
 }
 
 impl Graph {
@@ -30,6 +31,7 @@ impl Graph {
             value_refs: HashMap::new(),
             build_excluded: None,
             langs: HashMap::new(),
+            target_names: HashMap::new(),
         }
     }
 
@@ -122,6 +124,10 @@ impl ImpactSource for Graph {
 
     fn build_excluded_count(&self) -> Result<Option<u64>, StoreError> {
         Ok(self.build_excluded)
+    }
+
+    fn target_name(&self, id: i64) -> Result<Option<String>, StoreError> {
+        Ok(self.target_names.get(&id).cloned())
     }
 }
 

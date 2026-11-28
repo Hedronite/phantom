@@ -95,7 +95,13 @@ pub(crate) struct Stamp {
 ///    32-byte blake3 of its text, or `s` when skipped, or `u` when not UTF-8.
 /// 2. For each skipped `.rs` file, then each one that is not UTF-8, in the
 ///    order given: `r`, its path, a NUL byte, then `s` or `u`.
-pub(crate) fn stamp(manifests: &[ManifestRead], rust: &[(&str, Unread)]) -> Stamp {
+/// 3. For each excluded file hash, in walk order: `b`, its path, a NUL byte,
+///    then the 32-byte blake3 digest.
+pub(crate) fn stamp_with_extra(
+    manifests: &[ManifestRead],
+    rust: &[(&str, Unread)],
+    extra_excluded: &[(String, [u8; 32])],
+) -> Stamp {
     let mut hasher = blake3::Hasher::new();
     for manifest in manifests {
         record(&mut hasher, b'm', &manifest.path);
@@ -107,6 +113,10 @@ pub(crate) fn stamp(manifests: &[ManifestRead], rust: &[(&str, Unread)]) -> Stam
     for (path, unread) in rust {
         record(&mut hasher, b'r', path);
         hasher.update(&[unread.tag()]);
+    }
+    for (path, hash) in extra_excluded {
+        record(&mut hasher, b'b', path);
+        hasher.update(hash);
     }
     Stamp {
         fingerprint: *hasher.finalize().as_bytes(),
